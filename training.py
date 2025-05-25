@@ -14,9 +14,11 @@ from telegram.ext import (
     PollAnswerHandler
 )
 from datetime import date, timedelta, datetime, time
+import os
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 # ─── CONFIG ──────────────────────────────────────────────────────────────
-BOT_TOKEN = "8185202906:AAGgqlHycUkA26NC4fOvz_K7MA1ZVG6Owtw"
+# BOT_TOKEN = "8185202906:AAGgqlHycUkA26NC4fOvz_K7MA1ZVG6Owtw"
 ALLOWED_THREAD_ID = 4
 
 active_poll_id = None

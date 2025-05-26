@@ -139,8 +139,8 @@ async def handle_poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 # === Google Sheets Setup ===
 def get_gspread_sheet():
-    # creds_dict = json.loads(GOOGLE_CREDENTIALS_JSON)
-    creds_dict = GOOGLE_CREDENTIALS_JSON
+    creds_dict = json.loads(GOOGLE_CREDENTIALS_JSON)
+    # creds_dict = GOOGLE_CREDENTIALS_JSON
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
     client = gspread.authorize(creds)

@@ -181,7 +181,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # === THREAD MESSAGE RESTRICTIONS ===
     if msg.text and msg.text.startswith("/"):
-        return
+        await msg.delete()
     if thread_id is None and not user_is_admin:
         await msg.delete()
     elif thread_id == TOPIC_VOTING_ID and not user_is_admin:

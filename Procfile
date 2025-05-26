@@ -1,1 +1,1 @@
-worker: python training.py
+worker: python NTUCDConfig.py

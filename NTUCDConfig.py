@@ -180,6 +180,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
     # === THREAD MESSAGE RESTRICTIONS ===
+    # restrict all actios except for admin users
+    if not user_is_admin:
+        if thread_id in EXEMPTED_THREAD_IDS:
+            return
     if msg.text and msg.text.startswith("/"):
         await msg.delete()
     if thread_id is None and not user_is_admin:

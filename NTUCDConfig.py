@@ -362,16 +362,16 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # === /threadid ===
 async def thread_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        await update.message.delete()  # delete the command sent by user
-    except Exception as e:
-        print(f"[DEBUG] Failed to delete /threadid command: {e}")
     
     msg = update.effective_message
     if msg.is_topic_message:
         await msg.reply_text(f"\U0001F9F5 This topic's thread ID is: {msg.message_thread_id}", parse_mode="Markdown")
     else:
         await msg.reply_text("\u2757 This command must be used *inside a topic*.", parse_mode="Markdown")
+    # try:
+    #     await update.message.delete()  # delete the command sent by user
+    # except Exception as e:
+    #     print(f"[DEBUG] Failed to delete /threadid command: {e}")
 
 # === /remind command ===
 async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE):

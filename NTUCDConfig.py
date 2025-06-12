@@ -15,10 +15,27 @@ from datetime import date, timedelta, datetime, time
 import asyncio
 import threading
 from telegram.error import BadRequest
+from telegram.ext import ApplicationBuilder, Defaults
+import pytz
+
+sg_tz = pytz.timezone("Asia/Singapore")  # or any valid pytz timezone
 
 # === CONFIGURATION ===
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
+BOT_TOKEN = "7851183240:AAEngZdllGTFETKUEHP4FZnL8SMBAPjqPwo"
 GOOGLE_CREDENTIALS_JSON = os.environ.get("GOOGLE_CREDENTIALS_JSON")
+# {
+#   "type": "service_account",
+#   "project_id": "ntucd-tele-bot",
+#   "private_key_id": "67dcae7908a9e22f07d1ca035e251380097435ca",
+#   "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDXEVUfrs69Rd5+\nATOLjcMbvLVbD/FIIvQDMo8rjy7+a4ftd3SLXmpmbo2Ey3iBsheK9xBLIZdNpwLm\n9mGZHq19roppijPWffoC6FEgQjPb1GybIbRqiBwHaXb9jBQ1+Tvc6q0BagYLPW/+\nQ3NrsPWAXIOT+qLXCF8veHw1+1iW8jeBXTIMtLZlzKuwgRg7u1Q1FKsqCBChtLIE\nlZ9Vpcn98CQZHWfxa9UGrJFpC+SaaGZkfH0MF8xBhz9CnvTyQhDoXFDk7JlnfMU1\nl1t5NSLZqQm9XecJciNcTYU1Ng77ngSWkg09XVHxGFNiK7bOVAGUwogFgmEC/yZ7\nyL1LlXk5AgMBAAECggEAQCrONIVB7qvlfb/bArS5tVFg5LoFecnf9wJDQDJYyZUI\nubut3JU/dq9ebvQMUNnzd0VOqbPsgkEltwZkyTwjdD+60VFoNQNiMDLjXZYTBfBD\ntSdhvnU8s6NuWqjMMOxbRYcJNkZNZlYez4SNb+Cc5v7zTRf3NOQtDitLGAoVfPdc\nnJCt1N9jYRxWbX5w++qCfrJflyZ1rhoiWplOWdtOHJX1x/2aBZBMkcSfM6t1ZHgT\nM92y3pnulho42PZwOyuRZlQ64D9HN89Z/keMuP/roFhltYkEKuN6TMlLdnjY/Zje\nSBDbwzbs/JiervkNf6d/LndapIEp91t0Fqz5uTX51wKBgQD1HJmczkSUzjkcIVl1\nXxCiUYD9jTMzNck3kiPWZsHECW8oLSeOtKN31isIt2mwytIkEhbGln6wP3EOsfWe\nej538jw+Ua3esTnADJDQSqtHvbxKkF/j29subL1iBQTZA2p1adKCoMTu5NihI5dH\nhGac7LSGzjIju3HbEUBkfH/yKwKBgQDgnxK/MN8ceRhAJnAaLi3u4G4NwWkjJMq4\n1CgaJ9O3nL7NEKjYnQbClp3kaiQdxwtuymOv2AWdpcMsFBxe32Szut4u1c3f0iW/\nlg0Om6krxhJi6lEbQzkHvvaWfrw+rTeZjs6+bGgZlIgUcSHxbGLisJjSIar50I6k\n0KvVuf1kKwKBgBW37giN4lfJGhhbACE9Ri0LycEttL6x4l1xLom92ydyqo3Fyn6D\nlQR2TqPcFJpcrlgR3kDEbv9Q78SckiXzsPtR1HK1LBHSZEqXEnHSW/DkZ/23Yze+\ncGJhsjowNajA+7rhoIyAkFKWpndIvwvQOINpGenj9V9jKYh+s9Tzjya3AoGBAL3Q\n73CuBfzzwDCFyvn0yFAzTA1Hwmc2cjGa54Ci42EojnyQdX8Hw2yxByC9KWQYjmrD\nkVZKAQTlzXb0T71Enr7bTWLavq1D0y6ByOrtVBpvuZ3pUTzuo8UN9SfcVYvJqVCU\nw9VbmuTzBcPwjrSL2Uyj26DHXsrZGZHh3TQxhhYdAoGADWbIgmYJdZxxJlf4dmDe\nS0ti2Y73HlbOxWP5ftPIoKC3NUG3OqVlejP+/2CC+c8SSooydgiNPYME963meBRQ\niKmmNWrrjtDfRs0J1XeN3IbLd91cccS9CitD2xLq8TblO3NMQeB7Ur5HYcIoWeXR\nx7ggq9tnrkPJYZavHU8JNSo=\n-----END PRIVATE KEY-----\n",
+#   "client_email": "ntucdbot@ntucd-tele-bot.iam.gserviceaccount.com",
+#   "client_id": "117205909176394800921",
+#   "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+#   "token_uri": "https://oauth2.googleapis.com/token",
+#   "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+#   "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/ntucdbot%40ntucd-tele-bot.iam.gserviceaccount.com",
+#   "universe_domain": "googleapis.com"
+# }
 SHEET_NAME = "NTUCD AY25/26 Timeline"
 SHEET_TAB_NAME = "PERFORMANCE List"
 
@@ -31,9 +48,9 @@ SHEET_COLUMNS = ["THREAD ID", "DATE", "EVENT", "LOCATION", "PERFORMANCE INFO"]
 
 # Thread access configuration
 GENERAL_TOPIC_ID = None
-TOPIC_VOTING_ID = 4
-TOPIC_MEDIA_IDS = [25, 75]
-TOPIC_BLOCKED_ID = 5
+TOPIC_VOTING_ID = 177 #testing
+TOPIC_MEDIA_IDS = [6, 7]
+TOPIC_BLOCKED_ID = 8
 
 # Add exempt thread IDs here:
 EXEMPTED_THREAD_IDS = [GENERAL_TOPIC_ID, TOPIC_VOTING_ID, TOPIC_BLOCKED_ID, 11] + TOPIC_MEDIA_IDS
@@ -61,10 +78,11 @@ def get_next_tuesday(today=None):
 
 def get_next_monday_8pm(now=None):
     if now is None:
-        now = datetime.now()
-    days_until_monday = (7 - now.weekday()) % 7
+        now = datetime.now(sg_tz)
+    days_until_monday = 0
     next_monday = now + timedelta(days=days_until_monday)
-    this_monday_8pm = datetime.combine(next_monday, time(22, 0))
+    naive_dt = datetime.combine(next_monday, time(21, 29))
+    this_monday_8pm = sg_tz.localize(naive_dt)
     if now >= this_monday_8pm:
         return this_monday_8pm + timedelta(days=7)
     return this_monday_8pm
@@ -84,9 +102,10 @@ async def send_reminder(bot, chat_id, thread_id):
 # === POLL SEND ===
 async def send_poll_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     next_tuesday = get_next_tuesday()
-    now = datetime.now()
+    now = datetime.now(sg_tz)
     reminder_time = get_next_monday_8pm(now)
     delay_sec = (reminder_time - now).total_seconds()
+    print(delay_sec)
 
     global active_poll_id, ALLOWED_CHAT_ID
     chat_id = update.effective_chat.id
@@ -359,10 +378,10 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # === /threadid ===
 async def thread_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        await update.message.delete()  # delete the command sent by user
-    except Exception as e:
-        print(f"[DEBUG] Failed to delete /threadid command: {e}")
+    # try:
+        # await update.message.delete()  # delete the command sent by user
+    # except Exception as e:
+        # print(f"[DEBUG] Failed to delete /threadid command: {e}")
     
     msg = update.effective_message
     if msg.is_topic_message:
@@ -562,7 +581,7 @@ async def apply_modify_value(update: Update, context: ContextTypes.DEFAULT_TYPE)
 def main():
     print("Bot starting...")
     app = ApplicationBuilder().token(BOT_TOKEN).build()
-    
+        
     conv_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(topic_type_selection, pattern="^topic_type\\|")],
         states={

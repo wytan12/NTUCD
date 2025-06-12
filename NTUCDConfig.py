@@ -185,9 +185,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # restrict all actions except for admin users
     if not user_is_admin:
         if msg.text and msg.text.startswith("/"):
+            print(f"[DEBUG] User {update.effective_user.id} tried to send command in exempted thread {thread_id}. Deleting message.")
             return
-
-        if thread_id is None:
+        if thread_id is None: # AboutNTUCD
             await msg.delete()
         elif thread_id == TOPIC_VOTING_ID:
             if msg.poll or not (msg.reply_to_message and msg.reply_to_message.poll):

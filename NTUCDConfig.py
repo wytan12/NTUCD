@@ -223,6 +223,8 @@ async def block_user_commands(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     if not user_is_admin:
         await msg.delete()
+    else:
+        # Allow admin commands to pass through
         return 
 
 # === Handle PERF/EVENT/OTHERS selection ===

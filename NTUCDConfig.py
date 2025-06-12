@@ -34,9 +34,9 @@ SHEET_COLUMNS = ["THREAD ID", "DATE", "EVENT", "LOCATION", "PERFORMANCE INFO"]
 GENERAL_TOPIC_ID = None
 TOPIC_VOTING_ID = 4
 TOPIC_MEDIA_IDS = [25, 75]
-TOPIC_BLOCKED_ID = 5
+TOPIC_BLOCKED_ID = 5 # score
 
-# Add exempt thread IDs here:
+# Add exempt thread IDs here: # threadid 11 is for chat
 EXEMPTED_THREAD_IDS = [GENERAL_TOPIC_ID, TOPIC_VOTING_ID, TOPIC_BLOCKED_ID, 11] + TOPIC_MEDIA_IDS
 
 # Track topic initialization
@@ -187,6 +187,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if thread_id in EXEMPTED_THREAD_IDS:
             return
         elif msg.text and msg.text.startswith("/"):
+            await msg.delete()
             return
             #await msg.delete()
     if thread_id is None and not user_is_admin:
@@ -368,10 +369,10 @@ async def thread_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text(f"\U0001F9F5 This topic's thread ID is: {msg.message_thread_id}", parse_mode="Markdown")
     else:
         await msg.reply_text("\u2757 This command must be used *inside a topic*.", parse_mode="Markdown")
-    # try:
-    #     await update.message.delete()  # delete the command sent by user
-    # except Exception as e:
-    #     print(f"[DEBUG] Failed to delete /threadid command: {e}")
+    try:
+        await update.message.delete()  # delete the command sent by user
+    except Exception as e:
+        print(f"[DEBUG] Failed to delete /threadid command: {e}")
 
 # === /remind command ===
 async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -413,7 +414,6 @@ async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown",
         message_thread_id=thread_id
     )
-
     
 # Start modify process
 async def start_modify(update: Update, context: ContextTypes.DEFAULT_TYPE):

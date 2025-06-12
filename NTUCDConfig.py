@@ -184,22 +184,36 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # === THREAD MESSAGE RESTRICTIONS ===
     # restrict all actions except for admin users
     if not user_is_admin:
-        if thread_id in EXEMPTED_THREAD_IDS:
+        if msg.text and msg.text.startswith("/"):
             return
-        elif msg.text and msg.text.startswith("/"):
+
+        if thread_id is None:
             await msg.delete()
-            return
-            #await msg.delete()
-    if thread_id is None and not user_is_admin:
-        await msg.delete()
-    elif thread_id == TOPIC_VOTING_ID and not user_is_admin:
-        if msg.poll or not (msg.reply_to_message and msg.reply_to_message.poll):
+        elif thread_id == TOPIC_VOTING_ID:
+            if msg.poll or not (msg.reply_to_message and msg.reply_to_message.poll):
+                await msg.delete()
+        elif thread_id in TOPIC_MEDIA_IDS:
+            if not (msg.photo or msg.video or (msg.document and msg.document.mime_type.startswith(("image/", "video/")))):
+                await msg.delete()
+        elif thread_id == TOPIC_BLOCKED_ID:
             await msg.delete()
-    elif thread_id in TOPIC_MEDIA_IDS and not user_is_admin:
-        if not (msg.photo or msg.video or (msg.document and msg.document.mime_type.startswith(("image/", "video/")))):
-            await msg.delete()
-    elif thread_id == TOPIC_BLOCKED_ID and not user_is_admin:
-        await msg.delete()
+    # if not user_is_admin:
+    #     if thread_id in EXEMPTED_THREAD_IDS:
+    #         return
+    #     elif msg.text and msg.text.startswith("/"):
+    #         await msg.delete()
+    #         return
+    #         #await msg.delete()
+    # if thread_id is None and not user_is_admin:
+    #     await msg.delete()
+    # elif thread_id == TOPIC_VOTING_ID and not user_is_admin:
+    #     if msg.poll or not (msg.reply_to_message and msg.reply_to_message.poll):
+    #         await msg.delete()
+    # elif thread_id in TOPIC_MEDIA_IDS and not user_is_admin:
+    #     if not (msg.photo or msg.video or (msg.document and msg.document.mime_type.startswith(("image/", "video/")))):
+    #         await msg.delete()
+    # elif thread_id == TOPIC_BLOCKED_ID and not user_is_admin:
+    #     await msg.delete()
 
 # === Handle PERF/EVENT/OTHERS selection ===
 async def topic_type_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):

@@ -186,7 +186,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user_is_admin:
         if msg.text.startswith("/"):
             print(f"[DEBUG] User {update.effective_user.id} tried to send command in exempted thread {thread_id}. Deleting message.")
-            return
+            await msg.delete()
         if thread_id is None: # AboutNTUCD
             await msg.delete()
         elif thread_id == TOPIC_VOTING_ID:
@@ -196,6 +196,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not (msg.photo or msg.video or (msg.document and msg.document.mime_type.startswith(("image/", "video/")))):
                 await msg.delete()
         elif thread_id == TOPIC_BLOCKED_ID:
+            print(f"[DEBUG] User {update.effective_user.id} tried to send message in blocked thread {thread_id}. Deleting message.")
             await msg.delete()
     # if not user_is_admin:
     #     if thread_id in EXEMPTED_THREAD_IDS:
@@ -214,6 +215,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     #         await msg.delete()
     # elif thread_id == TOPIC_BLOCKED_ID and not user_is_admin:
     #     await msg.delete()
+    
+# === Block user commands ===
+async def block_user_commands(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_is_admin = await is_admin(update, context)
+    msg = update.effective_message
+
+    if not user_is_admin:
+        await msg.delete()
+        return 
 
 # === Handle PERF/EVENT/OTHERS selection ===
 async def topic_type_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -599,6 +609,10 @@ def main():
         allow_reentry=True
     )
 
+    app.add_handler(
+        MessageHandler(filters.TEXT & filters.Regex(r"^/"), block_user_commands),
+        group=0  # higher priority
+    )
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("threadid", thread_id_command))
     app.add_handler(CommandHandler("remind", remind_command))  

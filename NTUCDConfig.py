@@ -1,5 +1,3 @@
-
-
 import csv
 import json
 import gspread
@@ -15,6 +13,9 @@ from datetime import date, timedelta, datetime, time
 import asyncio
 import threading
 from telegram.error import BadRequest
+import pytz
+
+sg_tz = pytz.timezone("Asia/Singapore") 
 
 # === CONFIGURATION ===
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
@@ -61,10 +62,11 @@ def get_next_tuesday(today=None):
 
 def get_next_monday_8pm(now=None):
     if now is None:
-        now = datetime.now()
+        now = datetime.now(sg_tz)
     days_until_monday = (7 - now.weekday()) % 7
     next_monday = now + timedelta(days=days_until_monday)
-    this_monday_8pm = datetime.combine(next_monday, time(22, 0))
+    naive_dt = datetime.combine(next_monday, time(22, 0))
+    this_monday_8pm = sg_tz.localize(naive_dt)
     if now >= this_monday_8pm:
         return this_monday_8pm + timedelta(days=7)
     return this_monday_8pm
@@ -84,7 +86,7 @@ async def send_reminder(bot, chat_id, thread_id):
 # === POLL SEND ===
 async def send_poll_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     next_tuesday = get_next_tuesday()
-    now = datetime.now()
+    now = datetime.now(sg_tz)
     reminder_time = get_next_monday_8pm(now)
     delay_sec = (reminder_time - now).total_seconds()
 
@@ -180,12 +182,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
     # === THREAD MESSAGE RESTRICTIONS ===
-    # restrict all actios except for admin users
+    # restrict all actions except for admin users
     if not user_is_admin:
         if thread_id in EXEMPTED_THREAD_IDS:
             return
-    if msg.text and msg.text.startswith("/"):
-        await msg.delete()
+        elif msg.text and msg.text.startswith("/"):
+            return
+            #await msg.delete()
     if thread_id is None and not user_is_admin:
         await msg.delete()
     elif thread_id == TOPIC_VOTING_ID and not user_is_admin:

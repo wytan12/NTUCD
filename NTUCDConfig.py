@@ -288,9 +288,18 @@ async def topic_type_selection(update: Update, context: ContextTypes.DEFAULT_TYP
     return ConversationHandler.END
 
 # === Conversation steps ===
+def is_valid_date(date_str):
+    try:
+        datetime.strptime(date_str, "%d %b %Y")
+        return True
+    except ValueError:
+        return False
+
+# === Conversation steps ===
 async def parse_perf_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    
     await update.message.delete()
+    sheet = get_gspread_sheet()
+
     try:
         if "perf_input" in pending_questions:
             await context.bot.delete_message(
@@ -310,39 +319,72 @@ async def parse_perf_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         print(f"[WARNING] Failed to delete previous error message: {e}")
 
-    raw_text = update.message.text.strip()
-    parts = [p.strip() for p in raw_text.split("//")]
-
-    if len(parts) < 3:
-        # Invalid: show error, stay in same state
-        error_msg = await update.effective_chat.send_message(
-            "\u274C Invalid format. Please use:\n*Event // Date // Location // Info (optional)*",
-            parse_mode="Markdown",
-            message_thread_id=context.user_data.get("thread_id")
-        )
-        context.chat_data["last_error"] = error_msg.message_id
-        
-        return DATE  # <-- Stay in the same state!
-
-    # Cleanup old error if any
-    if "last_error" in context.chat_data:
-        try:
-            await context.bot.delete_message(
-                chat_id=update.effective_chat.id,
-                message_id=context.chat_data.pop("last_error")
+    # === Case 1: Retrying Date Only ===
+    if "perf_temp" in context.user_data:
+        date = update.message.text.strip()
+        if not is_valid_date(date):
+            error_msg = await update.effective_chat.send_message(
+                "❌ Invalid *date* format. Use:\n`DD MMM YYYY` (e.g. `23 JUN 2025`)",
+                parse_mode="Markdown",
+                message_thread_id=context.user_data["perf_temp"]["thread_id"]
             )
-        except:
-            pass
-        
-    event = parts[0]
-    date = parts[1]
-    location = parts[2]
-    info = parts[3] if len(parts) >= 4 else ""
-    thread_id = context.user_data.get("thread_id")
+            context.chat_data["last_error"] = error_msg.message_id
+            return DATE
 
-    sheet = get_gspread_sheet()
-    sheet.append_row([thread_id, event, date, location, info])
-    
+        # Restore previous info
+        temp = context.user_data.pop("perf_temp")
+        event = temp["event"]
+        location = temp["location"]
+        info = temp["info"]
+        thread_id = temp["thread_id"]
+
+        # Update sheet
+        all_rows = sheet.get_all_values()
+        for idx, row in enumerate(all_rows, start=1):
+            if row and str(row[0]) == str(thread_id):
+                sheet.update(values=[[event, date, location, info]], range_name=f"B{idx}:E{idx}")
+                break
+
+    # === Case 2: Full Input ===
+    else:
+        raw_text = update.message.text.strip()
+        parts = [p.strip() for p in raw_text.split("//")]
+
+        if len(parts) < 3:
+            error_msg = await update.effective_chat.send_message(
+                "❌ Invalid format. Use:\n*Event // Date // Location // Info (optional)*",
+                parse_mode="Markdown",
+                message_thread_id=context.user_data.get("thread_id")
+            )
+            context.chat_data["last_error"] = error_msg.message_id
+            return DATE
+
+        event, date, location = parts[0], parts[1], parts[2]
+        info = parts[3] if len(parts) >= 4 else ""
+        thread_id = context.user_data.get("thread_id")
+
+        if not is_valid_date(date):
+            sheet.append_row([thread_id, event, date, location, info])
+            print(f"[DEBUG] Temporarily saved invalid date row for thread {thread_id}")
+
+            context.user_data["perf_temp"] = {
+                "event": event,
+                "location": location,
+                "info": info,
+                "thread_id": thread_id
+            }
+ 
+            error_msg = await update.effective_chat.send_message(
+                "❌ Invalid *date* format. Use:\n`DD MMM YYYY` (e.g. `23 JUN 2025`)",
+                parse_mode="Markdown",
+                message_thread_id=thread_id
+            )
+            context.chat_data["last_error"] = error_msg.message_id
+            return DATE
+
+        sheet.append_row([thread_id, event, date, location, info])
+
+    # ✅ Send performance summary and interest poll
     template = (
         f"\U0001F4E2 *Performance Summary*\n\n"
         f"\U0001F4CD *Event:* {event}\n"
@@ -351,28 +393,13 @@ async def parse_perf_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"\n{info.strip()}"
     )
     msg = await update.effective_chat.send_message(template, parse_mode="Markdown", message_thread_id=thread_id)
-    # Store summary message ID
+    await context.bot.pin_chat_message(chat_id=update.effective_chat.id, message_id=msg.message_id, disable_notification=True)
     context.chat_data[f"summary_msg_{thread_id}"] = msg.message_id
 
-    # Pin summary
-    await context.bot.pin_chat_message(chat_id=update.effective_chat.id, message_id=msg.message_id, disable_notification=True)
+    await send_interest_poll(context.bot, update.effective_chat.id, thread_id)
+    # context.chat_data[f"interest_poll_msg_{thread_id}"] = poll_id
 
-    # Send and store interest poll
-    poll_msg = await context.bot.send_poll(
-        chat_id=update.effective_chat.id,
-        message_thread_id=thread_id,
-        question="Are you interested in this performance?",
-        options=["Yes", "No"],
-        is_anonymous=False
-    )
-    context.chat_data[f"interest_poll_msg_{thread_id}"] = poll_msg.message_id
-    # await context.bot.pin_chat_message(chat_id=update.effective_chat.id, message_id=msg.message_id, disable_notification=True)
-    # await send_interest_poll(context.bot, update.effective_chat.id, thread_id)
     return ConversationHandler.END
-
-# async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-#     await update.message.delete()
-#     return ConversationHandler.END
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print("[DEBUG] Cancel triggered")

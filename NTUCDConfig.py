@@ -268,7 +268,7 @@ async def topic_type_selection(update: Update, context: ContextTypes.DEFAULT_TYP
     context.user_data["thread_id"] = thread_id
     context.user_data["topic_type"] = selection
 
-    if selection in ["PERF", "EVENT"]:
+    if selection == "PERF":
         prompt = await query.message.chat.send_message(
             "\U0001F4DD Please enter: *Event // Date // Location // Info (If any)*",
             parse_mode="Markdown", message_thread_id=thread_id
@@ -364,7 +364,11 @@ async def parse_perf_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         thread_id = context.user_data.get("thread_id")
 
         if not is_valid_date(date):
-            sheet.append_row([thread_id, event, date, location, info])
+            try:
+                sheet.append_row([thread_id, event, date, location, info])
+                print("[DEBUG] Row appended successfully")
+            except Exception as e:
+                print(f"[ERROR] Failed to append row: {e}")
             print(f"[DEBUG] Temporarily saved invalid date row for thread {thread_id}")
 
             context.user_data["perf_temp"] = {
@@ -382,7 +386,11 @@ async def parse_perf_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.chat_data["last_error"] = error_msg.message_id
             return DATE
 
-        sheet.append_row([thread_id, event, date, location, info])
+        try:
+            sheet.append_row([thread_id, event, date, location, info])
+            print("[DEBUG] Row appended successfully")
+        except Exception as e:
+            print(f"[ERROR] Failed to append row: {e}")
 
     # ✅ Send performance summary and interest poll
     template = (
@@ -395,7 +403,7 @@ async def parse_perf_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.effective_chat.send_message(template, parse_mode="Markdown", message_thread_id=thread_id)
     await context.bot.pin_chat_message(chat_id=update.effective_chat.id, message_id=msg.message_id, disable_notification=True)
     context.chat_data[f"summary_msg_{thread_id}"] = msg.message_id
-
+    # Send interest poll (single/multi-choice)
     await send_interest_poll(context.bot, update.effective_chat.id, thread_id)
     # context.chat_data[f"interest_poll_msg_{thread_id}"] = poll_id
 

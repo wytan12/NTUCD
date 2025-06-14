@@ -216,17 +216,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # elif thread_id == TOPIC_BLOCKED_ID and not user_is_admin:
     #     await msg.delete()
     
-# === Block user commands ===
-async def block_user_commands(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_is_admin = await is_admin(update, context)
-    msg = update.effective_message
-
-    if not user_is_admin:
-        await msg.delete()
-    else:
-        # Allow admin commands to pass through
-        return 
-
 # === Handle PERF/EVENT/OTHERS selection ===
 async def topic_type_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -597,7 +586,8 @@ def main():
         states={
             DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, parse_perf_input)],
         },
-        fallbacks=[]  # 🔧 This is required
+        fallbacks=[],  # 🔧 This is required
+        per_message=True,  # 🔧 This is required to allow re-entry
     )
     
     # Add the new ConversationHandler
@@ -608,13 +598,10 @@ def main():
             MODIFY_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, apply_modify_value)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
-        allow_reentry=True
+        allow_reentry=True,
+        per_message=True  # ✅ Add this too
     )
 
-    app.add_handler(
-        MessageHandler(filters.TEXT & filters.Regex(r"^/"), block_user_commands),
-        group=0  # higher priority
-    )
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("threadid", thread_id_command))
     app.add_handler(CommandHandler("remind", remind_command))  

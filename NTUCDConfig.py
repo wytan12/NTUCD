@@ -233,7 +233,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     #         await msg.delete()
     # elif thread_id == TOPIC_BLOCKED_ID and not user_is_admin:
     #     await msg.delete()
-    
+
+async def send_interest_poll(bot, chat_id, thread_id):
+    try:
+        msg = await bot.send_poll(
+            chat_id=chat_id,
+            message_thread_id=thread_id,
+            question="Are you interested in this performance?",
+            options=["Yes", "No"],
+            is_anonymous=False
+        )
+        print(f"[DEBUG] Sent interest poll in thread {thread_id}")
+        return msg.poll.id  # Return poll ID if needed
+    except Exception as e:
+        print(f"[ERROR] Failed to send interest poll: {e}")
+        return None
+
 # === Handle PERF/EVENT/OTHERS selection ===
 async def topic_type_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -251,8 +266,9 @@ async def topic_type_selection(update: Update, context: ContextTypes.DEFAULT_TYP
             print(f"[DELETE ERROR] {e}")
 
     context.user_data["thread_id"] = thread_id
+    context.user_data["topic_type"] = selection
 
-    if selection == "PERF":
+    if selection in ["PERF", "EVENT"]:
         prompt = await query.message.chat.send_message(
             "\U0001F4DD Please enter: *Event // Date // Location // Info (If any)*",
             parse_mode="Markdown", message_thread_id=thread_id
@@ -335,7 +351,23 @@ async def parse_perf_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"\n{info.strip()}"
     )
     msg = await update.effective_chat.send_message(template, parse_mode="Markdown", message_thread_id=thread_id)
+    # Store summary message ID
+    context.chat_data[f"summary_msg_{thread_id}"] = msg.message_id
+
+    # Pin summary
     await context.bot.pin_chat_message(chat_id=update.effective_chat.id, message_id=msg.message_id, disable_notification=True)
+
+    # Send and store interest poll
+    poll_msg = await context.bot.send_poll(
+        chat_id=update.effective_chat.id,
+        message_thread_id=thread_id,
+        question="Are you interested in this performance?",
+        options=["Yes", "No"],
+        is_anonymous=False
+    )
+    context.chat_data[f"interest_poll_msg_{thread_id}"] = poll_msg.message_id
+    # await context.bot.pin_chat_message(chat_id=update.effective_chat.id, message_id=msg.message_id, disable_notification=True)
+    # await send_interest_poll(context.bot, update.effective_chat.id, thread_id)
     return ConversationHandler.END
 
 # async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):

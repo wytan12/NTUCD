@@ -29,7 +29,7 @@ DATE, EVENT, LOCATION = range(3)
 MODIFY_FIELD, MODIFY_VALUE = range(3, 5) 
 
 # Add column names used in your Google Sheet
-SHEET_COLUMNS = ["THREAD ID", "DATE", "EVENT", "LOCATION", "PERFORMANCE INFO"]
+SHEET_COLUMNS = ["THREAD ID", "EVENT", "DATE", "LOCATION", "PERFORMANCE INFO"]
 
 # Thread access configuration
 GENERAL_TOPIC_ID = None
@@ -159,7 +159,7 @@ async def handle_poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 # === Google Sheets Setup ===
 def get_gspread_sheet():
-    creds_dict = json.loads(GOOGLE_CREDENTIALS_JSON)
+    creds_dict = GOOGLE_CREDENTIALS_JSON
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
     client = gspread.authorize(creds)
@@ -242,47 +242,25 @@ async def topic_type_selection(update: Update, context: ContextTypes.DEFAULT_TYP
     _, selection, thread_id = query.data.split("|")
     thread_id = int(thread_id)
 
-    # Delete init prompt
+    # Delete the initial prompt if it exists
     prompt_id = context.chat_data.pop(f"init_prompt_{thread_id}", None)
     if prompt_id:
         try:
             await context.bot.delete_message(chat_id=query.message.chat.id, message_id=prompt_id)
-        except:
-            pass
+        except Exception as e:
+            print(f"[DELETE ERROR] {e}")
+
+    context.user_data["thread_id"] = thread_id
 
     if selection == "PERF":
-        context.user_data["thread_id"] = thread_id
         prompt = await query.message.chat.send_message(
-            "\U0001F4DD Please fill up the info in order: *Event // Date // Location // Info (If any)*",
+            "\U0001F4DD Please enter: *Event // Date // Location // Info (If any)*",
             parse_mode="Markdown", message_thread_id=thread_id
         )
         pending_questions["perf_input"] = prompt.message_id
-        
-        return DATE  # reuse DATE as single-input state
+        return DATE
 
-    await query.message.edit_text(f"Topic marked as {selection}. No further action.")
-    
-    
-    return ConversationHandler.END
-
-# === Single-input PERF parser ===
-async def topic_type_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    _, selection, thread_id = query.data.split("|")
-    thread_id = int(thread_id)
-
-    # Delete init prompt
-    prompt_id = context.chat_data.pop(f"init_prompt_{thread_id}", None)
-    if prompt_id:
-        try:
-            await context.bot.delete_message(chat_id=query.message.chat.id, message_id=prompt_id)
-        except:
-            pass
-
-    if selection == "PERF":
-        context.user_data["thread_id"] = thread_id
+    elif selection == "DATE_ONLY":
         prompt = await query.message.chat.send_message(
             "\U0001F4C5 Please enter the *Performance Date* (e.g. 12 MAR 2025):",
             parse_mode="Markdown", message_thread_id=thread_id
@@ -347,7 +325,7 @@ async def parse_perf_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     thread_id = context.user_data.get("thread_id")
 
     sheet = get_gspread_sheet()
-    sheet.append_row([thread_id, date, event, location, info])
+    sheet.append_row([thread_id, event, date, location, info])
     
     template = (
         f"\U0001F4E2 *Performance Summary*\n\n"
@@ -475,8 +453,8 @@ async def start_modify(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data["modify_thread_id"] = thread_id
     keyboard = [
-        [InlineKeyboardButton("📅 Date", callback_data="MODIFY|DATE")],
         [InlineKeyboardButton("📍 Event", callback_data="MODIFY|EVENT")],
+        [InlineKeyboardButton("📅 Date", callback_data="MODIFY|DATE")],
         [InlineKeyboardButton("📌 Location", callback_data="MODIFY|LOCATION")],
         [InlineKeyboardButton("📝 Performance Info", callback_data="MODIFY|PERFORMANCE INFO")],
         [InlineKeyboardButton("❌ Cancel", callback_data="MODIFY|CANCEL")]
@@ -570,8 +548,8 @@ async def apply_modify_value(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 updated_row = sheet.row_values(row_number)
                 template = (
                     f"\U0001F4E2 *Performance Summary*\n\n"
-                    f"\U0001F4CD *Event:* {updated_row[2]}\n"
-                    f"\U0001F4C5 *Date:* {updated_row[1]}\n"
+                    f"\U0001F4CD *Event:* {updated_row[1]}\n"
+                    f"\U0001F4C5 *Date:* {updated_row[2]}\n"
                     f"\U0001F4CC *Location:* {updated_row[3]}\n\n"
                     f"\n{updated_row[4]}"
                 )
@@ -607,7 +585,6 @@ def main():
             DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, parse_perf_input)],
         },
         fallbacks=[],  # 🔧 This is required
-        per_message=True,  # 🔧 This is required to allow re-entry
     )
     
     # Add the new ConversationHandler
@@ -619,7 +596,6 @@ def main():
         },
         fallbacks=[CommandHandler("cancel", cancel)],
         allow_reentry=True,
-        per_message=True  # ✅ Add this too
     )
 
     app.add_handler(CommandHandler("start", start))

@@ -14,6 +14,7 @@ import asyncio
 import threading
 from telegram.error import BadRequest
 import pytz
+from functools import wraps
 
 sg_tz = pytz.timezone("Asia/Singapore") 
 
@@ -44,8 +45,24 @@ initialized_topics = set()
 pending_questions = {}
 yes_voters = set()
 
+def admin_only(func):
+    @wraps(func)
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
+        if not await is_admin(update, context):
+            try:
+                await context.bot.delete_message(
+                    chat_id=update.effective_chat.id,
+                    message_id=update.message.message_id
+                )
+            except Exception as e:
+                print(f"[DELETE ERROR] {e}")
+            return
+        return await func(update, context, *args, **kwargs)
+    return wrapper
+
 # === START ===
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+@admin_only
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):    
     chat = update.effective_chat
     thread_id = getattr(update.effective_message, "message_thread_id", "N/A")
     await update.message.reply_text("👋 Hi!")
@@ -72,6 +89,7 @@ def get_next_monday_8pm(now=None):
     return this_monday_8pm
 
 # === REMINDER ===
+@admin_only
 async def send_reminder(bot, chat_id, thread_id):
     next_tuesday = get_next_tuesday()
     try:
@@ -84,6 +102,7 @@ async def send_reminder(bot, chat_id, thread_id):
         print(f"[ERROR] Failed to send reminder: {e}")
         
 # === POLL SEND ===
+@admin_only
 async def send_poll_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     next_tuesday = get_next_tuesday()
     now = datetime.now(sg_tz)
@@ -217,34 +236,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     #     await msg.delete()
     
 # === Handle PERF/EVENT/OTHERS selection ===
-async def topic_type_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    _, selection, thread_id = query.data.split("|")
-    thread_id = int(thread_id)
-
-    # Delete init prompt
-    prompt_id = context.chat_data.pop(f"init_prompt_{thread_id}", None)
-    if prompt_id:
-        try:
-            await context.bot.delete_message(chat_id=query.message.chat.id, message_id=prompt_id)
-        except:
-            pass
-
-    if selection == "PERF":
-        context.user_data["thread_id"] = thread_id
-        prompt = await query.message.chat.send_message(
-            "\U0001F4C5 Please enter the *Performance Date* (e.g. 12 MAR 2025):",
-            parse_mode="Markdown", message_thread_id=thread_id
-        )
-        pending_questions["date"] = prompt.message_id
-        return DATE
-
-    await query.message.edit_text(f"Topic marked as {selection}. No further action.")
-    return ConversationHandler.END
-
-# === Conversation steps ===
+@admin_only
 async def topic_type_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -276,6 +268,7 @@ async def topic_type_selection(update: Update, context: ContextTypes.DEFAULT_TYP
     return ConversationHandler.END
 
 # === Single-input PERF parser ===
+@admin_only
 async def parse_perf_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.delete()
@@ -345,7 +338,7 @@ async def parse_perf_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 #     await update.message.delete()
 #     return ConversationHandler.END
-
+@admin_only
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print("[DEBUG] Cancel triggered")
     chat = update.effective_chat
@@ -377,6 +370,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 # === /threadid ===
+@admin_only
 async def thread_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     msg = update.effective_message
@@ -390,6 +384,7 @@ async def thread_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         print(f"[DEBUG] Failed to delete /threadid command: {e}")
 
 # === /remind command ===
+@admin_only
 async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     msg = update.effective_message
@@ -431,6 +426,7 @@ async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     
 # Start modify process
+@admin_only
 async def start_modify(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # try:
     #     await update.message.delete()  # delete the command sent by user

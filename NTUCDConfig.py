@@ -349,8 +349,9 @@ async def parse_perf_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         raw_text = update.message.text.strip()
         parts = [p.strip() for p in raw_text.split("//")]
+        print(f"[DEBUG] Parsed parts: {len(parts)} - {parts}")
 
-        if len(parts) < 4:
+        if len(parts) < 3 or any(not p for p in parts[:3]):
             error_msg = await update.effective_chat.send_message(
                 "❌ Invalid format. Use:\n*Event // Date // Location // Info (optional)*",
                 parse_mode="Markdown",

@@ -43,7 +43,11 @@ EXEMPTED_THREAD_IDS = [GENERAL_TOPIC_ID, TOPIC_VOTING_ID, TOPIC_BLOCKED_ID, 11] 
 # Track topic initialization
 initialized_topics = set()
 pending_questions = {}
+# Track all active polls: poll_id -> type
+active_polls = {}  # Example: {"123456789": "training", "987654321": "interest"}
+# For each type of poll, track answers if needed
 yes_voters = set()
+interest_votes = {}  # poll_id -> {user_id: [option_indices]}
 
 def admin_only(func):
     @wraps(func)
@@ -108,7 +112,7 @@ async def send_poll_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reminder_time = get_next_monday_8pm(now)
     delay_sec = (reminder_time - now).total_seconds()
 
-    global active_poll_id, ALLOWED_CHAT_ID
+    global yes_voters
     chat_id = update.effective_chat.id
     thread_id = getattr(update.effective_message, "message_thread_id", None)
 
@@ -131,35 +135,56 @@ async def send_poll_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except:
         pass
 
-    if thread_id == TOPIC_VOTING_ID:
-        msg = await context.bot.send_poll(
-            chat_id=chat_id,
-            question=f"Are you joining the training on {next_tuesday.strftime('%B %d, %Y')}?",
-            options=["Yes", "No"],
-            is_anonymous=False,
-            message_thread_id=thread_id
-        )
-        active_poll_id = msg.poll.id
-        ALLOWED_CHAT_ID = chat_id
-        threading.Timer(delay_sec, lambda: asyncio.run(send_reminder(context.bot, chat_id, thread_id))).start()
+    msg = await context.bot.send_poll(
+        chat_id=chat_id,
+        question=f"Are you joining the training on {next_tuesday.strftime('%B %d, %Y')}?",
+        options=["Yes", "No"],
+        is_anonymous=False,
+        message_thread_id=thread_id
+    )
+
+    # ✅ Register the poll type
+    active_polls[msg.poll.id] = "training"
+    yes_voters.clear()  # reset voters for the new training poll
+
+    # Schedule reminder
+    threading.Timer(delay_sec, lambda: asyncio.run(send_reminder(context.bot, chat_id, thread_id))).start()
 
 # === POLL ANSWER ===
+# async def handle_poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+#     global active_poll_id, yes_voters
+#     poll_id = update.poll_answer.poll_id
+#     user = update.poll_answer.user
+#     selected_options = update.poll_answer.option_ids
+
+#     if poll_id != active_poll_id:
+#         return
+
+#     if 0 in selected_options and user.id not in yes_voters:
+#         yes_voters.add(user.id)
+#         print(f"[DEBUG] {user.full_name} voted YES")
+
 async def handle_poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global active_poll_id, yes_voters
     poll_id = update.poll_answer.poll_id
     user = update.poll_answer.user
     selected_options = update.poll_answer.option_ids
 
-    if poll_id != active_poll_id:
-        return
+    poll_type = active_polls.get(poll_id)
 
-    if 0 in selected_options and user.id not in yes_voters:
-        yes_voters.add(user.id)
-        print(f"[DEBUG] {user.full_name} voted YES")
+    if poll_type == "training":
+        if 0 in selected_options and user.id not in yes_voters:
+            yes_voters.add(user.id)
+            print(f"[DEBUG] {user.full_name} voted YES for training")
+    elif poll_type == "interest":
+        interest_votes[poll_id][user.id] = selected_options
+        print(f"[DEBUG] {user.full_name} voted for interest poll: {selected_options}")
+    else:
+        print(f"[WARN] Received answer for unknown poll ID {poll_id}")
 
 # === Google Sheets Setup ===
 def get_gspread_sheet():
     creds_dict = json.loads(GOOGLE_CREDENTIALS_JSON)
+    # creds_dict = GOOGLE_CREDENTIALS_JSON
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
     client = gspread.authorize(creds)
@@ -216,35 +241,62 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif thread_id == TOPIC_BLOCKED_ID:
             print(f"[DEBUG] User {update.effective_user.id} tried to send message in blocked thread {thread_id}. Deleting message.")
             await msg.delete()
-    # if not user_is_admin:
-    #     if thread_id in EXEMPTED_THREAD_IDS:
-    #         return
-    #     elif msg.text and msg.text.startswith("/"):
-    #         await msg.delete()
-    #         return
-    #         #await msg.delete()
-    # if thread_id is None and not user_is_admin:
-    #     await msg.delete()
-    # elif thread_id == TOPIC_VOTING_ID and not user_is_admin:
-    #     if msg.poll or not (msg.reply_to_message and msg.reply_to_message.poll):
-    #         await msg.delete()
-    # elif thread_id in TOPIC_MEDIA_IDS and not user_is_admin:
-    #     if not (msg.photo or msg.video or (msg.document and msg.document.mime_type.startswith(("image/", "video/")))):
-    #         await msg.delete()
-    # elif thread_id == TOPIC_BLOCKED_ID and not user_is_admin:
-    #     await msg.delete()
 
-async def send_interest_poll(bot, chat_id, thread_id):
+async def send_interest_poll(bot, chat_id, thread_id, sheet):
+    global active_polls, interest_votes
     try:
-        msg = await bot.send_poll(
-            chat_id=chat_id,
-            message_thread_id=thread_id,
-            question="Are you interested in this performance?",
-            options=["Yes", "No"],
-            is_anonymous=False
-        )
-        print(f"[DEBUG] Sent interest poll in thread {thread_id}")
-        return msg.poll.id  # Return poll ID if needed
+        # Get all rows in the sheet
+        all_rows = sheet.get_all_values()
+
+        # Find the row where column 1 matches the thread_id
+        matched_row = None
+        for row in all_rows:
+            if row and str(row[0]).strip() == str(thread_id):
+                matched_row = row
+                break
+
+        if not matched_row:
+            print(f"[WARN] No matching row for thread_id {thread_id}")
+            return None
+
+        # Extract date string from column 3 (index 2)
+        raw_date_str = matched_row[2].strip() if len(matched_row) > 1 else ''
+        if not raw_date_str:
+            print(f"[WARN] No date data for thread_id {thread_id}")
+            return None
+
+        # Split by comma and clean
+        dates = [d.strip() for d in raw_date_str.split(',') if d.strip()]
+
+        # Send poll based on number of dates
+        if len(dates) == 1:
+            msg = await bot.send_poll(
+                chat_id=chat_id,
+                message_thread_id=thread_id,
+                question=f"Are you interested in the performance on {dates[0]}?",
+                options=["Yes", "No"],
+                is_anonymous=False
+            )
+        elif len(dates) > 1:
+            msg = await bot.send_poll(
+                chat_id=chat_id,
+                message_thread_id=thread_id,
+                question="Which dates are you interested in?",
+                options=dates,
+                allows_multiple_answers=True,
+                is_anonymous=False
+            )
+        else:
+            print(f"[WARN] No valid dates after parsing for thread_id {thread_id}")
+            return None
+        
+         # ✅ Register poll as 'interest'
+        active_polls[msg.poll.id] = "interest"
+        interest_votes[msg.poll.id] = {}  # Initialize vote tracking
+
+        print(f"[DEBUG] Sent interest poll for thread {thread_id}")
+        return msg.poll.id
+
     except Exception as e:
         print(f"[ERROR] Failed to send interest poll: {e}")
         return None
@@ -287,12 +339,36 @@ async def topic_type_selection(update: Update, context: ContextTypes.DEFAULT_TYP
     await query.message.edit_text(f"Topic marked as {selection}. No further action.")
     return ConversationHandler.END
 
+# === Dates Format ===
+def parse_and_format_dates(dates_str):
+    accepted_formats = [
+        "%d %b %Y", "%d %B %Y",     # 23 Jun 2025, 23 June 2025
+        "%d%b%Y", "%d%B%Y",         # 23Jun2025, 23June2025
+        "%d %b,%Y", "%d%b,%Y",      # 23 Jun,2025
+        "%d %b", "%d%b",            # 23 Jun, 23Jun (assume current year)
+    ]
+    result = []
+    for part in dates_str.split(","):
+        part = part.strip()
+        parsed = None
+        for fmt in accepted_formats:
+            try:
+                parsed = datetime.strptime(part, fmt)
+                # If year is missing, assume current year
+                if "%Y" not in fmt:
+                    parsed = parsed.replace(year=datetime.now().year)
+                break
+            except ValueError:
+                continue
+        if not parsed:
+            raise ValueError(f"Invalid date format: {part}")
+        result.append(parsed.strftime("%d %b %Y").upper())  # e.g., 23 JUN 2025
+        print(f"[DEBUG] Parsed date: {result[-1]} from input: {part}")
+    return result
 # === Conversation steps ===
 def are_valid_dates(dates_str):
     try:
-        parts = [d.strip() for d in dates_str.split(",")]
-        for d in parts:
-            datetime.strptime(d, "%d %b %Y")
+        parse_and_format_dates(dates_str)
         return True
     except ValueError:
         return False
@@ -324,7 +400,10 @@ async def parse_perf_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # === Case 1: Retrying Date Only ===
     if "perf_temp" in context.user_data:
         date = update.message.text.strip()
-        if not are_valid_dates(date):
+        try:
+            formatted_dates = parse_and_format_dates(date)
+            date = ", ".join(formatted_dates)
+        except ValueError:
             error_msg = await update.effective_chat.send_message(
                 "❌ Invalid *date* format. Use:\n`DD MMM YYYY` (e.g. `23 JUN 2025`)",
                 parse_mode="Markdown",
@@ -407,7 +486,7 @@ async def parse_perf_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.pin_chat_message(chat_id=update.effective_chat.id, message_id=msg.message_id, disable_notification=True)
     context.chat_data[f"summary_msg_{thread_id}"] = msg.message_id
     # Send interest poll (single/multi-choice)
-    await send_interest_poll(context.bot, update.effective_chat.id, thread_id)
+    await send_interest_poll(context.bot, update.effective_chat.id, thread_id, sheet)
     # context.chat_data[f"interest_poll_msg_{thread_id}"] = poll_id
 
     return ConversationHandler.END

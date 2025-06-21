@@ -106,5 +106,3 @@ Once started, your bot will respond to the following commands:
 
 ---
 
-Let me know if you want this as part of a complete `README.md` or need deployment instructions too.
-

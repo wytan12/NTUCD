@@ -43,7 +43,7 @@ You will need:
 ```bash
 git clone https://github.com/your-username/ntucd-bot.git
 cd ntucd-bot
-
+```
 #### b. Create and activate a virtual environment
 
 ```bash

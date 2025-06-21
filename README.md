@@ -85,8 +85,8 @@ pip install -r requirements.txt
 Inside the root project folder, add the following:
 
 ```ini
-TELEGRAM_BOT_TOKEN=your_telegram_bot_token
-GOOGLE_SHEET_CREDENTIALS_JSON=path_or_raw_json_credentials
+TELEGRAM_BOT_TOKEN = your_telegram_bot_token
+GOOGLE_SHEET_CREDENTIALS_JSON = path_or_raw_json_credentials
 ```
 
 ---

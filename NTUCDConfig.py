@@ -288,9 +288,11 @@ async def topic_type_selection(update: Update, context: ContextTypes.DEFAULT_TYP
     return ConversationHandler.END
 
 # === Conversation steps ===
-def is_valid_date(date_str):
+def are_valid_dates(dates_str):
     try:
-        datetime.strptime(date_str, "%d %b %Y")
+        parts = [d.strip() for d in dates_str.split(",")]
+        for d in parts:
+            datetime.strptime(d, "%d %b %Y")
         return True
     except ValueError:
         return False
@@ -322,7 +324,7 @@ async def parse_perf_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # === Case 1: Retrying Date Only ===
     if "perf_temp" in context.user_data:
         date = update.message.text.strip()
-        if not is_valid_date(date):
+        if not are_valid_dates(date):
             error_msg = await update.effective_chat.send_message(
                 "❌ Invalid *date* format. Use:\n`DD MMM YYYY` (e.g. `23 JUN 2025`)",
                 parse_mode="Markdown",
@@ -364,7 +366,7 @@ async def parse_perf_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         info = parts[3] if len(parts) >= 4 else ""
         thread_id = context.user_data.get("thread_id")
 
-        if not is_valid_date(date):
+        if not are_valid_dates(date):
             try:
                 sheet.append_row([thread_id, event, date, location, info])
                 print("[DEBUG] Row appended successfully")

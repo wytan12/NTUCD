@@ -465,8 +465,17 @@ def parse_flexible_date(date_str: str) -> str:
         except ValueError:
             continue
 
-    # Fallback: Handle formats like 23jun25, 23june2025, with optional time
-    match = re.match(r"(\d{1,2})[\s/-]?([a-zA-Z]+)[\s/-]?(\d{2,4})(?:\s+(\d{1,2}:\d{2}(?:\s*(?:am|pm))?))?", lower)
+    # First, try spaced version (e.g., "23 jun 2024")
+    match = re.match(
+        r"(\d{1,2})[\s/-]+([a-zA-Z]+)[\s/-]+(\d{2,4})(?:\s+(\d{1,2}:\d{2}(?:\s*(?:am|pm))?))?",
+        lower
+    )
+    # If that fails, try compact version (e.g., "23jun2024")
+    if not match:
+        match = re.match(
+            r"(\d{1,2})([a-zA-Z]+)(\d{2,4})(?:\s+(\d{1,2}:\d{2}(?:\s*(?:am|pm))?))?",
+            lower
+        )
     if match:
         day, month, year, time_part = match.groups()
         year = year.strip()

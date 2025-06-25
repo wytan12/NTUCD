@@ -418,8 +418,6 @@ async def topic_type_selection(update: Update, context: ContextTypes.DEFAULT_TYP
     return ConversationHandler.END
 
 def parse_flexible_date(date_str: str) -> str:
-    import re
-    from datetime import datetime
 
     original = date_str.strip()
     lower = original.lower()
@@ -471,9 +469,14 @@ def parse_flexible_date(date_str: str) -> str:
     match = re.match(r"(\d{1,2})[\s/-]?([a-zA-Z]+)[\s/-]?(\d{2,4})(?:\s+(\d{1,2}:\d{2}(?:\s*(?:am|pm))?))?", lower)
     if match:
         day, month, year, time_part = match.groups()
+        year = year.strip()
         if len(year) == 2:
             year = "20" + year
-        
+        elif len(year) == 4:
+            year = year  # Keep as is
+        else:
+            raise ValueError(f"❌ Unrecognized year format: '{year}'")
+
         if time_part:
             # Has time component
             date_time_str = f"{day} {month} {year} {time_part}"

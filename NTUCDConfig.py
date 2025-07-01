@@ -304,6 +304,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 print(f"[DEBUG] ❌ Non-media message by non-admin in MEDIA thread {thread_id}. Deleting.")
                 print(f"[INFO] Message type details: {msg}")
                 await msg.delete()
+            elif msg.text:
+                print(f"[DEBUG] ❌ Text message by non-admin in MEDIA thread {thread_id}. Deleting.")
+                print(f"[INFO] Message type details: {msg}")
+                await msg.delete()
             else:
                 print(f"[ALLOWED] ✅ Media message in MEDIA thread {thread_id}")
 

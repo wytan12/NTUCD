@@ -288,28 +288,57 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     print(f"[ERROR] Failed to delete message in VOTING: {e}")
 
         # MEDIA Topics — only allow images, videos, valid documents
+        # elif thread_id in TOPIC_MEDIA_IDS:
+        #     is_photo = msg.photo is not None
+        #     is_video = msg.video is not None
+        #     is_valid_doc = (
+        #         msg.document is not None and
+        #         getattr(msg.document, "mime_type", "").startswith(("image/", "video/"))
+        #     )
+        #     is_gif = msg.animation is not None
+        #     is_sticker = msg.sticker is not None 
+
+        #     if is_gif or is_sticker:
+        #         print(f"[DEBUG] ❌ GIF (animation) by non-admin in MEDIA thread {thread_id}. Deleting.")
+        #         await msg.delete()
+        #     elif not (is_photo or is_video or is_valid_doc):
+        #         print(f"[DEBUG] ❌ Non-media message by non-admin in MEDIA thread {thread_id}. Deleting.")
+        #         print(f"[INFO] Message type details: {msg}")
+        #         await msg.delete()
+        #     elif msg.document and not is_valid_doc:
+        #         print(f"[DEBUG] ❌ Unsupported document type in MEDIA thread {thread_id}. Deleting.")
+        #         print(f"[INFO] Document MIME type: {msg.document.mime_type}")
+        #         await msg.delete()
+        #     elif msg.text:
+        #         print(f"[DEBUG] ❌ Text message by non-admin in MEDIA thread {thread_id}. Deleting.")
+        #         print(f"[INFO] Message type details: {msg}")
+        #         await msg.delete()
+        #     else:
+        #         print(f"[ALLOWED] ✅ Media message in MEDIA thread {thread_id}")
         elif thread_id in TOPIC_MEDIA_IDS:
+            # Determine if message is allowed
+            is_admin = await is_admin(update, context)
             is_photo = msg.photo is not None
             is_video = msg.video is not None
-            is_valid_doc = (
+            is_animation = msg.animation is not None  # GIF
+            is_document = (
                 msg.document is not None and
-                getattr(msg.document, "mime_type", "").startswith(("image/", "video/"))
+                msg.document.mime_type and
+                msg.document.mime_type.startswith(("image/", "video/"))
             )
-            is_gif = msg.animation is not None
 
-            if is_gif:
-                print(f"[DEBUG] ❌ GIF (animation) by non-admin in MEDIA thread {thread_id}. Deleting.")
-                await msg.delete()
-            elif not (is_photo or is_video or is_valid_doc):
-                print(f"[DEBUG] ❌ Non-media message by non-admin in MEDIA thread {thread_id}. Deleting.")
-                print(f"[INFO] Message type details: {msg}")
-                await msg.delete()
-            elif msg.text:
-                print(f"[DEBUG] ❌ Text message by non-admin in MEDIA thread {thread_id}. Deleting.")
-                print(f"[INFO] Message type details: {msg}")
-                await msg.delete()
-            else:
+            # === Only allow: photo, video, image/video documents
+            is_allowed_media = is_photo or is_video or is_document
+
+            if is_admin:
+                print(f"[ALLOWED] ✅ Admin message in MEDIA topic.")
+                return
+
+            if is_allowed_media:
                 print(f"[ALLOWED] ✅ Media message in MEDIA thread {thread_id}")
+            else:
+                print(f"[DEBUG] ❌ Non-media message by non-admin in MEDIA thread {thread_id}. Deleting.")
+                await msg.delete()
 
         # BLOCKED Topic — block all messages
         elif thread_id == TOPIC_BLOCKED_ID:

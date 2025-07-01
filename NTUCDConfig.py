@@ -23,16 +23,16 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 GOOGLE_CREDENTIALS_JSON = os.environ.get("GOOGLE_CREDENTIALS_JSON")
 SHEET_NAME = "NTUCD AY25/26 Timeline"
 SHEET_TAB_NAME = "PERFORMANCE List"
-CHAT_ID = -1002590844000 # Your group ID
+CHAT_ID = -1002590844000 # Main group Chat ID
 
 # === Conversation states ===
 DATE, EVENT, LOCATION = range(3)
 MODIFY_FIELD, MODIFY_VALUE = range(3, 5) 
 
 # Add column names used in your Google Sheet
-SHEET_COLUMNS = ["THREAD ID", "EVENT", "DATE", "LOCATION", "PERFORMANCE INFO"]
+SHEET_COLUMNS = ["THREAD ID", "EVENT", "PROPOSED DATE | TIME", "LOCATION", "PERFORMANCE INFO", "CONFIRMED DATE | TIME", "STATUS"]
 
-# Thread access configuration
+# Thread access configuration, for main group
 GENERAL_TOPIC_ID = None
 TOPIC_VOTING_ID = 4
 TOPIC_MEDIA_IDS = [25, 75]
@@ -59,6 +59,7 @@ admin_commands = [
     BotCommand("poll", "Create attendance poll in Attendance Topic"),
     BotCommand("modify", "Modify performance summary details"),
     BotCommand("remind", "Remind about performance"),
+    BotCommand("confirmation", "Confirm performance details"),
 ]
 
 # Step 2: Function to register them for admins only
@@ -288,13 +289,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # MEDIA Topics — only allow images, videos, valid documents
         elif thread_id in TOPIC_MEDIA_IDS:
-            allowed_media = (
-                msg.photo or
-                msg.video or
-                (msg.document and getattr(msg.document, "mime_type", "").startswith(("image/", "video/")))
+            is_photo = msg.photo is not None
+            is_video = msg.video is not None
+            is_valid_doc = (
+                msg.document is not None and
+                getattr(msg.document, "mime_type", "").startswith(("image/", "video/"))
             )
+            is_gif = msg.animation is not None
 
-            if not allowed_media:
+            if is_gif:
+                print(f"[DEBUG] ❌ GIF (animation) by non-admin in MEDIA thread {thread_id}. Deleting.")
+                await msg.delete()
+            elif not (is_photo or is_video or is_valid_doc):
                 print(f"[DEBUG] ❌ Non-media message by non-admin in MEDIA thread {thread_id}. Deleting.")
                 print(f"[INFO] Message type details: {msg}")
                 await msg.delete()
@@ -331,6 +337,12 @@ async def send_interest_poll(bot, chat_id, thread_id, sheet):
             print(f"[WARN] No matching row for thread_id {thread_id}")
             return None
 
+        # ✅ Check STATUS before sending poll
+        status_col_index = SHEET_COLUMNS.index("STATUS")
+        if len(matched_row) > status_col_index and matched_row[status_col_index].strip():
+            print(f"[SKIPPED] Interest poll not sent. STATUS is {matched_row[status_col_index]}")
+            return None
+
         # Extract date string from column 3 (index 2)
         raw_date_str = matched_row[2].strip() if len(matched_row) > 1 else ''
         if not raw_date_str:
@@ -338,7 +350,7 @@ async def send_interest_poll(bot, chat_id, thread_id, sheet):
             return None
 
         # Split by comma and clean
-        dates = [d.strip() for d in raw_date_str.split(',') if d.strip()]
+        dates = [d.strip() for d in re.split(r'[\n,]', raw_date_str) if d.strip()]
 
         # Send poll based on number of dates
         if len(dates) == 1:
@@ -417,8 +429,191 @@ async def topic_type_selection(update: Update, context: ContextTypes.DEFAULT_TYP
     await query.message.edit_text(f"Topic marked as {selection}. No further action.")
     return ConversationHandler.END
 
-def parse_flexible_date(date_str: str) -> str:
+# Handle button selection
+async def confirmation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
 
+    parts = query.data.split("|")
+    if len(parts) != 3:
+        return
+    _, thread_id, action = parts
+    thread_id = int(thread_id)
+
+    # 🧹 Delete previous ACCEPT/REJECT prompt
+    msg_id = context.chat_data.pop(f"confirm_prompt_{thread_id}", None)
+    if msg_id:
+        try:
+            await context.bot.delete_message(chat_id=query.message.chat.id, message_id=msg_id)
+        except:
+            pass
+
+    sheet = get_gspread_sheet()
+    records = sheet.get_all_records()
+    row_number, row_data = None, None
+    for idx, row in enumerate(records):
+        if str(row["THREAD ID"]) == str(thread_id):
+            row_number = idx + 2
+            row_data = row
+            break
+    if not row_data:
+        return
+
+    if action == "CANCEL":
+        # Unpin summary (if exists), and send back Performance Opportunity
+        # old_msg_id = context.chat_data.get(f"summary_msg_{thread_id}")
+        # if old_msg_id:
+        #     try:
+        #         await context.bot.unpin_chat_message(chat_id=query.message.chat.id, message_id=old_msg_id)
+        #     except:
+        #         pass
+        return
+
+    if action == "REJECT":
+        # === Update status in GSheet ===
+        sheet = get_gspread_sheet()
+        records = sheet.get_all_records()
+        for idx, row in enumerate(records):
+            if str(row["THREAD ID"]) == str(thread_id):
+                row_index = idx + 2
+                sheet.update_cell(row_index, 7, "REJECTED")
+                break
+
+        # === Send rejection message
+        await query.message.chat.send_message("❌ Performance rejected. This topic will now be closed.", message_thread_id=thread_id)
+
+        # ✅ Delay + delete topic
+        await delete_topic_with_delay(context, chat_id=query.message.chat.id, thread_id=thread_id)
+    
+    if action == "ACCEPT":
+        all_dates = row_data["PROPOSED DATE | TIME"].splitlines()
+        context.chat_data[f"final_row_number_{thread_id}"] = row_number
+        context.chat_data[f"final_all_dates_{thread_id}"] = all_dates
+        context.chat_data[f"selected_dates_{thread_id}"] = []
+
+        buttons = [[InlineKeyboardButton(text=d, callback_data=f"FINALDATE|{thread_id}|{i}")]
+                   for i, d in enumerate(all_dates)]
+        buttons.append([InlineKeyboardButton("✅ Confirm Selection", callback_data=f"FINALDATE|{thread_id}|CONFIRM")])
+        prompt = await query.message.chat.send_message(
+            "🗓️ Select final date(s) to confirm:",
+            reply_markup=InlineKeyboardMarkup(buttons),
+            message_thread_id=thread_id
+        )
+        context.chat_data[f"final_prompt_{thread_id}"] = prompt.message_id
+
+# Handle final date selection
+async def final_date_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data.split("|")
+    if len(data) != 3:
+        return
+
+    _, thread_id, selection = data
+    thread_id = int(thread_id)
+
+    print(f"[DEBUG] Callback received for thread_id={thread_id}, selection={selection}")
+    print(f"[DEBUG] chat_data keys: {list(context.chat_data.keys())}")
+
+    row_number = context.chat_data.get(f"final_row_number_{thread_id}")
+    all_dates = context.chat_data.get(f"final_all_dates_{thread_id}", [])
+    selected = context.chat_data.setdefault(f"selected_dates_{thread_id}", [])
+
+    print(f"[DEBUG] row_number={row_number}")
+    print(f"[DEBUG] all_dates={all_dates}")
+    print(f"[DEBUG] currently selected={selected}")
+
+    if selection == "CONFIRM":
+        if not selected:
+            return await query.message.reply_text("⚠️ Please select at least one date before confirming.")
+
+        # === Cleanup UI messages ===
+        try:
+            await context.bot.delete_message(chat_id=query.message.chat_id, message_id=query.message.message_id)
+            print("[DEBUG] Deleted final selection message.")
+        except Exception as e:
+            print(f"[WARNING] Failed to delete final date selection message: {e}")
+
+        try:
+            msg_id = context.chat_data.pop("confirm_prompt_msg_id", None)
+            if msg_id:
+                await context.bot.delete_message(chat_id=query.message.chat_id, message_id=msg_id)
+                print(f"[DEBUG] Deleted ACCEPT/REJECT message: {msg_id}")
+        except Exception as e:
+            print(f"[WARNING] Failed to delete ACCEPT/REJECT message: {e}")
+
+        # === Update sheet ===
+        value = "\n".join([all_dates[i] for i in sorted(map(int, selected))])
+        sheet = get_gspread_sheet()
+        sheet.update_cell(row_number, 6, value)  # Column F = 6
+        sheet.update_cell(row_number, 7, "ACCEPTED")  # Column G = 7
+
+        # === Refresh row ===
+        updated_row = sheet.row_values(row_number)
+        while len(updated_row) < 7:
+            updated_row += [""] * (7 - len(updated_row))
+
+        event, proposed, location, info, confirmed, status = updated_row[1:7]
+
+        # === Format confirmed date
+        date_lines = []
+        for line in confirmed.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                dt = datetime.strptime(line, "%d %b %Y | %I:%M%p")
+                formatted = f"• {dt.strftime('%d %b %Y').upper()} | {dt.strftime('%I:%M%p').lower()}"
+            except:
+                formatted = f"• {line}"
+            date_lines.append(formatted)
+
+        # === Format summary
+        template = (
+            f"📢 *Performance Summary*\n\n"
+            f"📍 *Event*\n"
+            f"• {event}\n\n"
+            f"📅 *Confirmed Date | Time*\n"
+            f"{chr(10).join(date_lines)}\n\n"
+            f"📌 *Location*\n"
+            f"• {location}\n\n"
+            f"📝 *Performance Information:*\n"
+            f"{info.strip()}"
+        )
+
+        # === Unpin previous summary (if any), then pin new summary
+        try:
+            old_summary_id = context.chat_data.pop(f"summary_msg_{thread_id}", None)
+            if old_summary_id:
+                await context.bot.unpin_chat_message(chat_id=query.message.chat.id, message_id=old_summary_id)
+                print(f"[DEBUG] Unpinned old summary: {old_summary_id}")
+        except Exception as e:
+            print(f"[WARNING] Failed to unpin previous summary: {e}")
+
+        # ✅ Send new summary
+        msg = await query.message.chat.send_message(template, parse_mode="Markdown", message_thread_id=thread_id)
+        await context.bot.pin_chat_message(chat_id=query.message.chat.id, message_id=msg.message_id, disable_notification=True)
+        context.chat_data[f"summary_msg_{thread_id}"] = msg.message_id
+
+        return
+
+    # === Handle toggling checkboxes
+    if selection not in selected:
+        selected.append(selection)
+    else:
+        selected.remove(selection)
+
+    new_buttons = []
+    for i, d in enumerate(all_dates):
+        is_selected = str(i) in selected
+        label = f"✅ {d}" if is_selected else d
+        new_buttons.append([InlineKeyboardButton(text=label, callback_data=f"FINALDATE|{thread_id}|{i}")])
+    new_buttons.append([InlineKeyboardButton("✅ Confirm Selection", callback_data=f"FINALDATE|{thread_id}|CONFIRM")])
+
+    await query.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(new_buttons))
+
+
+def parse_flexible_date(date_str: str) -> str:
     original = date_str.strip()
     lower = original.lower()
 
@@ -428,101 +623,90 @@ def parse_flexible_date(date_str: str) -> str:
     # Normalize 4-digit shorthand times (e.g., 1430 → 14:30)
     lower = re.sub(r'\b(\d{4})\b', lambda m: f"{m.group(1)[:2]}:{m.group(1)[2:]}", lower)
 
-    # Normalize AM/PM - handle in correct order to avoid double processing
-    lower = re.sub(r'(\d{1,2}:\d{2})(am|pm)\b', r'\1 \2', lower)  # 7:30pm → 7:30 pm
-    lower = re.sub(r'(\d{1,2})(am|pm)\b', r'\1:00 \2', lower)     # 7pm → 7:00 pm
-    
-    # Insert spaces in compact date formats (e.g., 12jun2024 → 12 jun 2024)
-    lower = re.sub(r'(\d{1,2})([a-zA-Z]{3,})(\d{2,4})', r'\1 \2 \3', lower)
+    # Normalize 3-4 digit shorthand times like 830am → 8:30 am
+    lower = re.sub(r'\b(\d{1,2})(\d{2})(am|pm)\b', r'\1:\2 \3', lower)
 
-    # Try known datetime formats (24h and 12h)
-    datetime_formats = [
-        "%d %b %Y %H:%M", "%d %B %Y %H:%M",
-        "%d/%m/%Y %H:%M", "%d-%m-%Y %H:%M",
-        "%d %b %Y %I:%M %p", "%d %B %Y %I:%M %p",
-        "%d/%m/%Y %I:%M %p", "%d-%m-%Y %I:%M %p",
-        "%d%b%Y %H:%M", "%d%B%Y %H:%M",
-        "%d%b%Y %I:%M %p", "%d%B%Y %I:%M %p"
-    ]
-    for fmt in datetime_formats:
-        try:
-            dt = datetime.strptime(lower, fmt)
-            # Format with 24-hour time without colon
-            return dt.strftime("%d %b %Y %H%M").upper()
-        except ValueError:
-            continue
+    # Normalize AM/PM time (e.g., 2pm → 2:00 pm, 2:30pm → 2:30 pm)
+    lower = re.sub(r'(\d{1,2}:\d{2})(am|pm)\b', r'\1 \2', lower)
+    lower = re.sub(r'\b(\d{1,2})(am|pm)\b', r'\1:00 \2', lower)
 
-    # Try date-only formats
-    date_only_formats = [
-        "%d %b %Y", "%d %B %Y",
-        "%d/%m/%Y", "%d-%m-%Y",
-        "%d%b%Y", "%d%B%Y"
-    ]
-    for fmt in date_only_formats:
+    # Match formats like: 24jun25 2:30pm, 24june2025, 24jun 2pm, 24june26
+    pattern = re.match(r"(\d{1,2})[\s-]?([a-zA-Z]{3,9})[\s-]?(\d{2,4})?(?:\s+(\d{1,2}:\d{2}(?:\s?(?:am|pm))?))?$", lower)
+    if not pattern:
+        raise ValueError(f"❌ Invalid date format: '{original}'\n👉 Use formats like '24jun25' or '24jun25 2:30pm'.")
+
+    day, month, year, time_part = pattern.groups()
+
+    # Default year to current year if not given
+    if not year:
+        year = str(datetime.now().year)
+    elif len(year) == 2:
+        year = "20" + year
+
+    # Build datetime string
+    date_time_str = f"{day} {month} {year}"
+    if time_part:
+        date_time_str += f" {time_part}"
+
+        # Try valid time formats (first 24h, then 12h)
+        for fmt in ("%d %b %Y %H:%M", "%d %B %Y %H:%M", "%d %b %Y %I:%M %p", "%d %B %Y %I:%M %p"):
+            try:
+                dt = datetime.strptime(date_time_str, fmt)
+                time_str = dt.strftime("%I:%M%p").lstrip("0").lower()
+                return f"{dt.strftime('%d %b %Y').upper()} | {time_str}"
+            except ValueError:
+                continue
+
+        raise ValueError(f"❌ Time format is invalid: '{time_part}'\n👉 Use formats like 2pm, 2:30pm, 1430")
+
+    # No time part → just parse date
+    for fmt in ("%d %b %Y", "%d %B %Y"):
         try:
-            dt = datetime.strptime(lower, fmt)
+            dt = datetime.strptime(f"{day} {month} {year}", fmt)
             return dt.strftime("%d %b %Y").upper()
         except ValueError:
             continue
 
-    # First, try spaced version (e.g., "23 jun 2024")
-    match = re.match(
-        r"(\d{1,2})[\s/-]+([a-zA-Z]+)[\s/-]+(\d{2,4})(?:\s+(\d{1,2}:\d{2}(?:\s*(?:am|pm))?))?",
-        lower
-    )
-    # If that fails, try compact version (e.g., "23jun2024")
-    if not match:
-        match = re.match(
-            r"(\d{1,2})([a-zA-Z]+)(\d{2,4})(?:\s+(\d{1,2}:\d{2}(?:\s*(?:am|pm))?))?",
-            lower
-        )
-    if match:
-        day, month, year, time_part = match.groups()
-        year = year.strip()
-        if len(year) == 2:
-            year = "20" + year
-        elif len(year) == 4:
-            year = year  # Keep as is
-        else:
-            raise ValueError(f"❌ Unrecognized year format: '{year}'")
+    raise ValueError(f"❌ Date format is invalid: '{original}'\n👉 Use formats like '24jun25', not numeric months.")
 
-        if time_part:
-            # Has time component
-            date_time_str = f"{day} {month} {year} {time_part}"
-            try:
-                # Try 24-hour format first
-                dt = datetime.strptime(date_time_str, "%d %b %Y %H:%M")
-                return dt.strftime("%d %b %Y %H%M").upper()
-            except ValueError:
-                try:
-                    # Try 12-hour format
-                    dt = datetime.strptime(date_time_str, "%d %b %Y %I:%M %p")
-                    return dt.strftime("%d %b %Y %H%M").upper()
-                except ValueError:
-                    try:
-                        # Try full month name with 24-hour
-                        dt = datetime.strptime(date_time_str, "%d %B %Y %H:%M")
-                        return dt.strftime("%d %b %Y %H%M").upper()
-                    except ValueError:
-                        # Try full month name with 12-hour
-                        dt = datetime.strptime(date_time_str, "%d %B %Y %I:%M %p")
-                        return dt.strftime("%d %b %Y %H%M").upper()
-        else:
-            # Date only
-            try:
-                dt = datetime.strptime(f"{day} {month} {year}", "%d %b %Y")
-            except ValueError:
-                dt = datetime.strptime(f"{day} {month} {year}", "%d %B %Y")
-            return dt.strftime("%d %b %Y").upper()
-
-    raise ValueError(f"❌ Invalid date format: '{original}'")
 
 def parse_and_format_dates(dates_str):
-    parts = [p.strip() for p in dates_str.split(",") if p.strip()]
+    parts = [p.strip() for p in dates_str.split(",")]
     results = []
+    invalid_parts = []
+
     for part in parts:
-        formatted = parse_flexible_date(part)
-        results.append(formatted)
+        if not part:
+            invalid_parts.append("(empty)")
+            continue
+        try:
+            formatted = parse_flexible_date(part)
+            results.append(formatted)
+        except ValueError:
+            invalid_parts.append(part)
+
+    if invalid_parts:
+        if len(parts) == 1:
+            # 🟥 Single entry error
+            raise ValueError(
+                "❌ Invalid *date/time* format.\n"
+                "👉 Use formats like:\n"
+                "- `23aug25 8:30pm`\n"
+                "- `23aug 1430`\n"
+                "- `23aug25`\n"
+                "- `23aug`\n"
+                "\n⚠️ Make sure your input uses letters for month (e.g. `aug`, not `08`)."
+            )
+        else:
+            # 🟥 Multiple entry error
+            raise ValueError(
+                "❌ One or more *date/time* entries are invalid.\n"
+                "👉 Use correct comma `,` between entries and formats like:\n"
+                "- `23aug 8pm, 24aug 9pm`\n"
+                "- `23aug25 1430, 24aug25`\n"
+                "\n⚠️ Use *letter months*, not numeric (e.g. `aug`, not `08`)."
+            )
+
     return results
 
 # === Conversation steps ===
@@ -554,16 +738,24 @@ async def parse_perf_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         raw_date = update.message.text.strip()
         try:
             formatted_dates = parse_and_format_dates(raw_date)
-            date = ", ".join(formatted_dates)
-        except ValueError:
-            # Use raw_date as fallback for display/GSheet
-            date = raw_date
+            date = "\n".join(formatted_dates)
+        except ValueError as e:
+            # Clean up older messages if exist
+            for key in ["last_error", "invalid_input"]:
+                msg_id = context.chat_data.pop(key, None)
+                if msg_id:
+                    try:
+                        await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=msg_id)
+                    except Exception as ex:
+                        print(f"[WARNING] Failed to delete previous {key} message: {ex}")
+
             error_msg = await update.effective_chat.send_message(
-                "❌ Invalid *date* format. Use:\n`DD MMM YYYY` (e.g. `23 JUN 2025`)",
+                str(e),
                 parse_mode="Markdown",
                 message_thread_id=context.user_data["perf_temp"]["thread_id"]
             )
             context.chat_data["last_error"] = error_msg.message_id
+            context.chat_data["invalid_input"] = update.message.message_id
             return DATE
 
         # Restore previous info
@@ -577,7 +769,7 @@ async def parse_perf_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         all_rows = sheet.get_all_values()
         for idx, row in enumerate(all_rows, start=1):
             if row and str(row[0]) == str(thread_id):
-                sheet.update(values=[[event, date, location, info]], range_name=f"B{idx}:E{idx}")
+                sheet.update(values=[[event, date, location, info, "", ""]], range_name=f"B{idx}:G{idx}")
                 break
 
     # === Case 2: Full Input ===
@@ -586,13 +778,27 @@ async def parse_perf_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parts = [p.strip() for p in raw_text.split("//")]
         print(f"[DEBUG] Parsed parts: {len(parts)} - {parts}")
 
+        thread_id = context.user_data.get("thread_id")  # ✅ Define this early
+
         if len(parts) < 3 or any(not p for p in parts[:3]):
             error_msg = await update.effective_chat.send_message(
-                "❌ Invalid format. Use:\n*Event // Date // Location // Info (optional)*",
-                parse_mode="Markdown",
-                message_thread_id=context.user_data.get("thread_id")
-            )
+            "❌ Invalid input format. Use:\n*Event // Date // Location // Info (optional)*\n\n"
+            "Example:\n`NTU Welcome Tea // 23 JUN 2025 8:00pm // NYA // Formal wear required`",
+            parse_mode="Markdown",
+            message_thread_id=thread_id
+        )
+
+            # Clean up older messages if exist
+            for key in ["last_error", "invalid_input"]:
+                msg_id = context.chat_data.pop(key, None)
+                if msg_id:
+                    try:
+                        await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=msg_id)
+                    except Exception as e:
+                        print(f"[WARNING] Failed to delete previous {key} message: {e}")
+
             context.chat_data["last_error"] = error_msg.message_id
+            context.chat_data["invalid_input"] = update.message.message_id
             return DATE
 
         event, date, location = parts[0], parts[1], parts[2]
@@ -603,8 +809,8 @@ async def parse_perf_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             raw_date = date
             formatted_dates = parse_and_format_dates(raw_date)
-            date = ", ".join(formatted_dates)
-        except ValueError:
+            date = "\n".join(formatted_dates)
+        except ValueError as e:
             date = raw_date
             # Save temp and still append to sheet
             context.user_data["perf_temp"] = {
@@ -614,33 +820,62 @@ async def parse_perf_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "thread_id": thread_id
             }
             try:
-                sheet.append_row([thread_id, event, date, location, info])
+                sheet.append_row([thread_id, event, date, location, info, "", ""])
                 print("[DEBUG] Row appended with invalid date")
-            except Exception as e:
+            except Exception as e2:
                 print(f"[ERROR] Failed to append row with invalid date: {e}")
  
+            # Clean up previous errors
+            for key in ["last_error", "invalid_input"]:
+                msg_id = context.chat_data.pop(key, None)
+                if msg_id:
+                    try:
+                        await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=msg_id)
+                    except Exception as ex:
+                        print(f"[WARNING] Failed to delete previous {key} message: {ex}")
+
+            # Show proper error message from parse_and_format_dates()
             error_msg = await update.effective_chat.send_message(
-                "❌ Invalid *date* format. Use:\n`DD MMM YYYY` (e.g. `23 JUN 2025`)",
+                str(e),
                 parse_mode="Markdown",
                 message_thread_id=thread_id
             )
             context.chat_data["last_error"] = error_msg.message_id
+            context.chat_data["invalid_input"] = update.message.message_id
             return DATE
 
         # Valid date → Append to sheet
         try:
-            sheet.append_row([thread_id, event, date, location, info])
+            sheet.append_row([thread_id, event, date, location, info, "", ""])
             print("[DEBUG] Row appended successfully")
         except Exception as e:
             print(f"[ERROR] Failed to append row: {e}")
 
-    # ✅ Send performance summary and interest poll
+    # Format multiline Date | Time block
+    date_lines = []
+    for entry in date.splitlines(): 
+        entry = entry.strip()
+        if not entry:
+            continue
+        try:
+            dt = datetime.strptime(entry, "%d %b %Y %H%M")
+            formatted = f"• {dt.strftime('%d %b %Y').upper()} | {dt.strftime('%I:%M%p').lower()}"
+            date_lines.append(formatted)
+        except:
+            date_lines.append(f"• {entry}")  # fallback if not parseable
+    formatted_dates = "\n".join(date_lines)
+
+    # Then build the final message
     template = (
-        f"\U0001F4E2 *Performance Summary*\n\n"
-        f"\U0001F4CD *Event:* {event}\n"
-        f"\U0001F4C5 *Date:* {date}\n"
-        f"\U0001F4CC *Location:* {location}\n"
-        f"\n{info.strip()}"
+        f"\U0001F4E2 *Performance Opportunity*\n\n"
+        f"\U0001F4CD *Event*\n"
+        f"• {event}\n\n"
+        f"\U0001F4C5 *Date | Time*\n"
+        f"{formatted_dates}\n\n"
+        f"\U0001F4CC *Location*\n"
+        f"• {location}\n\n"
+        f"*Performance Information:*\n"
+        f"{info.strip()}"
     )
     msg = await update.effective_chat.send_message(template, parse_mode="Markdown", message_thread_id=thread_id)
     await context.bot.pin_chat_message(chat_id=update.effective_chat.id, message_id=msg.message_id, disable_notification=True)
@@ -651,6 +886,14 @@ async def parse_perf_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print(f"[DEBUG] Saved new poll message ID: {poll['message_id']}")
 
     return ConversationHandler.END
+
+async def delete_topic_with_delay(context: ContextTypes.DEFAULT_TYPE, chat_id: int, thread_id: int, delay_seconds: int = 5):
+    await asyncio.sleep(delay_seconds)
+    try:
+        await context.bot.delete_forum_topic(chat_id=chat_id, message_thread_id=thread_id)
+        print(f"[INFO] Topic {thread_id} deleted after delay.")
+    except Exception as e:
+        print(f"[ERROR] Failed to delete topic {thread_id}: {e}")
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print("[DEBUG] Cancel triggered")
@@ -673,6 +916,55 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     return ConversationHandler.END
 
+async def confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    user = update.effective_user
+    chat = update.effective_chat
+
+    if not msg.is_topic_message:
+        return await msg.reply_text("⛔ This command must be used inside a topic thread.")
+
+    thread_id = msg.message_thread_id
+    if not await is_admin(update, context):
+        return await msg.reply_text("⛔ Only admins can use this command.")
+
+    # Delete the /confirmation command message
+    try:
+        await msg.delete()
+    except:
+        pass
+
+    sheet = get_gspread_sheet()
+    records = sheet.get_all_records()
+    row_number, row_data = None, None
+    for idx, row in enumerate(records):
+        if str(row["THREAD ID"]) == str(thread_id):
+            row_number = idx + 2
+            row_data = row
+            break
+
+    if not row_data:
+        return await msg.reply_text("❌ This thread is not registered.")
+
+    if row_data["STATUS"]:
+        return await msg.reply_text(
+            f"❌ This performance is already marked as `{row_data['STATUS']}`.",
+            parse_mode="Markdown"
+        )
+
+    keyboard = [
+        [InlineKeyboardButton("✅ ACCEPT", callback_data=f"CONFIRM|{thread_id}|ACCEPT")],
+        [InlineKeyboardButton("❌ REJECT", callback_data=f"CONFIRM|{thread_id}|REJECT")],
+        [InlineKeyboardButton("🚫 CANCEL", callback_data=f"CONFIRM|{thread_id}|CANCEL")]
+    ]
+    prompt = await chat.send_message(
+        "🎯 Is this performance *ACCEPTED* or *REJECTED*?",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        message_thread_id=thread_id
+    )
+    context.chat_data[f"confirm_prompt_{thread_id}"] = prompt.message_id
+
 # === /threadid ===
 @admin_only
 async def thread_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -690,44 +982,89 @@ async def thread_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # === /remind command ===
 @admin_only
 async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
     msg = update.effective_message
-    if not msg.is_topic_message:
-        return
+    chat_id = msg.chat_id
     thread_id = msg.message_thread_id
-    if thread_id in EXEMPTED_THREAD_IDS or not await is_admin(update, context):
-        return
-    
+
+    print("[DEBUG] /remind triggered.")
+    print(f"[DEBUG] Thread ID: {thread_id}")
+
+    # Delete the command message
     try:
-        await update.message.delete()  # delete the command sent by user
+        await msg.delete()
+        print("[DEBUG] Deleted /remind command message.")
     except Exception as e:
-        print(f"[DEBUG] Failed to delete /remind command: {e}")
+        print(f"[WARNING] Failed to delete /remind command message: {e}")
 
-    sheet = get_gspread_sheet()
-    records = sheet.get_all_records()
-    for row in records:
-        if str(row['THREAD ID']) == str(thread_id):
-            template = (
-                f"\U0001F4E2 *Performance Reminder*\n\n"
-                f"\U0001F4CD *Event:* {row['EVENT']}\n"
-                f"\U0001F4C5 *Date:* {row['DATE']}\n"
-                f"\U0001F4CC *Location:* {row['LOCATION']}\n\n"
-                f"Please be punctual and check the group for updates."
-            )
-            await context.bot.send_message(
-                chat_id=msg.chat.id,
-                text=template,
-                parse_mode="Markdown",
-                message_thread_id=thread_id
-            )
-            return
+    # Guard clause: must be inside a topic
+    if not msg.is_topic_message:
+        print("[DEBUG] Not a topic message. Ignoring.")
+        return
 
-    await context.bot.send_message(
-        chat_id=msg.chat.id,
-        text="\u274C This thread has not been registered.",
-        parse_mode="Markdown",
-        message_thread_id=thread_id
-    )
+    # Guard clause: exempted thread
+    if thread_id in EXEMPTED_THREAD_IDS:
+        print("[DEBUG] Thread is exempted. Skipping.")
+        return
+
+    try:
+        sheet = get_gspread_sheet()
+        records = sheet.get_all_records()
+
+        for row in records:
+            if str(row["THREAD ID"]) == str(thread_id):
+                status = row.get("STATUS", "").strip().upper()
+                if status != "ACCEPTED":
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text="⚠️ Reminder can only be used *after confirmation*.",
+                        parse_mode="Markdown",
+                        message_thread_id=thread_id
+                    )
+                    print("[DEBUG] Status not ACCEPTED. Reminder skipped.")
+                    return
+
+                # === Compose reminder message ===
+                date_str = row.get("CONFIRMED DATE | TIME", "").strip()
+                date_lines = "\n".join([f"• {d.strip()}" for d in date_str.splitlines() if d.strip()])
+                template = (
+                    f"📢 *Performance Reminder*\n\n"
+                    f"📍 *Event*\n• {row['EVENT']}\n\n"
+                    f"📅 *Date | Time*\n{date_lines}\n\n"
+                    f"📌 *Location*\n• {row['LOCATION']}\n\n"
+                    f"*📝 Final Preparation Notes*\n\n"
+                    f"*👀 Glasses & Contact Lens*\n"
+                    f"If you wear glasses, try your best to perform without them (e.g. wear contact lens). Default is *no glasses* on stage. Make sure you're comfortable before show day.\n\n"
+                    f"*⬇️💪 Shave Your Armpits*\n"
+                    f"We want the audience to focus on our performance, not our underarms 🪒😌 So please make sure to shave before the show!\n\n"
+                    f"*🎽 Costume Tips*\n"
+                    f"Our costumes are sleeveless and v-neck. Avoid wearing bright-colored bras (neon pink/yellow/rainbow 🌈). A black sports bra is best.\n\n"
+                    f"*🦶 Barefoot Reminder*\n"
+                    f"Everyone will be performing *barefoot*. Don't forget!\n\n"
+                    f"*💇 Hair Tying*\n"
+                    f"If you have long hair, please tie it up neatly. You can also ask someone to help if needed.\n\n"
+                    f"*📺 Recap the Drum Score*\n"
+                    f"Make sure to go through the performance videos again and recap the score before the show. Stay sharp!"
+                )
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=template,
+                    parse_mode="Markdown",
+                    message_thread_id=thread_id
+                )
+                print("[DEBUG] Reminder message sent.")
+                return
+
+        # ❌ Not found
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="❌ This thread has not been registered.",
+            parse_mode="Markdown",
+            message_thread_id=thread_id
+        )
+        print("[DEBUG] Thread ID not found in GSheet.")
+
+    except Exception as e:
+        print(f"[ERROR] Failed to execute /remind: {e}")
     
 # Start modify process
 async def start_modify(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -755,13 +1092,48 @@ async def start_modify(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await msg.reply_text("⛔ This command must be used inside a topic thread.")
 
     context.user_data["modify_thread_id"] = thread_id
-    keyboard = [
-        [InlineKeyboardButton("📍 Event", callback_data="MODIFY|EVENT")],
-        [InlineKeyboardButton("📅 Date", callback_data="MODIFY|DATE")],
-        [InlineKeyboardButton("📌 Location", callback_data="MODIFY|LOCATION")],
-        [InlineKeyboardButton("📝 Performance Info", callback_data="MODIFY|PERFORMANCE INFO")],
-        [InlineKeyboardButton("❌ Cancel", callback_data="MODIFY|CANCEL")]
-    ]
+    
+    # === Lookup status from sheet ===
+    sheet = get_gspread_sheet()
+    records = sheet.get_all_records()
+    row = next((r for r in records if str(r["THREAD ID"]) == str(thread_id)), None)
+
+    if not row:
+        await msg.reply_text("❌ This thread is not registered in the sheet.", message_thread_id=thread_id)
+        return
+
+    status = row.get("STATUS", "").strip().upper()
+    print(f"[DEBUG] Status for thread {thread_id}: {status}")
+
+    if status == "REJECTED":
+        await msg.reply_text("❌ This performance is already REJECTED. You cannot modify it.", message_thread_id=thread_id)
+        return
+
+     # === Dynamically set modifiable fields ===
+    if status == "":
+        date_field = "PROPOSED DATE | TIME"
+        modify_options = ["EVENT", date_field, "LOCATION", "PERFORMANCE INFO"]
+    else:
+        date_field = "CONFIRMED DATE | TIME"
+        modify_options = ["EVENT", date_field, "LOCATION", "PERFORMANCE INFO", "STATUS"]
+
+    # === Build keyboard dynamically from modify_options
+    emoji_map = {
+        "EVENT": "📍",
+        "CONFIRMED DATE | TIME": "📅",
+        "PROPOSED DATE | TIME": "📅",
+        "LOCATION": "📌",
+        "PERFORMANCE INFO": "📝",
+        "STATUS": "📊",
+    }
+
+    # === Build inline keyboard ===
+    keyboard = []
+    for opt in modify_options:
+        emoji = emoji_map.get(opt, "")
+        keyboard.append([InlineKeyboardButton(f"{emoji} {opt.title()}", callback_data=f"MODIFY|{opt}")])
+    keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="MODIFY|CANCEL")])
+
     prompt = await msg.chat.send_message(
         "✏️ What would you like to update?",
         reply_markup=InlineKeyboardMarkup(keyboard),
@@ -788,6 +1160,68 @@ async def get_modify_field_callback(update: Update, context: ContextTypes.DEFAUL
         print("[DEBUG] User selected cancel button")
         return ConversationHandler.END
     context.user_data["modify_field"] = field
+    
+    # === Show inline keyboard for selecting confirmed date ===
+    if field == "CONFIRMED DATE | TIME":
+        print("[DEBUG] User selected to modify CONFIRMED DATE | TIME")
+        sheet = get_gspread_sheet()
+        records = sheet.get_all_records()
+        for row in records:
+            if str(row["THREAD ID"]) == str(context.user_data["modify_thread_id"]):
+                proposed = row.get("PROPOSED DATE | TIME", "").strip()
+                proposed_dates = [d.strip() for d in proposed.splitlines() if d.strip()]
+                if not proposed_dates:
+                    await query.message.chat.send_message(
+                        "⚠️ No proposed dates available to choose from.",
+                        message_thread_id=context.user_data["modify_thread_id"]
+                    )
+                    return ConversationHandler.END
+
+                # ✅ Init values
+                context.user_data["proposed_dates"] = proposed_dates
+                context.user_data["selected_date_indices"] = []  # <-- important
+                thread_id = context.user_data["modify_thread_id"]
+
+                # Build inline buttons using stringified index
+                buttons = []
+                for i, d in enumerate(proposed_dates):
+                    label = d
+                    buttons.append([
+                        InlineKeyboardButton(label, callback_data=f"modify_date_selected|{i}")
+                    ])
+
+                buttons.append([
+                    InlineKeyboardButton("✅ Confirm Selection", callback_data="modify_date_selected|CONFIRM")
+                ])
+
+                markup = InlineKeyboardMarkup(buttons)
+
+                await query.message.chat.send_message(
+                    "📅 Please choose the *confirmed date*, then press ✅ Confirm Selection:",
+                    reply_markup=markup,
+                    parse_mode="Markdown",
+                    message_thread_id=thread_id
+                )
+
+                return ConversationHandler.END
+    
+    # === Handle STATUS change via inline buttons ===
+    elif field == "STATUS":
+        print("[DEBUG] User selected to modify STATUS")
+        thread_id = context.user_data["modify_thread_id"]
+        buttons = [
+            [InlineKeyboardButton("❌ Reject Performance", callback_data="modify_status_selected|REJECTED")],
+            [InlineKeyboardButton("↩️ Cancel", callback_data="modify_status_selected|CANCEL")]
+        ]
+        markup = InlineKeyboardMarkup(buttons)
+        await query.message.chat.send_message(
+            "🚦 Please select the new *STATUS*: ",
+            reply_markup=markup,
+            parse_mode="Markdown",
+            message_thread_id=thread_id
+        )
+        return ConversationHandler.END
+    
     prompt = await query.message.chat.send_message(
         f"✅ Got it! What is the new value for *{field}*?",
         parse_mode="Markdown",
@@ -796,9 +1230,7 @@ async def get_modify_field_callback(update: Update, context: ContextTypes.DEFAUL
     context.chat_data["modify_prompt_msg_ids"] = [prompt.message_id]
     return MODIFY_VALUE
 
-# Apply the new value to the sheet
 async def apply_modify_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_input = update.message.text.strip()
     value = update.message.text.strip()
     if value.lower() == "/cancel":
         try:
@@ -813,133 +1245,302 @@ async def apply_modify_value(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     sheet = get_gspread_sheet()
     records = sheet.get_all_records()
+
+    # === Step 1: Find the row number ===
+    row_number = None
     for idx, row in enumerate(records):
         if str(row["THREAD ID"]) == str(thread_id):
             row_number = idx + 2  # Header row + 1-based index
+            break
+
+    if row_number is None:
+        print("[DEBUG] Thread ID not found in sheet")
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="❌ This thread is not registered in the sheet."
+        )
+        return ConversationHandler.END
+    
+    status = row.get("STATUS", "").strip().upper()
+    allowed_fields = []
+
+    if status == "":
+        allowed_fields = ["EVENT", "PROPOSED DATE | TIME", "LOCATION", "PERFORMANCE INFO"]
+    elif status == "ACCEPTED":
+        allowed_fields = ["EVENT", "CONFIRMED DATE | TIME", "LOCATION", "PERFORMANCE INFO", "STATUS"]
+    else:
+        await update.effective_chat.send_message("❌ This performance is already REJECTED. You cannot modify it.", message_thread_id=thread_id)
+        return ConversationHandler.END
+
+    if field not in allowed_fields:
+        await update.effective_chat.send_message(f"⛔ You can’t modify *{field}* in the current status (*{status}*).", parse_mode="Markdown", message_thread_id=thread_id)
+        return ConversationHandler.END
+
+    try:
+        if field in ["PROPOSED DATE | TIME", "CONFIRMED DATE | TIME"]:
             try:
-                # === Reformat date if modifying DATE ===
-                if field == "DATE":
-                    try:
-                        formatted = parse_and_format_dates(value)
-                        value = ", ".join(formatted)
-                        print(f"[DEBUG] Reformatted date value: {value}")
+                formatted = parse_and_format_dates(value)
+                value = ", ".join(formatted)
+                print(f"[DEBUG] Reformatted date value: {value}")
+            except ValueError:
+                error_msg = await update.message.reply_text(
+                    "❌ Invalid *date* format. Use:`DD MMM YYYY` (e.g. `23 JUN 2025`)",
+                    parse_mode="Markdown"
+                )
+                context.chat_data["modify_error_msg_id"] = error_msg.message_id
+                context.chat_data["invalid_input_msg_id"] = update.message.message_id
+                return MODIFY_VALUE
 
-                        # ✅ Delete old error + invalid input if any
-                        for key in ["modify_error_msg_id", "invalid_input_msg_id"]:
-                            msg_id = context.chat_data.pop(key, None)
-                            if msg_id:
-                                try:
-                                    await context.bot.delete_message(
-                                        chat_id=update.effective_chat.id,
-                                        message_id=msg_id
-                                    )
-                                    print(f"[DEBUG] Deleted message ID {msg_id} from previous error/input")
-                                except Exception as e:
-                                    print(f"[WARNING] Failed to delete message ID {msg_id}: {e}")
+        # === Step 3: Delete the new input message ===
+        try:
+            await update.message.delete()
+        except:
+            pass
 
-                    except ValueError:
-                        error_msg = await update.message.reply_text(
-                            "❌ Invalid *date* format. Use:\n`DD MMM YYYY` (e.g. `23 JUN 2025`)",
-                            parse_mode="Markdown"
-                        )
-                        context.chat_data["modify_error_msg_id"] = error_msg.message_id
-                        context.chat_data["invalid_input_msg_id"] = update.message.message_id
-                        return MODIFY_VALUE
+        # === Step 4: Update the sheet ===
+        col_index = SHEET_COLUMNS.index(field) + 1
+        if field == "PROPOSED DATE | TIME":
+            value = "\n".join(value.split(", "))
+            print(f"[DEBUG] Rewritten date value with newline: {repr(value)}")
 
-                # === Delete this new input message ===
+        range_name = f"{chr(64 + col_index)}{row_number}"  # e.g., C5
+        sheet.update(range_name=range_name, values=[[value]])
+        print(f"[DEBUG] Sheet updated at row {row_number}, column {col_index}")
+
+        # === Step 5: Clean up prompt messages ===
+        if "modify_prompt_msg_ids" in context.chat_data:
+            for msg_id in context.chat_data["modify_prompt_msg_ids"]:
                 try:
-                    await update.message.delete()
-                except:
-                    pass
-
-                col_index = SHEET_COLUMNS.index(field) + 1
-                print(f"[DEBUG] Updating sheet at row {row_number}, column {col_index} with value: {value}")
-                range_name = f"{chr(64 + col_index)}{row_number}"  # e.g., C5
-                sheet.update(range_name, [[value]])
-                print(f"[DEBUG] Sheet updated at row {row_number}, column {col_index}")
-
-                # Clean up prompt messages
-                try:
-                    if "modify_prompt_msg_ids" in context.chat_data:
-                        for msg_id in context.chat_data["modify_prompt_msg_ids"]:
-                            try:
-                                await asyncio.sleep(0.3)
-                                await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=msg_id)
-                            except BadRequest as e:
-                                print(f"[INFO] Prompt message {msg_id} already deleted or not found: {e}")
-                        context.chat_data.pop("modify_prompt_msg_ids")
-                except Exception as e:
-                    print(f"[WARNING] Unexpected failure when deleting prompt messages: {e}")
-
-                # Delete previous summary message if tracked
-                prev_msg_id = context.chat_data.get(f"summary_msg_{thread_id}")
-                if prev_msg_id:
-                    # Slight delay
                     await asyncio.sleep(0.3)
-                    try:
-                        await context.bot.unpin_chat_message(chat_id=update.effective_chat.id, message_id=prev_msg_id)
-                        await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=prev_msg_id)
-                        print(f"[DEBUG] Deleted previous summary message: {prev_msg_id}")
-                    except Exception as e:
-                        print(f"[WARNING] Could not delete previous summary: {e}")
+                    await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=msg_id)
+                except BadRequest as e:
+                    print(f"[INFO] Prompt message {msg_id} already deleted or not found: {e}")
+            context.chat_data.pop("modify_prompt_msg_ids")
 
-                # Prepare updated performance message
-                updated_row = sheet.row_values(row_number)
-                template = (
-                    f"\U0001F4E2 *Performance Summary*\n\n"
-                    f"\U0001F4CD *Event:* {updated_row[1]}\n"
-                    f"\U0001F4C5 *Date:* {updated_row[2]}\n"
-                    f"\U0001F4CC *Location:* {updated_row[3]}\n\n"
-                    f"\n{updated_row[4]}"
-                )
-
-                # Send and pin new summary
-                msg = await update.effective_chat.send_message(template, parse_mode="Markdown", message_thread_id=thread_id)
-                context.chat_data[f"summary_msg_{thread_id}"] = msg.message_id  # Track new summary message
-
-                await context.bot.pin_chat_message(
-                    chat_id=update.effective_chat.id,
-                    message_id=msg.message_id,  
-                    disable_notification=True
-                )
-
-                print(f"[DEBUG] Pinned updated summary for thread {thread_id}")
-                
-                # ✅ If date was modified, send interest poll
-                if field == "DATE":
-                    try:
-                        # Remove old poll if exists
-                        old_poll_msg_id = context.chat_data.get(f"interest_poll_msg_{thread_id}")
-                        if old_poll_msg_id:
-                            try:
-                                await asyncio.sleep(0.3)
-                                await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=old_poll_msg_id)
-                                print(f"[DEBUG] Deleted previous interest poll: {old_poll_msg_id}")
-                            except Exception as e:
-                                print(f"[WARNING] Failed to delete old poll message {old_poll_msg_id}: {e}")
-
-                        # Send new poll
-                        poll_msg = await send_interest_poll(
-                            bot=context.bot,
-                            chat_id=update.effective_chat.id,
-                            thread_id=thread_id,
-                            sheet=sheet
-                        )
-
-                        if poll_msg:
-                            context.chat_data[f"interest_poll_msg_{thread_id}"] = poll_msg["message_id"]
-                            print(f"[DEBUG] Saved new poll message ID: {poll_msg['message_id']}")
-                    except Exception as e:
-                        print(f"[WARNING] Failed to send interest poll: {e}")
-                
-                return ConversationHandler.END
-
+        # === Step 6: Delete previous summary ===
+        prev_msg_id = context.chat_data.get(f"summary_msg_{thread_id}")
+        if prev_msg_id:
+            await asyncio.sleep(0.3)
+            try:
+                await context.bot.unpin_chat_message(chat_id=update.effective_chat.id, message_id=prev_msg_id)
+                await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=prev_msg_id)
+                print(f"[DEBUG] Deleted previous summary message: {prev_msg_id}")
             except Exception as e:
-                print(f"[ERROR] Failed to update sheet: {e}")
-                return await update.message.reply_text(f"\u274C Failed to update: `{e}`", parse_mode="Markdown")
+                print(f"[WARNING] Could not delete previous summary: {e}")
 
-    print("[DEBUG] Thread ID not found in sheet")
-    return await update.message.reply_text("\u274C This thread is not registered in the sheet.")
+        # === Step 7: Prepare and send updated summary ===
+        updated_row = sheet.row_values(row_number)
+        while len(updated_row) < 5:
+            updated_row.append("")
+        status = updated_row[6] if len(updated_row) > 6 else ""
+        summary_title = "Performance Summary" if status else "Performance Opportunity"
+
+        date_lines = []
+        for entry in updated_row[2].splitlines():
+            entry = entry.strip()
+            if not entry:
+                continue
+            try:
+                dt = datetime.strptime(entry, "%d %b %Y %H%M")
+                formatted = f"• {dt.strftime('%d %b %Y').upper()} | {dt.strftime('%I:%M%p').lower()}"
+                date_lines.append(formatted)
+            except:
+                date_lines.append(f"• {entry}")
+        formatted_dates = "\n".join(date_lines)
+
+        template = (
+            f"📢 *{summary_title}*\n\n"
+            f"📍 *Event*\n"
+            f"• {updated_row[1]}\n\n"
+            f"📅 *Date | Time*\n"
+            f"{formatted_dates}\n\n"
+            f"📌 *Location*\n"
+            f"• {updated_row[3]}\n\n"
+            f"📌 *Performance Information:*\n"
+            f"{updated_row[4].strip()}"
+        )
+
+        msg = await update.effective_chat.send_message(template, parse_mode="Markdown", message_thread_id=thread_id)
+        await context.bot.pin_chat_message(chat_id=update.effective_chat.id, message_id=msg.message_id, disable_notification=True)
+        context.chat_data[f"summary_msg_{thread_id}"] = msg.message_id
+        print(f"[DEBUG] Pinned updated summary for thread {thread_id}")
+
+        # === Step 8: Resend poll if date changed ===
+        if field == "PROPOSED DATE | TIME":
+            try:
+                old_poll_msg_id = context.chat_data.get(f"interest_poll_msg_{thread_id}")
+                if old_poll_msg_id:
+                    try:
+                        await asyncio.sleep(0.3)
+                        await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=old_poll_msg_id)
+                        print(f"[DEBUG] Deleted previous interest poll: {old_poll_msg_id}")
+                    except Exception as e:
+                        print(f"[WARNING] Failed to delete old poll message {old_poll_msg_id}: {e}")
+
+                poll_msg = await send_interest_poll(
+                    bot=context.bot,
+                    chat_id=update.effective_chat.id,
+                    thread_id=thread_id,
+                    sheet=sheet
+                )
+
+                if poll_msg:
+                    context.chat_data[f"interest_poll_msg_{thread_id}"] = poll_msg["message_id"]
+                    print(f"[DEBUG] Saved new poll message ID: {poll_msg['message_id']}")
+            except Exception as e:
+                print(f"[WARNING] Failed to send interest poll: {e}")
+
+        return ConversationHandler.END
+
+    except Exception as e:
+        print(f"[ERROR] Failed to update sheet: {e}")
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=f"❌ Failed to update: `{e}`",
+            parse_mode="Markdown"
+        )
+        return ConversationHandler.END
+    
+async def handle_modify_date_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    _, selected = query.data.split("|")
+    thread_id = context.user_data.get("modify_thread_id")
+    proposed_dates = context.user_data.get("proposed_dates", [])
+
+    selected_indices = set(context.user_data.get("selected_date_indices", []))
+
+    if selected == "CONFIRM":
+        if not selected_indices:
+            await query.message.reply_text(
+                "⚠️ Please select at least one date before confirming.",
+                message_thread_id=thread_id
+            )
+            return
+
+        # ✅ Always follow original order from GSheet, not click order
+        final_dates = []
+        for i, raw in enumerate(proposed_dates):
+            if str(i) not in selected_indices:
+                continue
+
+            raw = raw.strip()
+            parsed = False
+            for fmt in ("%d %b %Y | %I:%M%p", "%d %b %Y %H%M", "%d %b %Y"):
+                try:
+                    dt = datetime.strptime(raw, fmt)
+                    formatted = f"{dt.strftime('%d %b %Y').upper()} | {dt.strftime('%I:%M%p').lower()}"
+                    final_dates.append(formatted)
+                    parsed = True
+                    break
+                except Exception as e:
+                    continue
+            if not parsed:
+                print(f"[WARNING] Failed to parse date '{raw}', storing as-is")
+                final_dates.append(raw.upper())
+
+        final_value = "\n".join(final_dates)
+
+        # === Write to GSheet ===
+        sheet = get_gspread_sheet()
+        records = sheet.get_all_records()
+        row = None
+        row_index = None
+        for idx, r in enumerate(records):
+            if str(r["THREAD ID"]) == str(thread_id):
+                row = r
+                row_index = idx + 2
+                sheet.update_cell(row_index, 6, final_value)  # CONFIRMED DATE | TIME
+                break
+
+        # === Delete previous summary
+        prev_msg_id = context.chat_data.get(f"summary_msg_{thread_id}")
+        if prev_msg_id:
+            try:
+                await context.bot.unpin_chat_message(chat_id=query.message.chat.id, message_id=prev_msg_id)
+                await context.bot.delete_message(chat_id=query.message.chat.id, message_id=prev_msg_id)
+            except Exception as e:
+                print(f"[WARNING] Failed to delete previous summary: {e}")
+
+        # === Print new summary
+        formatted_lines = [f"• {d}" for d in final_dates]
+        template = (
+            f"📢 *Performance Summary*\n\n"
+            f"📍 *Event*\n• {row['EVENT']}\n\n"
+            f"📅 *Date | Time*\n" +
+            "\n".join(formatted_lines) + "\n\n"
+            f"📌 *Location*\n• {row['LOCATION']}\n\n"
+            f"📌 *Performance Information:*\n{row['PERFORMANCE INFO'].strip()}"
+        )
+        msg = await query.message.chat.send_message(template, parse_mode="Markdown", message_thread_id=thread_id)
+        await context.bot.pin_chat_message(chat_id=query.message.chat.id, message_id=msg.message_id, disable_notification=True)
+        context.chat_data[f"summary_msg_{thread_id}"] = msg.message_id
+
+        # Cleanup
+        context.user_data.pop("proposed_dates", None)
+        context.user_data.pop("selected_date_indices", None)
+        try:
+            await context.bot.delete_message(chat_id=query.message.chat.id, message_id=query.message.message_id)
+        except:
+            pass
+        return
+
+    # === Toggle selection
+    if selected in selected_indices:
+        selected_indices.remove(selected)
+    else:
+        selected_indices.add(selected)
+    context.user_data["selected_date_indices"] = selected_indices
+
+    # === Redraw button UI
+    buttons = []
+    for i, d in enumerate(proposed_dates):
+        label = f"✅ {d}" if str(i) in selected_indices else d
+        buttons.append([InlineKeyboardButton(label, callback_data=f"modify_date_selected|{i}")])
+    buttons.append([InlineKeyboardButton("✅ Confirm Selection", callback_data="modify_date_selected|CONFIRM")])
+    markup = InlineKeyboardMarkup(buttons)
+
+    try:
+        await query.edit_message_reply_markup(reply_markup=markup)
+    except Exception as e:
+        print(f"[WARNING] Could not update buttons: {e}")
+
+async def handle_modify_status_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    _, selection = query.data.split("|")
+    thread_id = context.user_data.get("modify_thread_id")
+
+    if selection == "CANCEL":
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except:
+            pass
+        return
+
+    if selection == "REJECTED":
+        print(f"[DEBUG] Admin rejected performance in thread {thread_id}")
+        sheet = get_gspread_sheet()
+        records = sheet.get_all_records()
+        for idx, row in enumerate(records):
+            if str(row["THREAD ID"]) == str(thread_id):
+                row_index = idx + 2
+                sheet.update_cell(row_index, 7, "REJECTED")  # STATUS column
+                break
+
+        # Print cancellation notice
+        try:
+            await query.message.chat.send_message(
+                "🚫 This performance has been *cancelled*. The topic will be deleted shortly.",
+                parse_mode="Markdown",
+                message_thread_id=thread_id
+            )
+        except:
+            pass
+
+        # Delay then delete topic
+        await delete_topic_with_delay(context, chat_id=query.message.chat.id, thread_id=thread_id)
+        return
 
 # === Setup Bot ===
 def main():
@@ -967,10 +1568,15 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("threadid", thread_id_command))
-    app.add_handler(CommandHandler("remind", remind_command))  
+    app.add_handler(CommandHandler("remind", remind_command))
+    app.add_handler(CommandHandler("confirmation", confirmation))  
     app.add_handler(conv_handler)
     app.add_handler(CallbackQueryHandler(topic_type_selection, pattern="^topic_type\\|"))
+    app.add_handler(CallbackQueryHandler(confirmation_callback, pattern="^CONFIRM\\|"))
+    app.add_handler(CallbackQueryHandler(final_date_selection, pattern="^FINALDATE\\|"))
+    app.add_handler(CallbackQueryHandler(handle_modify_status_selection, pattern="^modify_status_selected\\|"))
     app.add_handler(modify_conv_handler)
+    app.add_handler(CallbackQueryHandler(handle_modify_date_selection, pattern='^modify_date_selected\\|'))
     app.add_handler(CommandHandler("poll", send_poll_handler))
     app.add_handler(PollAnswerHandler(handle_poll_answer))
     app.add_handler(MessageHandler(filters.ALL, handle_message))
@@ -992,3 +1598,6 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"[ERROR] Bot failed to start: {e}")
         raise
+
+
+

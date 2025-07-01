@@ -1305,14 +1305,24 @@ async def apply_modify_value(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 formatted = parse_and_format_dates(value)
                 value = ", ".join(formatted)
                 print(f"[DEBUG] Reformatted date value: {value}")
-            except ValueError:
-                error_msg = await update.message.reply_text(
-                    "❌ Invalid *date* format. Use:`DD MMM YYYY` (e.g. `23 JUN 2025`)",
-                    parse_mode="Markdown"
+            except ValueError as e:
+                error_msg = await update.effective_chat.send_message(
+                    str(e),
+                    parse_mode="Markdown",
+                    message_thread_id=context.user_data["modify_thread_id"]
                 )
                 context.chat_data["modify_error_msg_id"] = error_msg.message_id
                 context.chat_data["invalid_input_msg_id"] = update.message.message_id
+                
                 return MODIFY_VALUE
+            
+        for key in ["modify_error_msg_id", "invalid_input_msg_id"]:
+            msg_id = context.chat_data.pop(key, None)
+            if msg_id:
+                try:
+                    await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=msg_id)
+                except Exception as ex:
+                    print(f"[WARNING] Failed to delete previous {key} message: {ex}")
 
         # === Step 3: Delete the new input message ===
         try:

@@ -5,7 +5,7 @@ from io import StringIO
 from telegram import Update, ChatMember, InlineKeyboardButton, InlineKeyboardMarkup, constants, BotCommandScopeDefault, BotCommandScopeChatAdministrators, BotCommand
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler,
-    ConversationHandler, ContextTypes, filters, PollAnswerHandler, Application
+    ConversationHandler, ContextTypes, filters, PollAnswerHandler, Application, ChatJoinRequestHandler, ChatMemberHandler
 )
 from oauth2client.service_account import ServiceAccountCredentials
 import os
@@ -24,6 +24,8 @@ GOOGLE_CREDENTIALS_JSON = os.environ.get("GOOGLE_CREDENTIALS_JSON")
 SHEET_NAME = "NTUCD AY25/26 Timeline"
 SHEET_TAB_NAME = "PERFORMANCE List"
 CHAT_ID = -1002590844000 # Main group Chat ID
+# State for conversation handler
+ASK_MATRIC = 1234
 
 # === Conversation states ===
 DATE, EVENT, LOCATION = range(3)
@@ -50,6 +52,7 @@ active_polls = {}  # Example: {"123456789": "training", "987654321": "interest"}
 # For each type of poll, track answers if needed
 yes_voters = set()
 interest_votes = {}  # poll_id -> {user_id: [option_indices]}
+pending_users = {} # pending user join request
 
 # === GUI COMMANDS ===
 # Step 1: Define admin-only commands
@@ -206,6 +209,27 @@ def get_gspread_sheet(tab_name=SHEET_TAB_NAME):
     client = gspread.authorize(creds)
     return client.open(SHEET_NAME).worksheet(tab_name)
 
+# Google Sheet for Welcome Tea responses 
+def get_gspread_sheet_welcome_tea(tab_name = "Form Responses 1"):
+    creds_dict = GOOGLE_CREDENTIALS_JSON
+    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+    client = gspread.authorize(creds)
+    return client.open("NTUCD Welcome Tea Registration 2025 (Responses)").worksheet(tab_name)
+
+def matric_valid(matric_number: str) -> bool:
+    sheet = get_gspread_sheet_welcome_tea()
+    rows = sheet.get_all_records()  # Each row is a dict
+
+    for row in rows:
+        matric_in_row = str(row.get("Matriculation Number", "")).strip().upper()
+        attendance = str(row.get("Attendance", "")).strip()
+
+        if matric_in_row == matric_number.strip().upper():
+            # ✅ Attendance must be exactly '1'
+            return attendance == "1"
+
+    return False
 def append_to_others_list(thread_id):
     try:
         sheet = get_gspread_sheet("OTHERS List")
@@ -224,39 +248,44 @@ async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     user = update.effective_user
+    chat = update.effective_chat  # ✅ always handy!
     thread_id = msg.message_thread_id
     user_is_admin = await is_admin(update, context)
 
     print(f"[DEBUG] handle_message called by user {user.id} in thread {thread_id}")
     print(f"[DEBUG] user_is_admin: {user_is_admin}")
-    # === EXEMPT specific thread IDs from auto prompt ===
+
     if thread_id in EXEMPTED_THREAD_IDS or thread_id in OTHERS_THREAD_IDS:
-        # No prompt, just proceed with restrictions below
         pass
     else:
-        # === AUTO INITIATION WHEN NEW TOPIC STARTS ===
         if msg.is_topic_message and thread_id not in initialized_topics:
             initialized_topics.add(thread_id)
-            #testing start
+
+            # testing start
             sheet = get_gspread_sheet()
             records = sheet.get_all_records()
             for idx, row in enumerate(records):
                 if str(row["THREAD ID"]) == str(thread_id):
                     return
-            #testing end
+            # testing end
+
             if user_is_admin:
                 keyboard = InlineKeyboardMarkup([
                     [InlineKeyboardButton("PERF", callback_data=f"topic_type|PERF|{thread_id}")],
-                    #[InlineKeyboardButton("EVENT", callback_data=f"topic_type|EVENT|{thread_id}")],
                     [InlineKeyboardButton("OTHERS", callback_data=f"topic_type|OTHERS|{thread_id}")]
                 ])
-                prompt = await update.effective_chat.send_message(
+                prompt = await chat.send_message(
                     "What's the topic for? PERF or OTHERS?",
                     reply_markup=keyboard,
                     message_thread_id=thread_id
                 )
                 context.chat_data[f"init_prompt_{thread_id}"] = prompt.message_id
-            await msg.delete()
+
+            # ✅ SAFE DELETE
+            if chat.type in ["group", "supergroup"]:
+                await msg.delete()
+            else:
+                print(f"[DEBUG] Not a group — skip delete.")
             return
 
     # === THREAD MESSAGE RESTRICTIONS ===
@@ -266,18 +295,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Restrict all command messages (e.g., /command)
         if msg.text and msg.text.startswith("/"):
             print(f"[DEBUG] User {user.id} sent command in thread {thread_id}. Deleting.")
-            try:
-                await msg.delete()
-            except Exception as e:
-                print(f"[ERROR] Failed to delete command message: {e}")
+            if chat.type in ["group", "supergroup"]:
+                try:
+                    await msg.delete()
+                except Exception as e:
+                    print(f"[ERROR] Failed to delete command message: {e}")
+            else:
+                print(f"[DEBUG] Not a group — skip delete.")
 
         # About NTUCD — block all messages
         if thread_id is None:
             print(f"[DEBUG] Message in ABOUT NTUCD. Deleting.")
-            try:
-                await msg.delete()
-            except Exception as e:
-                print(f"[ERROR] Failed to delete message in ABOUT thread: {e}")
+            if chat.type in ["group", "supergroup"]:
+                try:
+                    await msg.delete()
+                except Exception as e:
+                    print(f"[ERROR] Failed to delete message in ABOUT thread: {e}")
+            else:
+                print(f"[DEBUG] Not a group — skip delete.")
 
         # Voting Topic — only allow replies to polls
         elif thread_id == TOPIC_VOTING_ID:
@@ -1574,6 +1609,199 @@ async def handle_modify_status_selection(update: Update, context: ContextTypes.D
         # Delay then delete topic
         await delete_topic_with_delay(context, chat_id=query.message.chat.id, thread_id=thread_id)
         return
+    
+# Join request 
+async def join_request_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.chat_join_request.from_user
+    FORM_LINK = "https://docs.google.com/forms/d/e/1FAIpQLSdZkIn2NC3TkLCLJpgB-jynKSlAKZg_vqw0bu3vywu4tqTzIg/viewform?usp=header"
+
+    print(f"Join request received from {user.first_name}")
+
+    # Always send the form
+    try:
+        await context.bot.send_message(
+            chat_id=user.id,
+            text=(
+                f"Hi {user.first_name}, thanks for your request to join NTU Chinese Drums Welcome Tea Session!\n\n"
+                f"Please fill up the registration form:\n{FORM_LINK}\n\n"
+                "Any issues feel free to contact chairperson Brandon @Brandonkjj or vice-chairperson Pip Hui @pip_1218 on telegram!"
+            )
+        )
+    except Exception as e:
+        print("Could not message user:", e)
+
+    # ✅ Store their pending join request
+    pending_users[user.id] = update.chat_join_request
+
+async def start_verification(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+
+    if user_id not in pending_users:
+        await update.message.reply_text(
+            "❌ You don't have a pending join request or it has already been approved. Please request to join the group first\n\n"
+            "Any issues feel free to contact chairperson Brandon @Brandonkjj or vice-chairperson Pip Hui @pip_1218 on telegram!"
+        )
+        return ConversationHandler.END
+
+    await update.message.reply_text("Please enter your NTU matriculation number (case sensitive) to verify. e.g U2512345F")
+    return ASK_MATRIC
+
+async def handle_matric(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    matric = update.message.text.strip()
+
+    if user_id not in pending_users:
+        await update.message.reply_text(
+            "❌ You don't have a pending join request or it has already been approved. Please request to join the group first.\n\n"
+            "Any issues feel free to contact chairperson Brandon @Brandonkjj or vice-chairperson Pip Hui @pip_1218 on telegram!"
+        )
+        return ConversationHandler.END
+
+    join_request = pending_users[user_id]
+
+    if matric_valid(matric):
+        await join_request.approve()
+        update_user_id_in_sheet(matric, user_id)
+        await update.message.reply_text(
+            "✅ Matric number and attendance verified. You have been approved. Welcome!"
+        )
+        pending_users.pop(user_id, None)
+        return ConversationHandler.END
+
+    else:
+        await update.message.reply_text(
+            "❌ We couldn't verify your matric number or attendance. Please check your entry and try again.\n\n"
+            "🔁 Please enter your NTU matriculation number (case sensitive) again e.g U2512345F:\n\n"
+            "Any issues feel free to contact chairperson Brandon @Brandonkjj or vice-chairperson Pip Hui @pip_1218 on telegram!"
+        )
+        # Stay in ASK_MATRIC state
+        return ASK_MATRIC
+
+def copy_user_to_timeline(welcome_row: dict, telegram_user_id: int):
+    others_sheet = get_gspread_sheet("PERFORMER Info")  
+    name = welcome_row.get("Your Full Name (according to matric card)", "").strip()
+    nickname = welcome_row.get("What name or nickname do you prefer to be called? ", "").strip()
+
+    # Compose a new row
+    new_row = [name, nickname, str(telegram_user_id), "Join", ""]
+
+    # Append to the PERFORMER Info List
+    others_sheet.append_row(new_row, value_input_option="USER_ENTERED")
+    print(f"[INFO] Copied to PERFORMER Info List: {new_row}")
+
+def update_user_id_in_sheet(matric_number: str, telegram_user_id: int):
+    sheet = get_gspread_sheet_welcome_tea()
+    rows = sheet.get_all_records()
+
+    for idx, row in enumerate(rows, start=2):  # +2 because get_all_records() skips header, rows start at index 2
+        matric_in_row = str(row.get("Matriculation Number", "")).strip().upper()
+        if matric_in_row == matric_number.strip().upper():
+            # Assume there is a column named 'User ID'
+            user_id_col = None
+            header = sheet.row_values(1)
+            for i, col_name in enumerate(header, start=1):
+                if col_name.strip().lower() == "user id":
+                    user_id_col = i
+                    break
+
+            if user_id_col:
+                sheet.update_cell(idx, user_id_col, str(telegram_user_id))
+                print(f"[INFO] User ID {telegram_user_id} saved for {matric_number} in row {idx}.")
+
+                # ✅ Copy to timeline sheet — PERFORMER info
+                copy_user_to_timeline(row, telegram_user_id)
+
+            else:
+                print("[ERROR] 'User ID' column not found in sheet.")
+            return
+
+    print("[WARN] Matric number not found when trying to update User ID.")
+
+# Avoid double entries    
+def user_already_in_timeline(user_id: int) -> bool:
+    others_sheet = get_gspread_sheet("PERFORMER Info")
+    all_rows = others_sheet.get_all_records()
+    for row in all_rows:
+        if str(row.get("User ID", "")).strip() == str(user_id):
+            return True
+    return False
+
+# Manually adding new member
+async def handle_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    for member in update.message.new_chat_members:
+        user_id = member.id
+        name = member.first_name or member.last_name
+
+        print(f"[INFO] ✅ New member joined: {name} ({user_id})")
+        print(f"[DEBUG] Telegram user object: is_bot={member.is_bot}, full_name={member.full_name}")
+
+        if user_already_in_timeline(user_id):
+            print(f"[INFO] User ID {user_id} already exists in timeline — skipping fallback insert.")
+        else:
+            # Fallback row → use name for both name & nickname
+            fallback_row = {
+                "Your Full Name (according to matric card)": name,
+                "What name or nickname do you prefer to be called? ": name
+            }
+            copy_user_to_timeline(fallback_row, user_id)
+
+        # await update.effective_chat.send_message(
+        #     f"👋 Welcome, {name}!"
+        # )
+        
+async def handle_member_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    status_change = update.chat_member
+    old_status = status_change.old_chat_member.status
+    new_status = status_change.new_chat_member.status
+    user = status_change.new_chat_member.user
+    
+    print(f"[DEBUG] Status change for {user.full_name} ({user.id}): {old_status} ➝ {new_status}")
+
+    # ✅ Detect first join
+    if old_status == "left" and new_status == "member":
+        print(f"[INFO] 🎉 User {user.full_name} ({user.id}) has joined the group for the first time.")
+        
+        if not user_already_in_timeline(user.id):
+            fallback_row = {
+                "Your Full Name (according to matric card)": user.full_name,
+                "What name or nickname do you prefer to be called? ": user.full_name
+            }
+            copy_user_to_timeline(fallback_row, user.id)
+        else:
+            print(f"[INFO] User {user.id} already exists in sheet — skip adding.")
+    
+    # ✅ Detect leave (either voluntarily or kicked)
+    elif old_status in ("member", "administrator") and new_status in ("left", "kicked"):
+        print(f"[INFO] 🚪 User {user.full_name} ({user.id}) has left the group.")
+        success = mark_user_left_in_sheet(user.id)
+        print(f"[INFO] Marked as 'Left' in sheet: {success}")
+        
+def mark_user_left_in_sheet(user_id: int) -> bool:
+    sheet = get_gspread_sheet("PERFORMER Info")
+    records = sheet.get_all_records()
+    header = sheet.row_values(1)
+
+    # Get column indexes
+    user_id_col = header.index("User ID") + 1
+    status_col = header.index("Status") + 1 if "Status" in header else None
+    leave_date_col = header.index("Leave Date") + 1 if "Leave Date" in header else None
+
+    # If any expected column is missing, return False
+    if not (user_id_col and status_col and leave_date_col):
+        print("[ERROR] Missing required columns: 'User ID', 'Status', or 'Leave Date'")
+        return False
+
+    for idx, row in enumerate(records, start=2):  # +2: header + 1-based index
+        if str(row.get("User ID", "")).strip() == str(user_id):
+            # Update 'Status' to 'Left'
+            sheet.update_cell(idx, status_col, "Left")
+            # Update 'Leave Date' to now
+            leave_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            sheet.update_cell(idx, leave_date_col, leave_time)
+            return True
+
+    print(f"[WARN] User ID {user_id} not found in sheet.")
+    return False
 
 # === Setup Bot ===
 def main():
@@ -1598,6 +1826,16 @@ def main():
         fallbacks=[CommandHandler("cancel", cancel)],
         allow_reentry=True,
     )
+    
+    # New verify handler
+    verify_conv_handler = ConversationHandler(
+        entry_points=[CommandHandler("verify", start_verification)],
+        states={
+            ASK_MATRIC: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_matric)],
+        },
+        fallbacks=[],
+        allow_reentry=True,
+    )
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("threadid", thread_id_command))
@@ -1612,7 +1850,12 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_modify_date_selection, pattern='^modify_date_selected\\|'))
     app.add_handler(CommandHandler("poll", send_poll_handler))
     app.add_handler(PollAnswerHandler(handle_poll_answer))
+    app.add_handler(verify_conv_handler)
+    app.add_handler(ChatMemberHandler(handle_member_status, ChatMemberHandler.CHAT_MEMBER))
+    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, handle_new_member))
     app.add_handler(MessageHandler(filters.ALL, handle_message))
+    app.add_handler(ChatJoinRequestHandler(join_request_handler))
+
     
     print("Bot is running...")
     
@@ -1623,7 +1866,7 @@ def main():
         print(f"[INFO] Loaded {len(OTHERS_THREAD_IDS)} OTHERS thread IDs.")
     except Exception as e:
         print(f"[ERROR] Failed to load OTHERS List: {e}")
-    app.run_polling()
+    app.run_polling(allowed_updates=["chat_member"])
 
 if __name__ == "__main__":
     try:

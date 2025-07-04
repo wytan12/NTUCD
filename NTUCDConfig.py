@@ -1866,7 +1866,7 @@ def main():
         print(f"[INFO] Loaded {len(OTHERS_THREAD_IDS)} OTHERS thread IDs.")
     except Exception as e:
         print(f"[ERROR] Failed to load OTHERS List: {e}")
-    app.run_polling(allowed_updates=["chat_member"])
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     try:

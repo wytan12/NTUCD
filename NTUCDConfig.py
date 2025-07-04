@@ -1853,8 +1853,8 @@ def main():
     app.add_handler(verify_conv_handler)
     app.add_handler(ChatMemberHandler(handle_member_status, ChatMemberHandler.CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, handle_new_member))
-    app.add_handler(MessageHandler(filters.ALL, handle_message))
     app.add_handler(ChatJoinRequestHandler(join_request_handler))
+    app.add_handler(MessageHandler(filters.ALL, handle_message))
 
     
     print("Bot is running...")

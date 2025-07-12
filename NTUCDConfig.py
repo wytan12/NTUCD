@@ -211,7 +211,7 @@ def get_gspread_sheet(tab_name=SHEET_TAB_NAME):
 
 # Google Sheet for Welcome Tea responses 
 def get_gspread_sheet_welcome_tea(tab_name = "Form Responses 1"):
-    creds_dict = GOOGLE_CREDENTIALS_JSON
+    creds_dict = json.loads(GOOGLE_CREDENTIALS_JSON)
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
     client = gspread.authorize(creds)

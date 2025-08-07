@@ -1618,6 +1618,7 @@ async def join_request_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     print(f"Join request received from {user.first_name}")
 
     # Always send the form
+    # First message
     try:
         await context.bot.send_message(
             chat_id=user.id,
@@ -1625,6 +1626,37 @@ async def join_request_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 f"Hi {user.first_name}, thanks for your request to join NTU Chinese Drums Welcome Tea Session!\n\n"
                 f"Please fill up the registration form:\n{FORM_LINK}\n\n"
                 "Any issues feel free to contact chairperson Brandon @Brandonkjj or vice-chairperson Pip Hui @pip_1218 on telegram!"
+            )
+        )
+        # Second message
+        await context.bot.send_message(
+            chat_id=user.id,
+            text=(
+                "NTU Chinese Drums' Welcome Tea Session\n\n"
+                "Date: 19th August 2025 (Tuesday)\n"
+                "Time: 1830-2130 (GMT+8)\n"
+                "Venue: Nanyang House Foyer (https://goo.gl/maps/7yqc3EfYNE92)\n"
+                "Dress Code: Comfortable & Casual (we generally go barefoot for our practices / performances so preferably wear slippers, but covered shoes are fine too!)\n\n"
+                "Dinner is provided and time is allocated to eat it so no need to takeaway any food, you can come here straight away!\n\n"
+                "For more information, check out NTU Chinese Drums Instagram: \n"
+                "https://www.instagram.com/ntu_chinesedrums?igsh=ZnR2dWswcnpxbmM5"
+            )
+        )
+        # Third message
+        await context.bot.send_message(
+            chat_id=user.id,
+            text=(
+                "Written guide to Nanyang House: \n\n"
+                "Closest bus stops to Nanyang House are Hall 2 (red) and Hall 6 (blue)!\n\n"
+                "Take to either bus stop and follow the map below to reach the crossroads; you should see a road + sheltered walkway that slowly inclines upwards.\n\n"
+                "When you walk up the sheltered walkway, you will find a LONG ASS stair on the right. Go UP the stairs until you reach the top! (cArdio 😮‍💨)\n\n"
+                "You should see a concrete/stoneish path; walk forward until you see the clear glass doors on the right, then go through the door (DON'T GO UP ANY STAIRS) and out the opposite door where you'll see a zebra crossing thing leading to a little opening into a building; just head straight ahead and we are there!!\n\n"
+                "Video guide from Hall 2 bus stop to Nanyang House if you are taking red bus: \n"
+                "https://drive.google.com/file/d/1PWvvD4kmmnYbFOL0AzE25NEiQ2983ZJl/view?usp=drive_link \n\n"
+                "Video guide from Hall 6 bus stop to Nanyang House if you are taking blue bus: \n"
+                "https://drive.google.com/file/d/1ZFmAQHcFQL6VpNzO87UG6KB0u0FuOAlh/view?usp=drive_link \n\n"
+                "PDF Guide to Nanyang House: \n"
+                "https://drive.google.com/file/d/1pO1GoNn4MReqFXqBUowyZPL7EJqKpmHb/view?usp=drive_link"
             )
         )
     except Exception as e:

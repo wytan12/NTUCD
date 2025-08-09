@@ -6,7 +6,7 @@ from config.commands import set_all_commands  # ✅ Import from commands.py
 from handlers.admin import AdminHandlers
 from handlers.performance import PerformanceHandlers
 from handlers.membership import MembershipHandlers
-from handlers.messaging import MessageHandlers
+from handlers.message import MessageHandlers
 from handlers.polls import PollHandlers
 from models.constants import ConversationStates
 

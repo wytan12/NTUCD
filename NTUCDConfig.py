@@ -1635,49 +1635,36 @@ async def join_request_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await context.bot.send_message(
             chat_id=user.id,
             text=(
-                f"Hi {user.first_name}, thanks for your request to join <b>NTU Chinese Drums Welcome Tea Session</b>! 🥁\n\n"
-                f"Please fill up the registration form here:\n"
-                f"<a href='https://docs.google.com/forms/d/e/1FAIpQLSdZkIn2NC3TkLCLJpgB-jynKSlAKZg_vqw0bu3vywu4tqTzIg/viewform?usp=header'>Registration Form</a>\n\n"
-                f"If you have any issues, feel free to contact:\n"
-                f"👉 Chairperson Brandon: @Brandonkjj\n"
-                f"👉 Vice-chairperson Pip Hui: @pip_1218"
-            ),
-            parse_mode=ParseMode.HTML
-        )
-        # Second message
-        await context.bot.send_message(
-            chat_id=user.id,
-            text=(
-                "<b>NTU Chinese Drums' Welcome Tea Session</b>\n\n"
+                f"Hi {user.first_name}, Welcome!!🥁\n\n"
+                "<b>NTU Chinese Drums' Welcome Tea Session</b>\n"
                 "<b>Date:</b> 19th August 2025 (Tuesday)\n"
-                "<b>Time:</b> 1830–2130 (GMT+8)\n"
+                "<b>Time:</b> 1830 – 2130 (GMT+8)\n"
                 "<b>Venue:</b> <a href='https://goo.gl/maps/7yqc3EfYNE92'>Nanyang House Foyer</a>\n"
                 "<b>Dress Code:</b> Comfortable & Casual (we generally go barefoot for our practices/performances, "
                 "so preferably wear slippers – but covered shoes are fine too!)\n\n"
                 "🍱 <b>Dinner is provided</b> and time is allocated to eat, so no need to dabao. You can come straight from class!\n\n"
-                "📷 <b>More info:</b> <a href='https://www.instagram.com/ntu_chinesedrums?igsh=ZnR2dWswcnpxbmM5'>Instagram @ntu_chinesedrums</a>"
+                "<b>🗺 Video Guide to Nanyang House</b>\n"
+                "▶️ <b>Red Bus (Hall 2) Video Guide:</b>\n"
+                "<a href='https://drive.google.com/file/d/1PWvvD4kmmnYbFOL0AzE25NEiQ2983ZJl/view?usp=drive_link'>Watch here</a>\n"
+                "▶️ <b>Blue Bus (Hall 6) Video Guide:</b>\n"
+                "<a href='https://drive.google.com/file/d/1ZFmAQHcFQL6VpNzO87UG6KB0u0FuOAlh/view?usp=drive_link'>Watch here</a>\n"
+                "📄 <b>PDF Guide to Nanyang House:</b>\n"
+                "<a href='https://drive.google.com/file/d/1pO1GoNn4MReqFXqBUowyZPL7EJqKpmHb/view?usp=drive_link'>View PDF</a>\n\n"
             ),
             parse_mode=ParseMode.HTML
-        )
-        # Third message
+        )  
+
+        # Send registration form link
         await context.bot.send_message(
             chat_id=user.id,
             text=(
-                "<b>🗺 Guide to Nanyang House:</b>\n\n"
-                "🚏 Closest bus stops to Nanyang House are <b>Hall 2 (red)</b> and <b>Hall 6 (blue)</b>!\n\n"
-                "Take either bus stop and follow the map below to reach the crossroads.\n"
-                "You should see a road and a sheltered walkway that slowly inclines upwards.\n\n"
-                "When you walk up the sheltered walkway, you will find a <b>LONG flight of stairs</b> on the right.\n"
-                "<b>Go UP the stairs</b> until you reach the top! (Cardio 😮‍💨)\n\n"
-                "You should see a concrete/stone path. Walk forward until you see the clear glass doors on the right.\n"
-                "Go through the door (DON'T go up any stairs), and out the opposite door where you'll see a zebra crossing leading into a building.\n"
-                "<b>Just head straight and we are there!!</b> 🎉\n\n"
-                "▶️ <b>Red Bus (Hall 2) Video Guide:</b>\n"
-                "<a href='https://drive.google.com/file/d/1PWvvD4kmmnYbFOL0AzE25NEiQ2983ZJl/view?usp=drive_link'>Watch here</a>\n\n"
-                "▶️ <b>Blue Bus (Hall 6) Video Guide:</b>\n"
-                "<a href='https://drive.google.com/file/d/1ZFmAQHcFQL6VpNzO87UG6KB0u0FuOAlh/view?usp=drive_link'>Watch here</a>\n\n"
-                "📄 <b>PDF Guide to Nanyang House:</b>\n"
-                "<a href='https://drive.google.com/file/d/1pO1GoNn4MReqFXqBUowyZPL7EJqKpmHb/view?usp=drive_link'>View PDF</a>"
+                f"🌸 To make our Welcome Tea run smoothly, we’d love it if you could fill in the sign-up form below 📝💛\n"
+                f"<a href='https://docs.google.com/forms/d/e/1FAIpQLSdZkIn2NC3TkLCLJpgB-jynKSlAKZg_vqw0bu3vywu4tqTzIg/viewform?usp=header'>Registration Form</a>\n"
+                f"(you can ignore this if you’ve already done so ✔️)\n\n"
+                f"💬 If you have any queries, feel free to contact:\n"
+                f"👉 Chairperson Brandon: @Brandonkjj\n"
+                f"👉 Vice-chairperson Pip Hui: @pip_1218\n\n"
+                f"👋 See you next Tuesday! 🎉"
             ),
             parse_mode=ParseMode.HTML
         )

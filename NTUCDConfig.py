@@ -366,6 +366,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elif is_text:
                 print(f"[DEBUG] ❌ Text message in MEDIA thread {thread_id}. Deleting.")
                 await msg.delete()
+            elif is_valid_doc:
+                print(f"[ALLOWED] ✅ Valid document in MEDIA thread {thread_id}")
             elif msg.document:
                 print(f"[DEBUG] ❌ Invalid document type: {msg.document.mime_type} in MEDIA thread {thread_id}. Deleting.")
                 await msg.delete()

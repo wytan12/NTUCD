@@ -24,6 +24,7 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 GOOGLE_CREDENTIALS_JSON = os.environ.get("GOOGLE_CREDENTIALS_JSON")
 SHEET_NAME = "NTUCD AY25/26 Timeline"
 SHEET_TAB_NAME = "PERFORMANCE List"
+ATTENDANCE_TAB = "Attendance List"
 CHAT_ID = -1002590844000 # Main group Chat ID
 # CHAT_ID = -1002614985856 # Debug group Chat ID
 
@@ -136,14 +137,163 @@ def get_next_monday_8pm(now=None):
         return this_monday_8pm + timedelta(days=7)
     return this_monday_8pm
 
-# === REMINDER ===
+def get_attendance_ws():
+    return get_gspread_sheet(ATTENDANCE_TAB)
+
+def _find_or_create_header_rows(ws):
+    """Ensure row 1 = 'Tele Poll ID', row 2 = 'Training Date'."""
+    values = ws.get_all_values()
+    # Make sure we have at least 2 rows
+    if len(values) < 2:
+        # Ensure at least 2 rows exist (append blanks if needed)
+        need = 2 - len(values)
+        for _ in range(need):
+            ws.append_row([""])
+        values = ws.get_all_values()
+
+    # Set labels if missing
+    if not values or not values[0] or (values[0][0] or "").strip() != "Tele Poll ID":
+        ws.update_acell("A1", "Tele Poll ID")
+    values = ws.get_all_values()  # refresh
+    if len(values) < 2 or not values[1] or (values[1][0] or "").strip() != "Training Date":
+        ws.update_acell("A2", "Training Date")
+
+def _date_label_from_display(date_str: str) -> str:
+    """
+    Your send_poll stores date like 'September 16, 2025'.
+    Attendance headers use short 'd/m' like '16/9'.
+    Convert to 'd/m' (no leading zeros).
+    """
+    date_str = (date_str or "").strip()
+    # Already looks like d/m? just return
+    if "/" in date_str and date_str.count("/") == 1 and all(p.isdigit() for p in date_str.split("/")):
+        return date_str
+
+    # Try common formats
+    for fmt in ("%B %d, %Y", "%d %b %Y", "%d %B %Y"):
+        try:
+            dt = datetime.strptime(date_str, fmt)
+            d, m = dt.day, dt.month
+            return f"{d}/{m}"
+        except Exception:
+            continue
+
+    # Fallback: keep original (won't match headers unless identical)
+    return date_str
+
+def _get_existing_header_row(ws, row_idx: int) -> list[str]:
+    """Returns the full row values (1-based row index)."""
+    return ws.row_values(row_idx)
+
+def _find_or_create_date_column(ws, short_label: str) -> int:
+    """
+    Finds the column index where row 2 ('Training Date') equals short_label.
+    If not found, appends at the next empty column.
+    """
+    header_row = _get_existing_header_row(ws, 2)  # row 2 = Training Date row
+    # Ensure at least col A exists
+    if not header_row:
+        header_row = ["Training Date"]
+        ws.update_acell("A2", "Training Date")
+
+    # Find existing column
+    for idx, val in enumerate(header_row, start=1):
+        if (val or "").strip().lower() == short_label.strip().lower():
+            return idx
+
+    # Not found -> create at next column
+    next_col = len(header_row) + 1
+    ws.update_cell(2, next_col, short_label)  # put header text
+    return next_col
+
+def append_poll(record: dict):
+    """
+    Writes poll_id horizontally under the date column in 'Attendance List'.
+    Layout:
+      Row 1: 'Tele Poll ID' | [poll id under matching date col]
+      Row 2: 'Training Date' | [date labels across]
+    """
+    ws = get_attendance_ws()
+    _find_or_create_header_rows(ws)
+
+    # Ensure A1 / A2 labels correct (idempotent)
+    ws.update_acell("A1", "Tele Poll ID")
+    ws.update_acell("A2", "Training Date")
+
+    poll_id = str(record["poll_id"])
+    date_display = record.get("date", "")  # e.g. 'September 16, 2025' or '16/9'
+    date_short = _date_label_from_display(date_display)
+
+    # Find/create the date column under 'Training Date'
+    col = _find_or_create_date_column(ws, date_short)
+
+    # Put the poll id in row 1 at that column
+    ws.update_cell(1, col, poll_id)
+
+# # === REMINDER ===
+# async def send_reminder(bot, chat_id, thread_id):
+#     next_tuesday = get_next_tuesday()
+#     try:
+#         await bot.send_message(
+#             chat_id=chat_id,
+#             message_thread_id=thread_id,
+#             text=f"Reminder: There's training tomorrow {next_tuesday.strftime('%B %d, %Y')}."
+#         )
+#     except Exception as e:
+#         print(f"[ERROR] Failed to send reminder: {e}")
+
+# === REMINDER (sheet-driven) ===
 async def send_reminder(bot, chat_id, thread_id):
-    next_tuesday = get_next_tuesday()
     try:
+        ws = get_attendance_ws()
+        _find_or_create_header_rows(ws)
+
+        # Row 1: poll IDs; Row 2: date labels
+        poll_row = ws.row_values(1)
+        date_row = ws.row_values(2)
+
+        # Normalize lengths
+        max_len = max(len(poll_row), len(date_row))
+        if len(poll_row) < max_len:
+            poll_row += [""] * (max_len - len(poll_row))
+        if len(date_row) < max_len:
+            date_row += [""] * (max_len - len(date_row))
+
+        # Find last column (from right) where a poll id exists
+        last_col = None
+        for idx in range(max_len, 0, -1):
+            if idx == 1:
+                # skip column A (labels) unless you also store IDs there
+                if (poll_row[0] or "").strip().isdigit():
+                    last_col = 1
+                break
+            if (poll_row[idx - 1] or "").strip():
+                last_col = idx
+                break
+
+        # Compute the date to announce
+        if last_col and last_col > 1:
+            date_label_short = (date_row[last_col - 1] or "").strip()  # e.g. '16/9'
+            # Format nicely for chat: '16 Sep 2025' if possible; if only dd/mm, keep it
+            pretty_date = date_label_short
+            # Try to map dd/mm to a full date this/next year (optional):
+            try:
+                d, m = [int(x) for x in date_label_short.split("/")]
+                # Heuristic: if today's month > m, assume next year; else this year
+                today = datetime.now(sg_tz)
+                year = today.year + (1 if today.month > m else 0)
+                dt = datetime(year, m, d, tzinfo=sg_tz)
+                pretty_date = dt.strftime("%d %b %Y")
+            except Exception:
+                pass
+        else:
+            # Fallback to computed next Tuesday
+            pretty_date = get_next_tuesday().strftime("%d %b %Y")
+
         await bot.send_message(
             chat_id=chat_id,
             message_thread_id=thread_id,
-            text=f"Reminder: There's training tomorrow {next_tuesday.strftime('%B %d, %Y')}."
+            text=f"Reminder: There's training tomorrow {pretty_date}."
         )
     except Exception as e:
         print(f"[ERROR] Failed to send reminder: {e}")
@@ -179,10 +329,12 @@ async def send_poll_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.delete_message(chat_id, update.message.message_id)
     except:
         pass
+    
+    tues_date = next_tuesday.strftime('%B %d, %Y')
 
     msg = await context.bot.send_poll(
         chat_id=chat_id,
-        question=f"Are you joining the training on {next_tuesday.strftime('%B %d, %Y')}?",
+        question=f"Are you joining the training on {tues_date}?",
         options=["Yes", "No"],
         is_anonymous=False,
         message_thread_id=thread_id
@@ -192,6 +344,13 @@ async def send_poll_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     active_polls[msg.poll.id] = "training"
     yes_voters.clear()  # reset voters for the new training poll
 
+    append_poll({
+        "poll_id": msg.poll.id,
+        "message_id": msg.message_id,
+        "chat_id": chat_id,
+        "thread_id": thread_id,
+        "date": tues_date
+    })
     # Schedule reminder
     threading.Timer(delay_sec, lambda: asyncio.run(send_reminder(context.bot, chat_id, thread_id))).start()
 

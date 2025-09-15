@@ -7,7 +7,8 @@ from utils.constants import OTHERS_THREAD_IDS
 
 def get_gspread_sheet(sheet_name=SHEET_NAME, tab_name=SHEET_TAB_NAME):
     """Get Google Sheet worksheet"""
-    creds_dict = json.loads(GOOGLE_CREDENTIALS_JSON)
+    # creds_dict = json.loads(GOOGLE_CREDENTIALS_JSON)
+    creds_dict = GOOGLE_CREDENTIALS_JSON
     scope = ["https://spreadsheets.google.com/feeds", 
              "https://www.googleapis.com/auth/drive"]
     creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
@@ -43,7 +44,7 @@ def matric_valid(matric_number: str) -> bool:
 
 def update_user_id_in_sheet(matric_number: str, telegram_user_id: int):
     """Update user ID in the welcome tea sheet"""
-    sheet = get_gspread_sheet_welcome_tea()
+    sheet = get_gspread_sheet(WELCOME_TEA_SHEET, WELCOME_TEA_TAB)
     rows = sheet.get_all_records()
 
     for idx, row in enumerate(rows, start=2):

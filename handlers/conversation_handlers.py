@@ -204,51 +204,17 @@ async def parse_perf_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             print(f"[ERROR] Failed to append row: {e}")
 
-    # Format and send summary
-    date_lines = []
-    for entry in date.splitlines(): 
-        entry = entry.strip()
-        if not entry:
-            continue
-        try:
-            dt = datetime.strptime(entry, "%d %b %Y %H%M")
-            formatted = f"• {dt.strftime('%d %b %Y').upper()} | {dt.strftime('%I:%M%p').lower()}"
-            date_lines.append(formatted)
-        except:
-            date_lines.append(f"• {entry}")
-    formatted_dates = "\n".join(date_lines)
-
-    template = (
-        f"\U0001F4E2 *Performance Opportunity*\n\n"
-        f"\U0001F4CD *Event*\n"
-        f"• {event}\n\n"
-        f"\U0001F4C5 *Date | Time*\n"
-        f"{formatted_dates}\n\n"
-        f"\U0001F4CC *Location*\n"
-        f"• {location}\n\n"
-        f"*Performance Information:*\n"
-        f"{info.strip()}"
+    await publish_performance_summary(
+        bot=context.bot,
+        chat_data_store=context.chat_data,
+        sheet=sheet,
+        chat_id=update.effective_chat.id,
+        thread_id=thread_id,
+        event=event,
+        date_text=date,
+        location=location,
+        info=info
     )
-    msg = await update.effective_chat.send_message(
-        template, 
-        parse_mode="Markdown", 
-        message_thread_id=thread_id
-    )
-    await context.bot.pin_chat_message(
-        chat_id=update.effective_chat.id, 
-        message_id=msg.message_id, 
-        disable_notification=True
-    )
-    context.chat_data[f"summary_msg_{thread_id}"] = msg.message_id
-    
-    poll = await send_interest_poll(
-        context.bot, 
-        update.effective_chat.id, 
-        thread_id, 
-        sheet
-    )
-    context.chat_data[f"interest_poll_msg_{thread_id}"] = poll["message_id"] if poll else None
-    print(f"[DEBUG] Saved new poll message ID: {poll['message_id'] if poll else 'None'}")
 
     return ConversationHandler.END
 
@@ -513,3 +479,103 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pass
 
     return ConversationHandler.END
+
+
+async def publish_performance_summary(
+    bot,
+    chat_data_store: dict,
+    sheet,
+    chat_id: int,
+    thread_id: int,
+    event: str,
+    date_text: str,
+    location: str,
+    info: str,
+):
+    """Send or refresh the performance summary message and interest poll."""
+
+    summary_key = f"summary_msg_{thread_id}"
+    poll_key = f"interest_poll_msg_{thread_id}"
+
+    previous_summary_id = chat_data_store.get(summary_key)
+    if previous_summary_id:
+        try:
+            await bot.unpin_chat_message(chat_id=chat_id, message_id=previous_summary_id)
+        except BadRequest as exc:
+            print(f"[WARNING] Failed to unpin previous summary: {exc}")
+        except Exception as exc:  # pragma: no cover - network
+            print(f"[WARNING] Failed to unpin previous summary (unexpected): {exc}")
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=previous_summary_id)
+        except BadRequest as exc:
+            print(f"[WARNING] Failed to delete previous summary: {exc}")
+        except Exception as exc:  # pragma: no cover - network
+            print(f"[WARNING] Failed to delete previous summary (unexpected): {exc}")
+
+    previous_poll_msg_id = chat_data_store.get(poll_key)
+    if previous_poll_msg_id:
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=previous_poll_msg_id)
+        except BadRequest as exc:
+            print(f"[WARNING] Failed to delete previous interest poll: {exc}")
+        except Exception as exc:  # pragma: no cover - network
+            print(f"[WARNING] Failed to delete previous interest poll (unexpected): {exc}")
+
+    date_lines = []
+    for entry in date_text.splitlines():
+        entry = entry.strip()
+        if not entry:
+            continue
+        try:
+            if "|" in entry:
+                dt = datetime.strptime(entry, "%d %b %Y | %I:%M%p")
+                formatted_time = dt.strftime("%I:%M%p").lower()
+                formatted = f"• {dt.strftime('%d %b %Y').upper()} | {formatted_time}"
+            else:
+                dt = datetime.strptime(entry, "%d %b %Y")
+                formatted = f"• {dt.strftime('%d %b %Y').upper()}"
+            date_lines.append(formatted)
+        except ValueError:
+            date_lines.append(f"• {entry}")
+
+    formatted_dates = "\n".join(date_lines)
+    template = (
+        f"\U0001F4E2 *Performance Opportunity*\n\n"
+        f"\U0001F4CD *Event*\n"
+        f"• {event}\n\n"
+        f"\U0001F4C5 *Date | Time*\n"
+        f"{formatted_dates}\n\n"
+        f"\U0001F4CC *Location*\n"
+        f"• {location}\n\n"
+        f"*Performance Information:*\n"
+        f"{info.strip()}"
+    )
+
+    message = await bot.send_message(
+        chat_id=chat_id,
+        text=template,
+        parse_mode="Markdown",
+        message_thread_id=thread_id,
+    )
+
+    try:
+        await bot.pin_chat_message(
+            chat_id=chat_id,
+            message_id=message.message_id,
+            disable_notification=True,
+        )
+    except BadRequest as exc:
+        print(f"[WARNING] Failed to pin performance summary: {exc}")
+    except Exception as exc:  # pragma: no cover - network
+        print(f"[WARNING] Failed to pin performance summary (unexpected): {exc}")
+
+    chat_data_store[summary_key] = message.message_id
+
+    poll = await send_interest_poll(bot, chat_id, thread_id, sheet)
+    chat_data_store[poll_key] = poll["message_id"] if poll else None
+    if poll:
+        print(f"[DEBUG] Saved new poll message ID: {poll['message_id']}")
+    else:
+        print("[DEBUG] No interest poll sent for this summary.")
+
+    return message, poll

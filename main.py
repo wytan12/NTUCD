@@ -1,6 +1,4 @@
-from NTUCDConfig import on_startup
-
-from telegram import Update
+from telegram import BotCommand, BotCommandScopeChatAdministrators, BotCommandScopeDefault, Update
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -12,26 +10,51 @@ from telegram.ext import (
     ChatMemberHandler,
     ChatJoinRequestHandler
 )
-from telegram.constants import ParseMode
 from handlers.admin_handlers import start, thread_id_command, remind_command
 from handlers.message_handlers import handle_message
+from handlers.private_handlers import handle_private_command
 from handlers.poll_handlers import send_poll_handler, handle_poll_answer
 from handlers.verification_handlers import start_verification, handle_matric, join_request_handler
-from handlers.modify_handlers import start_modify, get_modify_field_callback, apply_modify_value, cancel
+from handlers.modify_handlers import start_modify, get_modify_field_callback, apply_modify_value
 from handlers.modify_handlers import handle_modify_status_selection, handle_modify_date_selection
-from handlers.conversation_handlers import confirmation, confirmation_callback, final_date_selection, topic_type_selection
-from handlers.member_handlers import handle_member_status, handle_new_member, join_request_handler
-from utils.decorators import admin_only, is_admin
+from handlers.conversation_handlers import confirmation, confirmation_callback, final_date_selection, topic_type_selection, parse_perf_input, cancel
+from handlers.member_handlers import handle_member_status, handle_new_member
 from services.google_sheets import get_gspread_sheet
-from config import BOT_TOKEN, EXEMPTED_THREAD_IDS, OTHERS_THREAD_IDS
+from config import BOT_TOKEN, SHEET_NAME, CHAT_ID
 from utils.constants import (
     initialized_topics,
     DATE,
     MODIFY_FIELD,
     MODIFY_VALUE,
-    ASK_MATRIC
+    ASK_MATRIC, 
+    OTHERS_THREAD_IDS
 )
 
+async def debug_id(update, context):
+    await update.message.reply_text(str(update.effective_chat.id))
+    print("CHAT ID:", update.effective_chat.id)
+
+admin_commands = [
+    BotCommand("start", "Just to test the bot and grab chat ID"),
+    BotCommand("threadid", "To obtain the thread ID of the current topic"),
+    BotCommand("poll", "Create attendance poll in Attendance Topic"),
+    BotCommand("modify", "Modify performance summary details"),
+    BotCommand("remind", "Remind about performance"),
+    BotCommand("confirmation", "Confirm performance details"),
+]
+
+async def set_admin_commands(application):
+    await application.bot.set_my_commands(
+        commands=admin_commands,
+        scope=BotCommandScopeChatAdministrators(chat_id=CHAT_ID)  # Your group ID
+    )
+
+async def clear_global_commands(application):
+    await application.bot.set_my_commands([], scope=BotCommandScopeDefault())
+
+async def on_startup(application):
+    await set_admin_commands(application)
+    await clear_global_commands(application)
 
 def main():
     print("Bot starting...")
@@ -67,6 +90,7 @@ def main():
     )
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("debug_id", debug_id))
     app.add_handler(CommandHandler("threadid", thread_id_command))
     app.add_handler(CommandHandler("remind", remind_command))
     app.add_handler(CommandHandler("confirmation", confirmation))  
@@ -83,14 +107,18 @@ def main():
     app.add_handler(ChatMemberHandler(handle_member_status, ChatMemberHandler.CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, handle_new_member))
     app.add_handler(ChatJoinRequestHandler(join_request_handler))
-    app.add_handler(MessageHandler(filters.ALL, handle_message))
+    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT, handle_private_command))
+    app.add_handler(MessageHandler(filters.ChatType.GROUPS, handle_message))
 
     
     print("Bot is running...")
     
     try:
-        others_sheet = get_gspread_sheet("OTHERS List")
+        print("Loading OTHERS List from Google Sheets...")
+        others_sheet = get_gspread_sheet(sheet_name="NTUCD AY25/26 Timeline (Tele Debug)", tab_name="OTHERS List")
+        print("successfully got OTHERS List sheet")
         rows = others_sheet.col_values(1)
+        print(f"[DEBUG] OTHERS List rows: {rows}")
         OTHERS_THREAD_IDS.update({int(r.strip()) for r in rows if r.strip().isdigit()})
         print(f"[INFO] Loaded {len(OTHERS_THREAD_IDS)} OTHERS thread IDs.")
     except Exception as e:

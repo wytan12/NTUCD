@@ -41,3 +41,8 @@ EXEMPTED_THREAD_IDS = [GENERAL_TOPIC_ID, TOPIC_VOTING_ID, TOPIC_BLOCKED_ID, 11] 
 # Sheet Columns
 SHEET_COLUMNS = ["THREAD ID", "EVENT", "PROPOSED DATE | TIME", "LOCATION", 
                  "PERFORMANCE INFO", "CONFIRMED DATE | TIME", "STATUS"]
+
+# Private command configuration
+# Populate with Telegram user IDs that are allowed to control the bot via DM.
+# WY, WF, PH, bran
+ADMIN_DM_USER_IDS = {1505249420, 362804048, 903855240, 1887174554}  # Example: {123456789, 987654321}

@@ -1,15 +1,11 @@
 import os
-from telegram import Update, ParseMode
+from telegram import Update
 from telegram.ext import ContextTypes, ConversationHandler
 from services.google_sheets import (
     matric_valid, 
     update_user_id_in_sheet
 )   
-from utils.decorators import admin_only
 from utils.constants import ASK_MATRIC, pending_users
-from config import BOT_ADMIN_IDS
-from datetime import datetime
-from collections import defaultdict
 
 async def join_request_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.chat_join_request.from_user

@@ -1,11 +1,9 @@
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from utils.decorators import is_admin
-from config import TOPIC_VOTING_ID, TOPIC_MEDIA_IDS, TOPIC_BLOCKED
-from utils.constants import EXEMPTED_THREAD_IDS, OTHERS_THREAD_IDS, TOPIC_BLOCKED_ID, TOPIC_MEDIA_IDS, initialized_topics
+from config import TOPIC_VOTING_ID, TOPIC_MEDIA_IDS, TOPIC_BLOCKED_ID, EXEMPTED_THREAD_IDS
+from utils.constants import  OTHERS_THREAD_IDS, initialized_topics
 from services.google_sheets import get_gspread_sheet
-from handlers.admin_handlers import parse_perf_input
-
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message

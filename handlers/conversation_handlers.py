@@ -6,9 +6,9 @@ from telegram.error import BadRequest
 
 from utils.constants import (
     pending_questions, initialized_topics, OTHERS_THREAD_IDS,
-    DATE, EVENT, LOCATION, MODIFY_FIELD, MODIFY_VALUE
+    DATE, EVENT, LOCATION
 )
-from config import SHEET_COLUMNS, EXEMPTED_THREAD_IDS
+from config import SHEET_COLUMNS, EXEMPTED_THREAD_IDS, CHAT_ID
 from services.google_sheets import get_gspread_sheet, append_to_others_list
 from services.date_parser import parse_and_format_dates
 from handlers.poll_handlers import send_interest_poll
@@ -23,12 +23,14 @@ async def topic_type_selection(update: Update, context: ContextTypes.DEFAULT_TYP
     _, selection, thread_id = query.data.split("|")
     thread_id = int(thread_id)
 
-    prompt_id = context.chat_data.pop(f"init_prompt_{thread_id}", None)
-    if prompt_id:
+    prompt_store = context.application.bot_data.setdefault("topic_prompts", {})
+    prompt_entry = prompt_store.pop((update.effective_user.id, thread_id), None)
+    if prompt_entry:
+        target_chat_id, prompt_message_id = prompt_entry
         try:
             await context.bot.delete_message(
-                chat_id=query.message.chat.id, 
-                message_id=prompt_id
+                chat_id=target_chat_id,
+                message_id=prompt_message_id,
             )
         except Exception as e:
             print(f"[DELETE ERROR] {e}")
@@ -36,20 +38,31 @@ async def topic_type_selection(update: Update, context: ContextTypes.DEFAULT_TYP
     context.user_data["thread_id"] = thread_id
     context.user_data["topic_type"] = selection
 
+    send_kwargs = {
+        "chat_id": query.message.chat.id,
+        "parse_mode": "Markdown",
+    }
+    if getattr(query.message, "is_topic_message", False) and query.message.chat.type in {"group", "supergroup"}:
+        send_kwargs["message_thread_id"] = thread_id
+
     if selection == "PERF":
-        prompt = await query.message.chat.send_message(
-            "\U0001F4DD Please enter: *Event // Date // Location // Info (If any)*",
-            parse_mode="Markdown", 
-            message_thread_id=thread_id
+        prompt = await context.bot.send_message(
+            text=(
+                "\U0001F4DD Please enter details for thread ``{thread_id}``:\n"
+                "*Event // Date // Location // Info (If any)*"
+            ).format(thread_id=thread_id),
+            **send_kwargs,
         )
         pending_questions["perf_input"] = prompt.message_id
         return DATE
 
     elif selection == "DATE_ONLY":
-        prompt = await query.message.chat.send_message(
-            "\U0001F4C5 Please enter the *Performance Date* (e.g. 12 MAR 2025):",
-            parse_mode="Markdown", 
-            message_thread_id=thread_id
+        prompt = await context.bot.send_message(
+            text=(
+                "\U0001F4C5 Please enter the *Performance Date* for thread ``{thread_id}``"
+                " (e.g. 12 MAR 2025):"
+            ).format(thread_id=thread_id),
+            **send_kwargs,
         )
         pending_questions["date"] = prompt.message_id
         return DATE
@@ -62,7 +75,8 @@ async def topic_type_selection(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def parse_perf_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Parse performance input and save to sheet"""
-    await update.message.delete()
+    if update.effective_chat.type in {"group", "supergroup"}:
+        await update.message.delete()
     sheet = get_gspread_sheet()
 
     try:
@@ -104,7 +118,6 @@ async def parse_perf_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             error_msg = await update.effective_chat.send_message(
                 str(e),
                 parse_mode="Markdown",
-                message_thread_id=context.user_data["perf_temp"]["thread_id"]
             )
             context.chat_data["last_error"] = error_msg.message_id
             context.chat_data["invalid_input"] = update.message.message_id
@@ -138,7 +151,6 @@ async def parse_perf_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "❌ Invalid input format. Use:\n*Event // Date // Location // Info (optional)*\n\n"
                 "Example:\n`NTU Welcome Tea // 23 JUN 2025 8:00pm // NYA // Formal wear required`",
                 parse_mode="Markdown",
-                message_thread_id=thread_id
             )
 
             for key in ["last_error", "invalid_input"]:
@@ -192,7 +204,6 @@ async def parse_perf_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             error_msg = await update.effective_chat.send_message(
                 str(e),
                 parse_mode="Markdown",
-                message_thread_id=thread_id
             )
             context.chat_data["last_error"] = error_msg.message_id
             context.chat_data["invalid_input"] = update.message.message_id
@@ -204,16 +215,25 @@ async def parse_perf_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             print(f"[ERROR] Failed to append row: {e}")
 
+    group_chat_data_cache = context.application.bot_data.setdefault("group_chat_data", {})
+    group_chat_data = group_chat_data_cache.setdefault(CHAT_ID, {})
+
     await publish_performance_summary(
         bot=context.bot,
-        chat_data_store=context.chat_data,
+        chat_data_store=group_chat_data,
         sheet=sheet,
-        chat_id=update.effective_chat.id,
+        chat_id=CHAT_ID,
         thread_id=thread_id,
         event=event,
         date_text=date,
         location=location,
-        info=info
+        info=info,
+    )
+
+    summary_preview = build_performance_summary(event=event, date_text=date, location=location, info=info)
+    await update.effective_chat.send_message(
+        f"✅ Performance entry created for thread `{thread_id}`.\n\n{summary_preview}",
+        parse_mode="Markdown",
     )
 
     return ConversationHandler.END
@@ -481,6 +501,44 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+def build_performance_summary(event: str, date_text: str, location: str, info: str) -> str:
+    """Return the formatted performance summary message used across handlers."""
+
+    date_lines: list[str] = []
+    for entry in (date_text or "").splitlines():
+        entry = entry.strip()
+        if not entry:
+            continue
+        try:
+            if "|" in entry:
+                dt = datetime.strptime(entry, "%d %b %Y | %I:%M%p")
+                formatted_time = dt.strftime("%I:%M%p").lower()
+                formatted = f"• {dt.strftime('%d %b %Y').upper()} | {formatted_time}"
+            else:
+                dt = datetime.strptime(entry, "%d %b %Y")
+                formatted = f"• {dt.strftime('%d %b %Y').upper()}"
+            date_lines.append(formatted)
+        except ValueError:
+            date_lines.append(f"• {entry}")
+
+    if not date_lines:
+        date_lines.append("• TBD")
+
+    formatted_dates = "\n".join(date_lines)
+
+    return (
+        f"\U0001F4E2 *Performance Opportunity*\n\n"
+        f"\U0001F4CD *Event*\n"
+        f"• {event}\n\n"
+        f"\U0001F4C5 *Date | Time*\n"
+        f"{formatted_dates}\n\n"
+        f"\U0001F4CC *Location*\n"
+        f"• {location}\n\n"
+        f"*Performance Information:*\n"
+        f"{info.strip()}"
+    )
+
+
 async def publish_performance_summary(
     bot,
     chat_data_store: dict,
@@ -521,35 +579,7 @@ async def publish_performance_summary(
         except Exception as exc:  # pragma: no cover - network
             print(f"[WARNING] Failed to delete previous interest poll (unexpected): {exc}")
 
-    date_lines = []
-    for entry in date_text.splitlines():
-        entry = entry.strip()
-        if not entry:
-            continue
-        try:
-            if "|" in entry:
-                dt = datetime.strptime(entry, "%d %b %Y | %I:%M%p")
-                formatted_time = dt.strftime("%I:%M%p").lower()
-                formatted = f"• {dt.strftime('%d %b %Y').upper()} | {formatted_time}"
-            else:
-                dt = datetime.strptime(entry, "%d %b %Y")
-                formatted = f"• {dt.strftime('%d %b %Y').upper()}"
-            date_lines.append(formatted)
-        except ValueError:
-            date_lines.append(f"• {entry}")
-
-    formatted_dates = "\n".join(date_lines)
-    template = (
-        f"\U0001F4E2 *Performance Opportunity*\n\n"
-        f"\U0001F4CD *Event*\n"
-        f"• {event}\n\n"
-        f"\U0001F4C5 *Date | Time*\n"
-        f"{formatted_dates}\n\n"
-        f"\U0001F4CC *Location*\n"
-        f"• {location}\n\n"
-        f"*Performance Information:*\n"
-        f"{info.strip()}"
-    )
+    template = build_performance_summary(event=event, date_text=date_text, location=location, info=info)
 
     message = await bot.send_message(
         chat_id=chat_id,

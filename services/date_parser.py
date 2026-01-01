@@ -8,14 +8,13 @@ def parse_flexible_date(date_str: str) -> str:
 
     # Normalize various time formats
     lower = re.sub(r'(\d{1,2})\.(\d{2})', r'\1:\2', lower)
-    lower = re.sub(r'\b(\d{4})\b', lambda m: f"{m.group(1)[:2]}:{m.group(1)[2:]}", lower)
     lower = re.sub(r'\b(\d{1,2})(\d{2})(am|pm)\b', r'\1:\2 \3', lower)
     lower = re.sub(r'(\d{1,2}:\d{2})(am|pm)\b', r'\1 \2', lower)
     lower = re.sub(r'\b(\d{1,2})(am|pm)\b', r'\1:00 \2', lower)
 
     pattern = re.match(
-        r"(\d{1,2})[\s-]?([a-zA-Z]{3,9})[\s-]?(\d{2,4})?(?:\s+(\d{1,2}:\d{2}(?:\s?(?:am|pm))?))?$", 
-        lower
+        r"(\d{1,2})[\s-]?([a-zA-Z]{3,9})[\s-]?(\d{2,4})?(?:\s+(\d{1,2}:\d{2}(?:\s?(?:am|pm))?|\d{3,4}(?:\s?(?:am|pm))?))?$",
+        lower,
     )
     
     if not pattern:
@@ -30,11 +29,21 @@ def parse_flexible_date(date_str: str) -> str:
 
     date_time_str = f"{day} {month} {year}"
     if time_part:
-        date_time_str += f" {time_part}"
+        time_part = time_part.strip()
+        suffix = ""
+        if time_part.lower().endswith(("am", "pm")):
+            suffix = time_part[-2:]
+            time_part = time_part[:-2].strip()
+        if ":" not in time_part and time_part.isdigit() and 3 <= len(time_part) <= 4:
+            time_part = f"{time_part[:-2]}:{time_part[-2:]}"
+        if suffix:
+            time_part = f"{time_part} {suffix}"
+
+        date_time_with_time = f"{date_time_str} {time_part}"
 
         for fmt in ("%d %b %Y %H:%M", "%d %B %Y %H:%M", "%d %b %Y %I:%M %p", "%d %B %Y %I:%M %p"):
             try:
-                dt = datetime.strptime(date_time_str, fmt)
+                dt = datetime.strptime(date_time_with_time, fmt)
                 time_str = dt.strftime("%I:%M%p").lstrip("0").lower()
                 return f"{dt.strftime('%d %b %Y').upper()} | {time_str}"
             except ValueError:

@@ -1,4 +1,5 @@
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 from utils.decorators import is_admin
 from config import TOPIC_VOTING_ID, TOPIC_MEDIA_IDS, TOPIC_BLOCKED_ID, EXEMPTED_THREAD_IDS
@@ -34,12 +35,36 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     [InlineKeyboardButton("PERF", callback_data=f"topic_type|PERF|{thread_id}")],
                     [InlineKeyboardButton("OTHERS", callback_data=f"topic_type|OTHERS|{thread_id}")]
                 ])
-                prompt = await chat.send_message(
-                    "What's the topic for? PERF or OTHERS?",
-                    reply_markup=keyboard,
-                    message_thread_id=thread_id
+                prompt_store = context.application.bot_data.setdefault("topic_prompts", {})
+                dm_text = (
+                    "What's the topic for?\n"
+                    f"Thread ID: `{thread_id}`\n"
+                    "Choose PERF to provide performance details, or OTHERS to list it in the OTHERS tab."
                 )
-                context.chat_data[f"init_prompt_{thread_id}"] = prompt.message_id
+                try:
+                    prompt_msg = await context.bot.send_message(
+                        chat_id=user.id,
+                        text=dm_text,
+                        reply_markup=keyboard,
+                        parse_mode="Markdown",
+                    )
+                    prompt_store[(user.id, thread_id)] = (prompt_msg.chat_id, prompt_msg.message_id)
+                except BadRequest as exc:
+                    print(f"[WARN] Could not DM admin {user.id}: {exc}. Falling back to in-thread prompt.")
+                    prompt = await chat.send_message(
+                        "What's the topic for? PERF or OTHERS?",
+                        reply_markup=keyboard,
+                        message_thread_id=thread_id
+                    )
+                    prompt_store[(user.id, thread_id)] = (prompt.chat.id, prompt.message_id)
+                except Exception as exc:  # pragma: no cover - network
+                    print(f"[ERROR] Failed to notify admin in DM: {exc}. Falling back to in-thread prompt.")
+                    prompt = await chat.send_message(
+                        "What's the topic for? PERF or OTHERS?",
+                        reply_markup=keyboard,
+                        message_thread_id=thread_id
+                    )
+                    prompt_store[(user.id, thread_id)] = (prompt.chat.id, prompt.message_id)
 
             # ✅ SAFE DELETE
             if chat.type in ["group", "supergroup"]:
@@ -111,9 +136,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # elif is_web_app or is_via_bot:
             #     print(f"[DEBUG] ❌ Web App or Telebubble message in MEDIA thread {thread_id}. Deleting.")
             #     await msg.delete()
-            elif is_text:
-                print(f"[DEBUG] ❌ Text message in MEDIA thread {thread_id}. Deleting.")
-                await msg.delete()
+            # elif is_text:
+            #     print(f"[DEBUG] ❌ Text message in MEDIA thread {thread_id}. Deleting.")
+            #     await msg.delete()
             elif is_valid_doc:
                 print(f"[ALLOWED] ✅ Valid document in MEDIA thread {thread_id}")
             elif msg.document:

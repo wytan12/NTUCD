@@ -5,7 +5,7 @@ from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
 from config import ADMIN_DM_USER_IDS, CHAT_ID
-from handlers.conversation_handlers import publish_performance_summary
+from handlers.conversation_handlers import build_performance_summary, publish_performance_summary
 from services.date_parser import parse_and_format_dates
 from services.google_sheets import get_gspread_sheet
 
@@ -56,17 +56,114 @@ async def handle_private_command(update: Update, context: ContextTypes.DEFAULT_T
         await message.reply_text("⛔ You are not authorized to use DM commands.")
         return
 
+    pending_field = context.user_data.get("modify_field")
+    if pending_field:
+        normalized_text = (message.text or "").strip()
+        if normalized_text and (not normalized_text.startswith("/") or normalized_text.lower() == "/cancel"):
+            from handlers.modify_handlers import apply_modify_value
+
+            await apply_modify_value(update, context)
+            return
+
     command, thread_token, payload = _parse_command_payload(message.text)
     if command == "help":
         await message.reply_text(
             "Available commands:\n"
             "• `announce <thread_id> <message>` — send announcement to a topic.\n"
-            "• `perf <thread_id> <Event // Date // Location // Info>` — create a performance entry.",
+            "• `perf <thread_id> <Event // Date // Location // Info>` — create a performance entry.\n"
+            "• `info <thread_id>` — preview a performance summary without posting to the group.\n"
+            "• `modify` — pick a performance to update via DM.\n"
+            "• `topic <title>` — create a new forum topic in the group.",
             parse_mode="Markdown",
         )
         return
 
-    if command not in {"announce", "perf", "performance"}:
+    if command == "modify":
+        try:
+            sheet = get_gspread_sheet()
+            records = sheet.get_all_records()
+        except Exception as exc:  # pragma: no cover - network
+            await message.reply_text(f"❌ Failed to read from sheet: {exc}")
+            return
+
+        recent_records = [r for r in records if str(r.get("THREAD ID", "")).strip().isdigit()]
+        recent_records = recent_records[-10:] if len(recent_records) > 10 else recent_records
+
+        if not recent_records:
+            await message.reply_text("❌ No performances found to modify.")
+            return
+
+        lines = ["*Select a performance to modify:*\n"]
+        for row in recent_records:
+            thread_id = row.get("THREAD ID", "-")
+            event = row.get("EVENT", "(no event)")
+            status = row.get("STATUS", "").strip().upper() or "PENDING"
+            lines.append(f"• `modify {thread_id}` — {event} _(status: {status})_")
+
+        lines.append("\nReply with `modify <thread_id>` to continue.")
+        await message.reply_text("\n".join(lines), parse_mode="Markdown")
+        return
+
+    if command == "topic":
+        title = payload.strip()
+        if not title:
+            await message.reply_text("⚠️ Please provide a topic title after `topic`.")
+            return
+
+        try:
+            topic = await context.bot.create_forum_topic(chat_id=CHAT_ID, name=title[:128])
+        except BadRequest as exc:
+            await message.reply_text(f"❌ Failed to create topic: {exc.message}")
+            return
+        except Exception as exc:  # pragma: no cover - network
+            await message.reply_text(f"❌ Failed to create topic: {exc}")
+            return
+
+        await message.reply_text(
+            "✅ Topic created successfully.\n"
+            f"• Title: `{topic.name}`\n"
+            f"• Thread ID: `{topic.message_thread_id}`",
+            parse_mode="Markdown",
+        )
+        return
+
+    if command == "info":
+        if not thread_token:
+            await message.reply_text("⚠️ Please provide a thread ID after the command.")
+            return
+
+        if not thread_token.isdigit():
+            await message.reply_text("⚠️ Thread ID must be numeric.")
+            return
+
+        thread_id = int(thread_token)
+        if thread_id <= 0:
+            await message.reply_text("⚠️ Thread ID must be positive.")
+            return
+
+        try:
+            sheet = get_gspread_sheet()
+            records = sheet.get_all_records()
+        except Exception as exc:  # pragma: no cover - network
+            await message.reply_text(f"❌ Failed to read from sheet: {exc}")
+            return
+
+        row = next((r for r in records if str(r.get("THREAD ID")) == str(thread_id)), None)
+        if not row:
+            await message.reply_text("❌ No performance entry found for that thread ID.")
+            return
+
+        date_text = row.get("CONFIRMED DATE | TIME") or row.get("PROPOSED DATE | TIME") or ""
+        summary = build_performance_summary(
+            event=row.get("EVENT", ""),
+            date_text=date_text,
+            location=row.get("LOCATION", ""),
+            info=row.get("PERFORMANCE INFO", ""),
+        )
+        await message.reply_text(summary, parse_mode="Markdown")
+        return
+
+    if command not in {"announce", "perf", "performance", "modify"}:
         await message.reply_text("❓ Unknown command. Send `help` for usage.")
         return
 
@@ -81,6 +178,17 @@ async def handle_private_command(update: Update, context: ContextTypes.DEFAULT_T
     thread_id = int(thread_token)
     if thread_id <= 0:
         await message.reply_text("⚠️ Thread ID must be positive.")
+        return
+
+    if command == "modify":
+        from handlers.modify_handlers import initiate_modify_via_dm
+
+        await initiate_modify_via_dm(
+            update=update,
+            context=context,
+            thread_id=thread_id,
+            initiated_via_dm=True,
+        )
         return
 
     if command == "announce":
@@ -158,7 +266,8 @@ async def handle_private_command(update: Update, context: ContextTypes.DEFAULT_T
         await message.reply_text(f"❌ Failed to publish summary: {exc}")
         return
 
+    preview = build_performance_summary(event=event, date_text=date_text, location=location, info=info)
     await message.reply_text(
-        f"✅ Performance entry created for thread `{thread_id}`.",
+        f"✅ Performance entry created for thread `{thread_id}`.\n\n{preview}",
         parse_mode="Markdown",
     )

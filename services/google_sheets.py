@@ -7,8 +7,8 @@ from utils.constants import OTHERS_THREAD_IDS
 
 def get_gspread_sheet(sheet_name=SHEET_NAME, tab_name=SHEET_TAB_NAME):
     """Get Google Sheet worksheet"""
-    # creds_dict = json.loads(GOOGLE_CREDENTIALS_JSON)
-    creds_dict = GOOGLE_CREDENTIALS_JSON
+    creds_dict = json.loads(GOOGLE_CREDENTIALS_JSON)
+    # creds_dict = GOOGLE_CREDENTIALS_JSON
     scope = ["https://spreadsheets.google.com/feeds", 
              "https://www.googleapis.com/auth/drive"]
     creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)

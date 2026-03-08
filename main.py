@@ -103,7 +103,7 @@ def main():
     
     try:
         print("Loading OTHERS List from Google Sheets...")
-        others_sheet = get_gspread_sheet(sheet_name="NTUCD AY25/26 Timeline (Tele Debug)", tab_name="OTHERS List")
+        others_sheet = get_gspread_sheet(sheet_name="NTUCD AY25/26 Timeline", tab_name="OTHERS List")
         print("successfully got OTHERS List sheet")
         rows = others_sheet.col_values(1)
         print(f"[DEBUG] OTHERS List rows: {rows}")

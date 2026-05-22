@@ -7,8 +7,8 @@ from utils.constants import OTHERS_THREAD_IDS
 
 def get_gspread_sheet(sheet_name=SHEET_NAME, tab_name=SHEET_TAB_NAME):
     """Get Google Sheet worksheet"""
-    creds_dict = json.loads(GOOGLE_CREDENTIALS_JSON)
-    # creds_dict = GOOGLE_CREDENTIALS_JSON
+    # creds_dict = json.loads(GOOGLE_CREDENTIALS_JSON)
+    creds_dict = GOOGLE_CREDENTIALS_JSON
     scope = ["https://spreadsheets.google.com/feeds", 
              "https://www.googleapis.com/auth/drive"]
     creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
@@ -19,15 +19,55 @@ def get_attendance_ws():
     """Get attendance worksheet"""
     return get_gspread_sheet(ATTENDANCE_TAB)
 
-def append_to_others_list(thread_id):
-    """Append thread ID to OTHERS list"""
+def load_topic_rules():
+    """Fetches rules from 'STANDARD TOPIC Rules' tab and caches them as lists."""
     try:
-        sheet = get_gspread_sheet("OTHERS List")
-        sheet.append_row([thread_id])
-        print(f"[INFO] Thread ID {thread_id} written to OTHERS List.")
-        OTHERS_THREAD_IDS.add(thread_id)
+        from config import SHEET_NAME
+        from utils.constants import TOPIC_RULES_CACHE
+        
+        # Using your preferred tab name
+        sheet = get_gspread_sheet(sheet_name=SHEET_NAME, tab_name="STANDARD TOPIC Rules")
+        records = sheet.get_all_records()
+        
+        TOPIC_RULES_CACHE.clear()
+        for row in records:
+            tid_raw = str(row.get("THREAD ID", "")).strip()
+            
+            # Convert ID: '0' or empty becomes None (General Topic)
+            if tid_raw == "0" or not tid_raw:
+                tid = None
+            else:
+                try: tid = int(tid_raw)
+                except: continue 
+                
+            raw_rules = row.get("RULE PROFILE", "")
+            # Split comma-string into a clean list of uppercase tags
+            rule_list = [r.strip().upper() for r in str(raw_rules).split(",") if r.strip()]
+            TOPIC_RULES_CACHE[tid] = rule_list
+            
+        print(f"[INFO] Successfully cached {len(TOPIC_RULES_CACHE)} standard topic rules.")
     except Exception as e:
-        print(f"[ERROR] Failed to write Thread ID {thread_id} to OTHERS List: {e}")
+        print(f"[ERROR] Failed to load topic rules: {e}")
+
+def append_to_others_list(thread_id):
+    """Append thread ID to OTHERS list tab in the main sheet."""
+    try:
+        from config import SHEET_NAME
+        # Specifically target the "OTHERS List" tab within your main sheet
+        sheet = get_gspread_sheet(sheet_name=SHEET_NAME, tab_name="OTHERS List")
+        
+        # We convert thread_id to string and use USER_ENTERED to avoid format errors
+        sheet.append_row([str(thread_id)], value_input_option="USER_ENTERED")
+        
+        print(f"[INFO] Thread ID {thread_id} successfully logged to OTHERS List.")
+        
+        # Update our memory so the bot knows this thread is active
+        from utils.constants import OTHERS_THREAD_IDS
+        OTHERS_THREAD_IDS.add(int(thread_id))
+        
+    except Exception as e:
+        # We use str(e) to ensure we get a readable error message
+        print(f"[ERROR] Failed to write Thread ID {thread_id} to OTHERS List: {str(e)}")
 
 def matric_valid(matric_number: str) -> bool:
     """Validate matriculation number"""
@@ -161,3 +201,13 @@ def _find_or_create_date_column(ws, short_label: str) -> int:
     next_col = len(header_row) + 1
     ws.update_cell(2, next_col, short_label)
     return next_col
+
+def append_standard_topic_to_sheet(tid, name, rules_string):
+    """Adds a new standard topic row to the 'STANDARD TOPIC Rules' tab."""
+    try:
+        from config import SHEET_NAME
+        sheet = get_gspread_sheet(sheet_name=SHEET_NAME, tab_name="STANDARD TOPIC Rules")
+        sheet.append_row([str(tid), name, rules_string])
+        print(f"✅ [GSheet] Successfully logged {name} to Rules sheet.")
+    except Exception as e:
+        print(f"❌ [GSheet ERROR] Failed to append standard topic: {e}")

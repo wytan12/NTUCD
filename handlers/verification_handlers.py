@@ -8,6 +8,11 @@ from services.google_sheets import (
 from utils.constants import ASK_MATRIC, pending_users
 
 async def join_request_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Send Welcome Tea details to every new join-request applicant via DM.
+
+    Stores the raw ChatJoinRequest in pending_users so start_verification can
+    approve it once the user passes the matric check.
+    """
     user = update.chat_join_request.from_user
     #FORM_LINK = "https://docs.google.com/forms/d/e/1FAIpQLSdZkIn2NC3TkLCLJpgB-jynKSlAKZg_vqw0bu3vywu4tqTzIg/viewform?usp=header"
 
@@ -59,6 +64,11 @@ async def join_request_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     pending_users[user.id] = update.chat_join_request
 
 async def start_verification(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Entry point for the /verify conversation — only works in DM.
+
+    Rejects users who have no pending join request to prevent misuse.
+    Transitions to ASK_MATRIC state on success.
+    """
     user_id = update.message.from_user.id
 
     if user_id not in pending_users:
@@ -72,6 +82,11 @@ async def start_verification(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return ASK_MATRIC
 
 async def handle_matric(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Validate the submitted matriculation number against the Welcome Tea sheet.
+
+    Approves the join request and records the Telegram user ID in the sheet on
+    success.  Stays in ASK_MATRIC state so the user can retry on failure.
+    """
     user_id = update.message.from_user.id
     matric = update.message.text.strip()
 

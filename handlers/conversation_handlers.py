@@ -8,15 +8,19 @@ from utils.constants import (
     pending_questions, initialized_topics, OTHERS_THREAD_IDS,
     DATE, EVENT, LOCATION
 )
-from config import SHEET_COLUMNS, EXEMPTED_THREAD_IDS, CHAT_ID
+from config import SHEET_COLUMNS, CHAT_ID
 from services.google_sheets import get_gspread_sheet, append_to_others_list
 from services.date_parser import parse_and_format_dates
-from handlers.poll_handlers import send_interest_poll
 from utils.decorators import is_admin
-from utils.helpers import delete_topic_with_delay
+
 
 async def topic_type_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle PERF/OTHERS selection"""
+    """Handle topic-type selection (PERF / DATE_ONLY / OTHERS) from inline buttons.
+
+    Deletes the prompt message that triggered the callback, stores thread_id
+    and topic_type in user_data, then either transitions to DATE conversation
+    state (PERF/DATE_ONLY) or appends to the OTHERS list and ends.
+    """
     query = update.callback_query
     await query.answer()
 
@@ -49,32 +53,29 @@ async def topic_type_selection(update: Update, context: ContextTypes.DEFAULT_TYP
         prompt = await context.bot.send_message(
             text=(
                 "\U0001F4DD Please enter details for thread ``{thread_id}``:\n"
-                "*Event // Date // Location // Info (If any)*"
+                "*Event Name // Rehearsal Date // Perf Date // Location // Other Info (optional)*"
             ).format(thread_id=thread_id),
             **send_kwargs,
         )
         pending_questions["perf_input"] = prompt.message_id
         return DATE
 
-    elif selection == "DATE_ONLY":
-        prompt = await context.bot.send_message(
-            text=(
-                "\U0001F4C5 Please enter the *Performance Date* for thread ``{thread_id}``"
-                " (e.g. 12 MAR 2025):"
-            ).format(thread_id=thread_id),
-            **send_kwargs,
-        )
-        pending_questions["date"] = prompt.message_id
-        return DATE
-    
     elif selection == "OTHERS":
         append_to_others_list(thread_id)
-    
+
     await query.message.edit_text(f"Topic marked as {selection}. No further action.")
     return ConversationHandler.END
 
+
 async def parse_perf_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Parse performance input and save to sheet"""
+    """Parse the free-text performance details and write a new row to the sheet.
+
+    Accepts input in the format:
+      Event Name // Rehearsal Date // Perf Date // Location // Other Info (optional)
+    Use '-' for Rehearsal Date if there is no rehearsal.
+    On success publishes the pinned performance summary and interest poll to
+    the topic thread.
+    """
     if update.effective_chat.type in {"group", "supergroup"}:
         await update.message.delete()
     sheet = get_gspread_sheet()
@@ -87,7 +88,7 @@ async def parse_perf_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
     except Exception as e:
         print(f"[WARNING] Failed to delete perf input prompt: {e}")
-    
+
     try:
         if "last_error" in context.chat_data:
             await context.bot.delete_message(
@@ -97,123 +98,56 @@ async def parse_perf_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         print(f"[WARNING] Failed to delete previous error message: {e}")
 
-    # Case 1: Retrying Date Only
-    if "perf_temp" in context.user_data:
-        raw_date = update.message.text.strip()
-        try:
-            formatted_dates = parse_and_format_dates(raw_date)
-            date = "\n".join(formatted_dates)
-        except ValueError as e:
-            for key in ["last_error", "invalid_input"]:
-                msg_id = context.chat_data.pop(key, None)
-                if msg_id:
-                    try:
-                        await context.bot.delete_message(
-                            chat_id=update.effective_chat.id, 
-                            message_id=msg_id
-                        )
-                    except Exception as ex:
-                        print(f"[WARNING] Failed to delete previous {key} message: {ex}")
+    raw_text = update.message.text.strip()
+    parts = [p.strip() for p in raw_text.split("//")]
+    print(f"[DEBUG] Parsed parts: {len(parts)} - {parts}")
 
-            error_msg = await update.effective_chat.send_message(
-                str(e),
-                parse_mode="Markdown",
-            )
-            context.chat_data["last_error"] = error_msg.message_id
-            context.chat_data["invalid_input"] = update.message.message_id
-            return DATE
+    thread_id = context.user_data.get("thread_id")
 
-        temp = context.user_data.pop("perf_temp")
-        event = temp["event"]
-        location = temp["location"]
-        info = temp["info"]
-        thread_id = temp["thread_id"]
+    if len(parts) < 4 or any(not p for p in parts[:4]):
+        error_msg = await update.effective_chat.send_message(
+            "❌ Invalid input format. Use:\n"
+            "*Event Name // Rehearsal Date // Perf Date // Location // Other Info (optional)*\n\n"
+            "Example:\n"
+            "`NTU Welcome Tea // 22aug25 6pm // 23aug25 8pm // NYA // Formal wear required`\n"
+            "Use `-` for Rehearsal Date if there is no rehearsal.",
+            parse_mode="Markdown",
+        )
+        for key in ["last_error", "invalid_input"]:
+            msg_id = context.chat_data.pop(key, None)
+            if msg_id:
+                try:
+                    await context.bot.delete_message(
+                        chat_id=update.effective_chat.id,
+                        message_id=msg_id
+                    )
+                except Exception as e:
+                    print(f"[WARNING] Failed to delete previous {key} message: {e}")
+        context.chat_data["last_error"] = error_msg.message_id
+        context.chat_data["invalid_input"] = update.message.message_id
+        return DATE
 
-        all_rows = sheet.get_all_values()
-        for idx, row in enumerate(all_rows, start=1):
-            if row and str(row[0]) == str(thread_id):
-                sheet.update(
-                    values=[[event, date, location, info, "", ""]], 
-                    range_name=f"B{idx}:G{idx}"
-                )
-                break
+    event_name, rehearsal_raw, perf_raw, location = parts[0], parts[1], parts[2], parts[3]
+    other_info = parts[4] if len(parts) >= 5 else ""
 
-    # Case 2: Full Input
-    else:
-        raw_text = update.message.text.strip()
-        parts = [p.strip() for p in raw_text.split("//")]
-        print(f"[DEBUG] Parsed parts: {len(parts)} - {parts}")
+    # Validate and normalise date fields (skip rehearsal if it is a placeholder)
+    rehearsal_date = rehearsal_raw
+    perf_date = perf_raw
+    try:
+        if rehearsal_raw.strip() not in ("-", ""):
+            rehearsal_date = "\n".join(parse_and_format_dates(rehearsal_raw))
+        perf_date = "\n".join(parse_and_format_dates(perf_raw))
+    except ValueError as e:
+        error_msg = await update.effective_chat.send_message(str(e), parse_mode="Markdown")
+        context.chat_data["last_error"] = error_msg.message_id
+        context.chat_data["invalid_input"] = update.message.message_id
+        return DATE
 
-        thread_id = context.user_data.get("thread_id")
-
-        if len(parts) < 3 or any(not p for p in parts[:3]):
-            error_msg = await update.effective_chat.send_message(
-                "❌ Invalid input format. Use:\n*Event // Date // Location // Info (optional)*\n\n"
-                "Example:\n`NTU Welcome Tea // 23 JUN 2025 8:00pm // NYA // Formal wear required`",
-                parse_mode="Markdown",
-            )
-
-            for key in ["last_error", "invalid_input"]:
-                msg_id = context.chat_data.pop(key, None)
-                if msg_id:
-                    try:
-                        await context.bot.delete_message(
-                            chat_id=update.effective_chat.id, 
-                            message_id=msg_id
-                        )
-                    except Exception as e:
-                        print(f"[WARNING] Failed to delete previous {key} message: {e}")
-
-            context.chat_data["last_error"] = error_msg.message_id
-            context.chat_data["invalid_input"] = update.message.message_id
-            return DATE
-
-        event, date, location = parts[0], parts[1], parts[2]
-        info = parts[3] if len(parts) >= 4 else ""
-        thread_id = context.user_data.get("thread_id")
-
-        try:
-            raw_date = date
-            formatted_dates = parse_and_format_dates(raw_date)
-            date = "\n".join(formatted_dates)
-        except ValueError as e:
-            date = raw_date
-            context.user_data["perf_temp"] = {
-                "event": event,
-                "location": location,
-                "info": info,
-                "thread_id": thread_id
-            }
-            try:
-                sheet.append_row([thread_id, event, date, location, info, "", ""])
-                print("[DEBUG] Row appended with invalid date")
-            except Exception as e2:
-                print(f"[ERROR] Failed to append row with invalid date: {e}")
- 
-            for key in ["last_error", "invalid_input"]:
-                msg_id = context.chat_data.pop(key, None)
-                if msg_id:
-                    try:
-                        await context.bot.delete_message(
-                            chat_id=update.effective_chat.id, 
-                            message_id=msg_id
-                        )
-                    except Exception as ex:
-                        print(f"[WARNING] Failed to delete previous {key} message: {ex}")
-
-            error_msg = await update.effective_chat.send_message(
-                str(e),
-                parse_mode="Markdown",
-            )
-            context.chat_data["last_error"] = error_msg.message_id
-            context.chat_data["invalid_input"] = update.message.message_id
-            return DATE
-
-        try:
-            sheet.append_row([thread_id, event, date, location, info, "", ""])
-            print("[DEBUG] Row appended successfully")
-        except Exception as e:
-            print(f"[ERROR] Failed to append row: {e}")
+    try:
+        sheet.append_row([thread_id, "", event_name, rehearsal_date, perf_date, location, other_info, "", ""])
+        print("[DEBUG] Row appended successfully")
+    except Exception as e:
+        print(f"[ERROR] Failed to append row: {e}")
 
     group_chat_data_cache = context.application.bot_data.setdefault("group_chat_data", {})
     group_chat_data = group_chat_data_cache.setdefault(CHAT_ID, {})
@@ -224,13 +158,20 @@ async def parse_perf_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sheet=sheet,
         chat_id=CHAT_ID,
         thread_id=thread_id,
-        event=event,
-        date_text=date,
+        event_name=event_name,
+        rehearsal_date=rehearsal_date,
+        perf_date=perf_date,
         location=location,
-        info=info,
+        other_info=other_info,
     )
 
-    summary_preview = build_performance_summary(event=event, date_text=date, location=location, info=info)
+    summary_preview = build_performance_summary(
+        event_name=event_name,
+        rehearsal_date=rehearsal_date,
+        perf_date=perf_date,
+        location=location,
+        other_info=other_info,
+    )
     await update.effective_chat.send_message(
         f"✅ Performance entry created for thread `{thread_id}`.\n\n{summary_preview}",
         parse_mode="Markdown",
@@ -238,10 +179,15 @@ async def parse_perf_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     return ConversationHandler.END
 
+
 async def confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /confirmation command"""
+    """Initiate the ACCEPT/REJECT confirmation flow for the current topic thread.
+
+    Must be run inside a topic thread.  Aborts if the performance already has
+    a status set.  Sends an inline keyboard (ACCEPT / REJECT / CANCEL) and
+    stores the prompt message ID so it can be cleaned up later.
+    """
     msg = update.effective_message
-    user = update.effective_user
     chat = update.effective_chat
 
     if not msg.is_topic_message:
@@ -253,7 +199,7 @@ async def confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         await msg.delete()
-    except:
+    except Exception:
         pass
 
     sheet = get_gspread_sheet()
@@ -287,8 +233,13 @@ async def confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     context.chat_data[f"confirm_prompt_{thread_id}"] = prompt.message_id
 
+
 async def confirmation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle confirmation button callbacks"""
+    """Process the ACCEPT / REJECT / CANCEL button from the confirmation prompt.
+
+    ACCEPT: writes ACCEPTED to the sheet and refreshes the pinned summary.
+    REJECT: writes REJECTED to the sheet and schedules topic deletion.
+    """
     query = update.callback_query
     await query.answer()
 
@@ -302,11 +253,14 @@ async def confirmation_callback(update: Update, context: ContextTypes.DEFAULT_TY
     if msg_id:
         try:
             await context.bot.delete_message(
-                chat_id=query.message.chat.id, 
+                chat_id=query.message.chat.id,
                 message_id=msg_id
             )
-        except:
+        except Exception:
             pass
+
+    if action == "CANCEL":
+        return
 
     sheet = get_gspread_sheet()
     records = sheet.get_all_records()
@@ -319,170 +273,53 @@ async def confirmation_callback(update: Update, context: ContextTypes.DEFAULT_TY
     if not row_data:
         return
 
-    if action == "CANCEL":
-        return
+    status_col = SHEET_COLUMNS.index("STATUS") + 1
 
     if action == "REJECT":
-        sheet = get_gspread_sheet()
-        records = sheet.get_all_records()
-        for idx, row in enumerate(records):
-            if str(row["THREAD ID"]) == str(thread_id):
-                row_index = idx + 2
-                sheet.update_cell(row_index, 7, "REJECTED")
-                break
+        sheet.update_cell(row_number, status_col, "REJECTED")
+        await query.message.chat.send_message(
+            "❌ Performance rejected.",
+            message_thread_id=thread_id
+        )
+        return
+
+    if action == "ACCEPT":
+        sheet.update_cell(row_number, status_col, "ACCEPTED")
+
+        group_chat_data_cache = context.application.bot_data.setdefault("group_chat_data", {})
+        group_chat_data = group_chat_data_cache.setdefault(CHAT_ID, {})
+
+        await publish_performance_summary(
+            bot=context.bot,
+            chat_data_store=group_chat_data,
+            sheet=sheet,
+            chat_id=CHAT_ID,
+            thread_id=thread_id,
+            event_name=row_data.get("EVENT NAME", ""),
+            rehearsal_date=row_data.get("REHEARSAL DATE | TIME", ""),
+            perf_date=row_data.get("PERF DATE | TIME", ""),
+            location=row_data.get("LOCATION", ""),
+            other_info=row_data.get("OTHER INFO", ""),
+        )
 
         await query.message.chat.send_message(
-            "❌ Performance rejected. This topic will now be closed.", 
+            "✅ Performance *accepted*! Summary has been updated.",
+            parse_mode="Markdown",
             message_thread_id=thread_id
         )
-        await delete_topic_with_delay(
-            context, 
-            chat_id=query.message.chat.id, 
-            thread_id=thread_id
-        )
-    
-    if action == "ACCEPT":
-        all_dates = row_data["PROPOSED DATE | TIME"].splitlines()
-        context.chat_data[f"final_row_number_{thread_id}"] = row_number
-        context.chat_data[f"final_all_dates_{thread_id}"] = all_dates
-        context.chat_data[f"selected_dates_{thread_id}"] = []
 
-        buttons = [[InlineKeyboardButton(
-            text=d, 
-            callback_data=f"FINALDATE|{thread_id}|{i}"
-        )] for i, d in enumerate(all_dates)]
-        buttons.append([InlineKeyboardButton(
-            "✅ Confirm Selection", 
-            callback_data=f"FINALDATE|{thread_id}|CONFIRM"
-        )])
-        prompt = await query.message.chat.send_message(
-            "🗓️ Select final date(s) to confirm:",
-            reply_markup=InlineKeyboardMarkup(buttons),
-            message_thread_id=thread_id
-        )
-        context.chat_data[f"final_prompt_{thread_id}"] = prompt.message_id
 
 async def final_date_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle final date selection for accepted performances"""
+    """Stub — date selection is no longer part of the confirmation flow.
+
+    Kept registered so stale FINALDATE callbacks don't raise unhandled errors.
+    """
     query = update.callback_query
-    await query.answer()
-    data = query.data.split("|")
-    if len(data) != 3:
-        return
+    await query.answer("This action is no longer available.", show_alert=True)
 
-    _, thread_id, selection = data
-    thread_id = int(thread_id)
-
-    row_number = context.chat_data.get(f"final_row_number_{thread_id}")
-    all_dates = context.chat_data.get(f"final_all_dates_{thread_id}", [])
-    selected = context.chat_data.setdefault(f"selected_dates_{thread_id}", [])
-
-    if selection == "CONFIRM":
-        if not selected:
-            return await query.message.reply_text(
-                "⚠️ Please select at least one date before confirming."
-            )
-
-        try:
-            await context.bot.delete_message(
-                chat_id=query.message.chat_id, 
-                message_id=query.message.message_id
-            )
-        except Exception as e:
-            print(f"[WARNING] Failed to delete final date selection message: {e}")
-
-        try:
-            msg_id = context.chat_data.pop("confirm_prompt_msg_id", None)
-            if msg_id:
-                await context.bot.delete_message(
-                    chat_id=query.message.chat_id, 
-                    message_id=msg_id
-                )
-        except Exception as e:
-            print(f"[WARNING] Failed to delete ACCEPT/REJECT message: {e}")
-
-        value = "\n".join([all_dates[i] for i in sorted(map(int, selected))])
-        sheet = get_gspread_sheet()
-        sheet.update_cell(row_number, 6, value)
-        sheet.update_cell(row_number, 7, "ACCEPTED")
-
-        updated_row = sheet.row_values(row_number)
-        while len(updated_row) < 7:
-            updated_row += [""] * (7 - len(updated_row))
-
-        event, proposed, location, info, confirmed, status = updated_row[1:7]
-
-        date_lines = []
-        for line in confirmed.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                dt = datetime.strptime(line, "%d %b %Y | %I:%M%p")
-                formatted = f"• {dt.strftime('%d %b %Y').upper()} | {dt.strftime('%I:%M%p').lower()}"
-            except:
-                formatted = f"• {line}"
-            date_lines.append(formatted)
-
-        template = (
-            f"📢 *Performance Summary*\n\n"
-            f"📍 *Event*\n"
-            f"• {event}\n\n"
-            f"📅 *Confirmed Date | Time*\n"
-            f"{chr(10).join(date_lines)}\n\n"
-            f"📌 *Location*\n"
-            f"• {location}\n\n"
-            f"📝 *Performance Information:*\n"
-            f"{info.strip()}"
-        )
-
-        try:
-            old_summary_id = context.chat_data.pop(f"summary_msg_{thread_id}", None)
-            if old_summary_id:
-                await context.bot.unpin_chat_message(
-                    chat_id=query.message.chat.id, 
-                    message_id=old_summary_id
-                )
-        except Exception as e:
-            print(f"[WARNING] Failed to unpin previous summary: {e}")
-
-        msg = await query.message.chat.send_message(
-            template, 
-            parse_mode="Markdown", 
-            message_thread_id=thread_id
-        )
-        await context.bot.pin_chat_message(
-            chat_id=query.message.chat.id, 
-            message_id=msg.message_id, 
-            disable_notification=True
-        )
-        context.chat_data[f"summary_msg_{thread_id}"] = msg.message_id
-        return
-
-    # Handle toggling checkboxes
-    if selection not in selected:
-        selected.append(selection)
-    else:
-        selected.remove(selection)
-
-    new_buttons = []
-    for i, d in enumerate(all_dates):
-        is_selected = str(i) in selected
-        label = f"✅ {d}" if is_selected else d
-        new_buttons.append([InlineKeyboardButton(
-            text=label, 
-            callback_data=f"FINALDATE|{thread_id}|{i}"
-        )])
-    new_buttons.append([InlineKeyboardButton(
-        "✅ Confirm Selection", 
-        callback_data=f"FINALDATE|{thread_id}|CONFIRM"
-    )])
-
-    await query.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(new_buttons))
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Cancel conversation handler"""
-    print("[DEBUG] Cancel triggered")
+    """Cancel the active conversation and clean up any pending prompt messages."""
     chat = update.effective_chat
 
     try:
@@ -495,48 +332,45 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         await update.message.delete()
-    except:
+    except Exception:
         pass
 
     return ConversationHandler.END
 
 
-def build_performance_summary(event: str, date_text: str, location: str, info: str) -> str:
-    """Return the formatted performance summary message used across handlers."""
+def build_performance_summary(
+    event_name: str,
+    rehearsal_date: str,
+    perf_date: str,
+    location: str,
+    other_info: str,
+) -> str:
+    """Return the formatted pinned performance summary message.
 
-    date_lines: list[str] = []
-    for entry in (date_text or "").splitlines():
-        entry = entry.strip()
-        if not entry:
-            continue
-        try:
-            if "|" in entry:
-                dt = datetime.strptime(entry, "%d %b %Y | %I:%M%p")
-                formatted_time = dt.strftime("%I:%M%p").lower()
-                formatted = f"• {dt.strftime('%d %b %Y').upper()} | {formatted_time}"
-            else:
-                dt = datetime.strptime(entry, "%d %b %Y")
-                formatted = f"• {dt.strftime('%d %b %Y').upper()}"
-            date_lines.append(formatted)
-        except ValueError:
-            date_lines.append(f"• {entry}")
+    Rehearsal date is omitted from display when it is '-' or blank.
+    """
+    lines = ["📢 *Performance Opportunity*\n"]
 
-    if not date_lines:
-        date_lines.append("• TBD")
+    lines.append(f"📍 *Event Name*: {event_name.strip()}\n")
 
-    formatted_dates = "\n".join(date_lines)
+    rehearsal = rehearsal_date.strip() if rehearsal_date else ""
+    if rehearsal and rehearsal != "-":
+        r_bullets = "\n".join(f"• {l.strip()}" for l in rehearsal.splitlines() if l.strip())
+        lines.append(f"🔁 *Rehearsal Date | Time*\n{r_bullets}\n")
 
-    return (
-        f"\U0001F4E2 *Performance Opportunity*\n\n"
-        f"\U0001F4CD *Event*\n"
-        f"• {event}\n\n"
-        f"\U0001F4C5 *Date | Time*\n"
-        f"{formatted_dates}\n\n"
-        f"\U0001F4CC *Location*\n"
-        f"• {location}\n\n"
-        f"*Performance Information:*\n"
-        f"{info.strip()}"
-    )
+    perf = perf_date.strip() if perf_date else "TBD"
+    if perf == "TBD":
+        lines.append("📅 *Performance Date | Time*\n• TBD\n")
+    else:
+        p_bullets = "\n".join(f"• {l.strip()}" for l in perf.splitlines() if l.strip())
+        lines.append(f"📅 *Performance Date | Time*\n{p_bullets}\n")
+
+    lines.append(f"📌 *Location*\n• {location.strip()}\n")
+
+    info = other_info.strip() if other_info else ""
+    lines.append(f"📝 *Other Info*\n{info if info else '-'}")
+
+    return "\n".join(lines)
 
 
 async def publish_performance_summary(
@@ -545,15 +379,19 @@ async def publish_performance_summary(
     sheet,
     chat_id: int,
     thread_id: int,
-    event: str,
-    date_text: str,
+    event_name: str,
+    rehearsal_date: str,
+    perf_date: str,
     location: str,
-    info: str,
+    other_info: str,
 ):
-    """Send or refresh the performance summary message and interest poll."""
+    """Post (or refresh) the pinned performance summary and interest poll.
 
+    Deletes and unpins any previous summary/poll for this thread before posting
+    the updated version.  Tracks the new message IDs in chat_data_store so
+    future calls can clean them up correctly.
+    """
     summary_key = f"summary_msg_{thread_id}"
-    poll_key = f"interest_poll_msg_{thread_id}"
 
     previous_summary_id = chat_data_store.get(summary_key)
     if previous_summary_id:
@@ -561,25 +399,18 @@ async def publish_performance_summary(
             await bot.unpin_chat_message(chat_id=chat_id, message_id=previous_summary_id)
         except BadRequest as exc:
             print(f"[WARNING] Failed to unpin previous summary: {exc}")
-        except Exception as exc:  # pragma: no cover - network
-            print(f"[WARNING] Failed to unpin previous summary (unexpected): {exc}")
         try:
             await bot.delete_message(chat_id=chat_id, message_id=previous_summary_id)
         except BadRequest as exc:
             print(f"[WARNING] Failed to delete previous summary: {exc}")
-        except Exception as exc:  # pragma: no cover - network
-            print(f"[WARNING] Failed to delete previous summary (unexpected): {exc}")
 
-    previous_poll_msg_id = chat_data_store.get(poll_key)
-    if previous_poll_msg_id:
-        try:
-            await bot.delete_message(chat_id=chat_id, message_id=previous_poll_msg_id)
-        except BadRequest as exc:
-            print(f"[WARNING] Failed to delete previous interest poll: {exc}")
-        except Exception as exc:  # pragma: no cover - network
-            print(f"[WARNING] Failed to delete previous interest poll (unexpected): {exc}")
-
-    template = build_performance_summary(event=event, date_text=date_text, location=location, info=info)
+    template = build_performance_summary(
+        event_name=event_name,
+        rehearsal_date=rehearsal_date,
+        perf_date=perf_date,
+        location=location,
+        other_info=other_info,
+    )
 
     message = await bot.send_message(
         chat_id=chat_id,
@@ -596,16 +427,7 @@ async def publish_performance_summary(
         )
     except BadRequest as exc:
         print(f"[WARNING] Failed to pin performance summary: {exc}")
-    except Exception as exc:  # pragma: no cover - network
-        print(f"[WARNING] Failed to pin performance summary (unexpected): {exc}")
 
     chat_data_store[summary_key] = message.message_id
 
-    poll = await send_interest_poll(bot, chat_id, thread_id, sheet)
-    chat_data_store[poll_key] = poll["message_id"] if poll else None
-    if poll:
-        print(f"[DEBUG] Saved new poll message ID: {poll['message_id']}")
-    else:
-        print("[DEBUG] No interest poll sent for this summary.")
-
-    return message, poll
+    return message, None

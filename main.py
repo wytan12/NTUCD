@@ -104,7 +104,7 @@ def main():
     app.add_handler(ChatJoinRequestHandler(join_request_handler))
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT, handle_private_command))
     app.add_handler(MessageHandler(filters.ChatType.GROUPS, handle_message))
-    app.add_handler(CallbackQueryHandler(handle_confirm_new_perf, pattern="^(CONFIRM_NEW_PERF|CONFIRM_NEW_OTHERS|TYPE_SELECTED\||TOGGLE_RULE\||CONFIRM_STANDARD)"))
+    app.add_handler(CallbackQueryHandler(handle_confirm_new_perf, pattern="^(CONFIRM_NEW_PERF|CONFIRM_NEW_OTHERS|TYPE_SELECTED\||TOGGLE_RULE\||CONFIRM_STANDARD|PERF_EVENT_TYPE\||SKIP_PERF_FIELD\|)"))
     app.add_handler(CallbackQueryHandler(lambda u,c: u.callback_query.edit_message_text("❌ Cancelled."), pattern="^CANCEL_NEW_PERF$"))
     
     print("Bot is running...")
@@ -118,7 +118,7 @@ def main():
     # --- 2. Load OTHERS List ---
     try:
         print("Loading OTHERS List from Google Sheets...")
-        others_sheet = get_gspread_sheet(sheet_name="NTUCD AY25/26 Timeline", tab_name="OTHERS List")
+        others_sheet = get_gspread_sheet(sheet_name=SHEET_NAME, tab_name="OTHERS")
         print("successfully got OTHERS List sheet")
         rows = others_sheet.col_values(1)
         print(f"[DEBUG] OTHERS List rows: {rows}")

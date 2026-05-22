@@ -118,8 +118,9 @@ async def send_interest_poll(bot, chat_id, thread_id, sheet):
             print(f"[SKIPPED] Interest poll not sent. STATUS is {matched_row[status_col_index]}")
             return None
 
-        # Extract date string from column 3 (index 2)
-        raw_date_str = matched_row[2].strip() if len(matched_row) > 1 else ''
+        # Extract PERF DATE | TIME (index 4 in new schema)
+        perf_date_col = SHEET_COLUMNS.index("PERF DATE | TIME")
+        raw_date_str = matched_row[perf_date_col].strip() if len(matched_row) > perf_date_col else ''
         if not raw_date_str:
             print(f"[WARN] No date data for thread_id {thread_id}")
             return None

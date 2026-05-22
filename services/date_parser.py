@@ -1,99 +1,153 @@
 import re
 from datetime import datetime
 
-def parse_flexible_date(date_str: str) -> str:
-    """Parse flexible date formats"""
-    original = date_str.strip()
-    lower = original.lower()
+_MONTH_MAP = {
+    'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5, 'jun': 6,
+    'jul': 7, 'aug': 8, 'sep': 9, 'sept': 9, 'oct': 10, 'nov': 11, 'dec': 12,
+    'january': 1, 'february': 2, 'march': 3, 'april': 4,
+    'june': 6, 'july': 7, 'august': 8, 'september': 9,
+    'october': 10, 'november': 11, 'december': 12,
+}
 
-    # Normalize various time formats
-    lower = re.sub(r'(\d{1,2})\.(\d{2})', r'\1:\2', lower)
-    lower = re.sub(r'\b(\d{1,2})(\d{2})(am|pm)\b', r'\1:\2 \3', lower)
-    lower = re.sub(r'(\d{1,2}:\d{2})(am|pm)\b', r'\1 \2', lower)
-    lower = re.sub(r'\b(\d{1,2})(am|pm)\b', r'\1:00 \2', lower)
 
-    pattern = re.match(
-        r"(\d{1,2})[\s-]?([a-zA-Z]{3,9})[\s-]?(\d{2,4})?(?:\s+(\d{1,2}:\d{2}(?:\s?(?:am|pm))?|\d{3,4}(?:\s?(?:am|pm))?))?$",
-        lower,
-    )
-    
-    if not pattern:
-        raise ValueError(f"❌ Invalid date format: '{original}'\n👉 Use formats like '24jun25' or '24jun25 2:30pm'.")
+def _parse_time_token(token: str) -> str | None:
+    """Parse a single time token and return a canonical uppercase string.
 
-    day, month, year, time_part = pattern.groups()
+    Accepted examples: '8am' → '8AM', '1030pm' → '10:30PM', '2000' → '8PM'.
+    Returns None if the token is not a recognisable time.
+    """
+    t = token.strip().lower()
+    if not t:
+        return None
 
-    if not year:
-        year = str(datetime.now().year)
-    elif len(year) == 2:
-        year = "20" + year
+    # am/pm suffix present
+    if t.endswith('am') or t.endswith('pm'):
+        suffix = t[-2:].upper()
+        num = re.sub(r'[:\.]', '', t[:-2])
+        if not num.isdigit():
+            return None
+        if len(num) <= 2:
+            h = int(num)
+            if not (1 <= h <= 12):
+                return None
+            return f"{h}{suffix}"
+        if len(num) == 3:
+            h, m = int(num[0]), num[1:]
+        elif len(num) == 4:
+            h, m = int(num[:2]), num[2:]
+        else:
+            return None
+        if not (0 <= int(m) <= 59):
+            return None
+        return f"{h}:{m}{suffix}"
 
-    date_time_str = f"{day} {month} {year}"
-    if time_part:
-        time_part = time_part.strip()
-        suffix = ""
-        if time_part.lower().endswith(("am", "pm")):
-            suffix = time_part[-2:]
-            time_part = time_part[:-2].strip()
-        if ":" not in time_part and time_part.isdigit() and 3 <= len(time_part) <= 4:
-            time_part = f"{time_part[:-2]}:{time_part[-2:]}"
-        if suffix:
-            time_part = f"{time_part} {suffix}"
+    # 24-hour numeric: 2000, 20:00, 0800
+    num = re.sub(r'[:\.]', '', t)
+    if num.isdigit() and len(num) == 4:
+        h, m = int(num[:2]), int(num[2:])
+        if 0 <= h <= 23 and 0 <= m <= 59:
+            suffix = 'PM' if h >= 12 else 'AM'
+            h12 = h % 12 or 12
+            return f"{h12}{suffix}" if m == 0 else f"{h12}:{m:02d}{suffix}"
 
-        date_time_with_time = f"{date_time_str} {time_part}"
+    return None
 
-        for fmt in ("%d %b %Y %H:%M", "%d %B %Y %H:%M", "%d %b %Y %I:%M %p", "%d %B %Y %I:%M %p"):
-            try:
-                dt = datetime.strptime(date_time_with_time, fmt)
-                time_str = dt.strftime("%I:%M%p").lstrip("0").lower()
-                return f"{dt.strftime('%d %b %Y').upper()} | {time_str}"
-            except ValueError:
-                continue
 
-        raise ValueError(f"❌ Time format is invalid: '{time_part}'\n👉 Use formats like 2pm, 2:30pm, 1430")
+def _parse_date_only(day: int, month_str: str, year_str: str | None) -> datetime:
+    """Build a datetime from parsed day/month/year components."""
+    month = _MONTH_MAP.get(month_str.lower())
+    if not month:
+        raise ValueError(
+            f"❌ Unknown month: `{month_str}`\n"
+            "👉 Use abbreviations like `aug`, `nov`, `jan`"
+        )
+    if not year_str:
+        year = datetime.now().year
+    elif len(year_str) == 2:
+        year = 2000 + int(year_str)
+    else:
+        year = int(year_str)
+    try:
+        return datetime(year, month, day)
+    except ValueError:
+        raise ValueError(f"❌ Invalid date: `{day} {month_str} {year}`")
 
-    for fmt in ("%d %b %Y", "%d %B %Y"):
-        try:
-            dt = datetime.strptime(f"{day} {month} {year}", fmt)
-            return dt.strftime("%d %b %Y").upper()
-        except ValueError:
-            continue
 
-    raise ValueError(f"❌ Date format is invalid: '{original}'\n👉 Use formats like '24jun25', not numeric months.")
+def parse_date_line(line: str) -> str:
+    """Parse one line with a date and zero or more space-separated times.
 
-def parse_and_format_dates(dates_str):
-    """Parse and format multiple dates"""
-    parts = [p.strip() for p in dates_str.split(",")]
-    results = []
-    invalid_parts = []
+    Format: DD MON [YY/YYYY] [TIME [TIME ...]]
+    Multiple times on the same line are joined with ' / '.
 
-    for part in parts:
-        if not part:
-            invalid_parts.append("(empty)")
-            continue
-        try:
-            formatted = parse_flexible_date(part)
-            results.append(formatted)
-        except ValueError:
-            invalid_parts.append(part)
+    Examples:
+        '28 aug 8am 1030pm'  →  '28 AUG 2026  8AM / 10:30PM'
+        '30 aug 1130pm'      →  '30 AUG 2026  11:30PM'
+        '31 aug 25'          →  '31 AUG 2025'
+    """
+    line = line.strip()
+    if not line:
+        raise ValueError("❌ Empty date line.")
 
-    if invalid_parts:
-        if len(parts) == 1:
-            raise ValueError(
-                "❌ Invalid *date/time* format.\n"
-                "👉 Use formats like:\n"
-                "- `23aug25 8:30pm`\n"
-                "- `23aug 1430`\n"
-                "- `23aug25`\n"
-                "- `23aug`\n"
-                "\n⚠️ Make sure your input uses letters for month (e.g. `aug`, not `08`)."
-            )
+    m = re.match(r'^(\d{1,2})\s*([a-zA-Z]{3,9})\s*(\d{2}|(?:19|20)\d{2})?\s*(.*)', line, re.IGNORECASE)
+    if not m:
+        raise ValueError(
+            f"❌ Cannot parse: `{line}`\n"
+            "👉 Start each line with a date, e.g. `28 aug 8am`"
+        )
+
+    day_s, month_s, year_s, rest = m.groups()
+    dt = _parse_date_only(int(day_s), month_s, year_s)
+    date_label = dt.strftime('%d %b %Y').upper()
+
+    if not rest or not rest.strip():
+        return date_label
+
+    tokens = re.split(r'[\s,/]+', rest.strip())
+    tokens = [t for t in tokens if t]
+
+    times = []
+    for token in tokens:
+        parsed = _parse_time_token(token)
+        if parsed:
+            times.append(parsed)
         else:
             raise ValueError(
-                "❌ One or more *date/time* entries are invalid.\n"
-                "👉 Use correct comma `,` between entries and formats like:\n"
-                "- `23aug 8pm, 24aug 9pm`\n"
-                "- `23aug25 1430, 24aug25`\n"
-                "\n⚠️ Use *letter months*, not numeric (e.g. `aug`, not `08`)."
+                f"❌ Cannot parse time: `{token}`\n"
+                "👉 Use formats like `8am`, `1030pm`, `2000`"
             )
+
+    if times:
+        return f"{date_label}  {' / '.join(times)}"
+    return date_label
+
+
+def parse_flexible_date(date_str: str) -> str:
+    """Backward-compatible single date/time parser. Delegates to parse_date_line."""
+    return parse_date_line(date_str)
+
+
+def parse_and_format_dates(dates_str: str) -> list[str]:
+    """Parse a multi-line date/time input.
+
+    Each non-empty line: DD MON [YY] [TIME [TIME ...]]
+    Multiple times on the same line are separated by spaces and displayed as TIME1 / TIME2.
+    Commas within a line are treated as line separators (backward compatibility).
+
+    Returns a list of formatted strings, one per input line.
+    Raises ValueError with a user-facing Markdown message on failure.
+    """
+    entries = []
+    for raw_line in dates_str.strip().splitlines():
+        for part in raw_line.split(','):
+            part = part.strip()
+            if part:
+                entries.append(part)
+
+    if not entries:
+        raise ValueError("❌ No date entered.")
+
+    results = []
+    for entry in entries:
+        results.append(parse_date_line(entry))
 
     return results

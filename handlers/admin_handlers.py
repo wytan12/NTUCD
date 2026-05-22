@@ -75,13 +75,13 @@ async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     print("[DEBUG] Status not ACCEPTED. Reminder skipped.")
                     return
 
-                date_str = row.get("CONFIRMED DATE | TIME", "").strip()
+                date_str = row.get("PERF DATE | TIME", "").strip()
                 date_lines = "\n".join([f"• {d.strip()}" for d in date_str.splitlines() if d.strip()])
                 template = (
                     f"📢 *Performance Reminder*\n\n"
-                    f"📍 *Event*\n• {row['EVENT']}\n\n"
-                    f"📅 *Date | Time*\n{date_lines}\n\n"
-                    f"📌 *Location*\n• {row['LOCATION']}\n\n"
+                    f"📍 *Event*\n• {row.get('EVENT NAME', '')}\n\n"
+                    f"📅 *Performance Date | Time*\n{date_lines}\n\n"
+                    f"📌 *Location*\n• {row.get('LOCATION', '')}\n\n"
                     f"*📝 Final Preparation Notes*\n\n"
                     f"*👀 Glasses & Contact Lens*\n"
                     f"If you wear glasses, try your best to perform without them (e.g. wear contact lens). "

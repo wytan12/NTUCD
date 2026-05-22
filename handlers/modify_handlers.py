@@ -11,19 +11,30 @@ from services.date_parser import parse_and_format_dates
 from handlers.conversation_handlers import build_performance_summary, publish_performance_summary
 from utils.helpers import delete_topic_with_delay
 
+# Maps sheet column names to short callback-safe aliases
 FIELD_ALIAS_MAP = {
-    "EVENT": "EVENT",
-    "PROPOSED DATE | TIME": "PROPOSED_DATE",
+    "EVENT TYPE": "EVENT_TYPE",
+    "EVENT NAME": "EVENT_NAME",
+    "REHEARSAL DATE | TIME": "REHEARSAL_DATE",
+    "PERF DATE | TIME": "PERF_DATE",
     "LOCATION": "LOCATION",
-    "PERFORMANCE INFO": "PERFORMANCE_INFO",
-    "CONFIRMED DATE | TIME": "CONFIRMED_DATE",
+    "OTHER INFO": "OTHER_INFO",
     "STATUS": "STATUS",
 }
 
 ALIAS_TO_FIELD = {alias: field for field, alias in FIELD_ALIAS_MAP.items()}
 
+# Fields where text input is validated as a date string
+DATE_FIELDS = {"REHEARSAL DATE | TIME", "PERF DATE | TIME"}
+
+
 async def start_modify(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Start modification process"""
+    """Handle /modify command in a group topic thread.
+
+    Deletes the command message, checks admin rights and exemption list,
+    then delegates to initiate_modify_via_dm which sends the field picker
+    to the admin's DM.
+    """
     msg = update.effective_message
 
     try:
@@ -50,8 +61,11 @@ async def initiate_modify_via_dm(
     thread_id: int,
     initiated_via_dm: bool,
 ) -> None:
-    """Kick off the modify flow via DM, sharing logic with /modify command."""
+    """Send the field-selection keyboard to the admin (via DM or current chat).
 
+    initiated_via_dm=True keeps the conversation in the DM chat;
+    False redirects replies to the user's DM even when triggered from the group.
+    """
     sheet = get_gspread_sheet()
     records = sheet.get_all_records()
     row = next((r for r in records if str(r.get("THREAD ID")) == str(thread_id)), None)
@@ -69,19 +83,17 @@ async def initiate_modify_via_dm(
         await target_chat.send_message("❌ This performance is already REJECTED. You cannot modify it.")
         return
 
-    if status == "":
-        date_field = "PROPOSED DATE | TIME"
-        modify_options = ["EVENT", date_field, "LOCATION", "PERFORMANCE INFO"]
-    else:
-        date_field = "CONFIRMED DATE | TIME"
-        modify_options = ["EVENT", date_field, "LOCATION", "PERFORMANCE INFO", "STATUS"]
+    modify_options = ["EVENT TYPE", "EVENT NAME", "REHEARSAL DATE | TIME", "PERF DATE | TIME", "LOCATION", "OTHER INFO"]
+    if status != "":
+        modify_options.append("STATUS")
 
     emoji_map = {
-        "EVENT": "📍",
-        "CONFIRMED DATE | TIME": "📅",
-        "PROPOSED DATE | TIME": "📅",
+        "EVENT TYPE": "🎭",
+        "EVENT NAME": "📍",
+        "REHEARSAL DATE | TIME": "🔁",
+        "PERF DATE | TIME": "📅",
         "LOCATION": "📌",
-        "PERFORMANCE INFO": "📝",
+        "OTHER INFO": "📝",
         "STATUS": "📊",
     }
 
@@ -107,17 +119,23 @@ async def initiate_modify_via_dm(
     context.user_data["modify_thread_id"] = thread_id
     context.user_data["modify_initiated_dm"] = initiated_via_dm
 
+
 async def get_modify_field_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle field selection for modification"""
+    """Handle field selection from the modify keyboard.
+
+    STATUS field shows a button picker; all other fields (including date
+    fields) prompt for free-text input validated in apply_modify_value.
+    """
     query = update.callback_query
     await query.answer()
 
     parts = query.data.split("|")
     if len(parts) < 3:
         return
-    _, field, thread_token = parts
+    _, field_alias, thread_token = parts
     thread_id = int(thread_token)
     context.user_data["modify_thread_id"] = thread_id
+
     try:
         await context.bot.delete_message(
             chat_id=query.message.chat.id,
@@ -129,10 +147,9 @@ async def get_modify_field_callback(update: Update, context: ContextTypes.DEFAUL
     prompt_store = context.application.bot_data.get("modify_prompts", {})
     prompt_store.pop((query.message.chat.id, thread_id), None)
 
-    field = ALIAS_TO_FIELD.get(field, field)
+    field = ALIAS_TO_FIELD.get(field_alias, field_alias)
 
     if field == "CANCEL":
-        print("[DEBUG] User selected cancel button")
         await context.bot.send_message(
             chat_id=query.from_user.id,
             text="❌ Modification cancelled."
@@ -143,79 +160,40 @@ async def get_modify_field_callback(update: Update, context: ContextTypes.DEFAUL
 
     context.user_data["modify_field"] = field
 
-    if field == "CONFIRMED DATE | TIME":
-        print("[DEBUG] User selected to modify CONFIRMED DATE | TIME")
-        sheet = get_gspread_sheet()
-        records = sheet.get_all_records()
-        for row in records:
-            if str(row["THREAD ID"]) == str(thread_id):
-                proposed = row.get("PROPOSED DATE | TIME", "").strip()
-                proposed_dates = [d.strip() for d in proposed.splitlines() if d.strip()]
-                if not proposed_dates:
-                    await context.bot.send_message(
-                        chat_id=query.from_user.id,
-                        text="⚠️ No proposed dates available to choose from.",
-                    )
-                    return ConversationHandler.END
-
-                context.user_data["proposed_dates"] = proposed_dates
-                context.user_data["selected_date_indices"] = []
-
-                buttons = []
-                for i, d in enumerate(proposed_dates):
-                    label = d
-                    buttons.append([
-                        InlineKeyboardButton(label, callback_data=f"modify_date_selected|{i}")
-                    ])
-
-                buttons.append([
-                    InlineKeyboardButton(
-                        "✅ Confirm Selection", 
-                        callback_data="modify_date_selected|CONFIRM"
-                    )
-                ])
-
-                markup = InlineKeyboardMarkup(buttons)
-
-                await context.bot.send_message(
-                    chat_id=query.from_user.id,
-                    text="📅 Please choose the *confirmed date*, then press ✅ Confirm Selection:",
-                    reply_markup=markup,
-                    parse_mode="Markdown",
-                )
-
-                return ConversationHandler.END
-    
-    elif field == "STATUS":
-        print("[DEBUG] User selected to modify STATUS")
+    if field == "STATUS":
         buttons = [
-            [InlineKeyboardButton(
-                "❌ Reject Performance", 
-                callback_data="modify_status_selected|REJECTED"
-            )],
-            [InlineKeyboardButton(
-                "↩️ Cancel", 
-                callback_data="modify_status_selected|CANCEL"
-            )]
+            [InlineKeyboardButton("❌ Reject Performance", callback_data="modify_status_selected|REJECTED")],
+            [InlineKeyboardButton("↩️ Cancel", callback_data="modify_status_selected|CANCEL")],
         ]
-        markup = InlineKeyboardMarkup(buttons)
         await context.bot.send_message(
             chat_id=query.from_user.id,
-            text="🚦 Please select the new *STATUS*: ",
-            reply_markup=markup,
+            text="🚦 Please select the new *STATUS*:",
+            reply_markup=InlineKeyboardMarkup(buttons),
             parse_mode="Markdown",
         )
         return ConversationHandler.END
-    
+
+    hint = ""
+    if field in DATE_FIELDS:
+        hint = "\n_Format: `23aug25 8pm` or `23aug25` — use `-` to clear_"
+
     prompt = await context.bot.send_message(
         chat_id=query.from_user.id,
-        text=f"✅ Got it! What is the new value for *{field}*?",
+        text=f"✏️ Enter the new value for *{field}*:{hint}",
         parse_mode="Markdown",
     )
     context.chat_data["modify_prompt_msg_ids"] = [prompt.message_id]
     return MODIFY_VALUE
 
+
 async def apply_modify_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Apply a free-text value to the field selected in get_modify_field_callback.
+
+    Date fields (REHEARSAL DATE | TIME, PERF DATE | TIME) are validated and
+    normalised through parse_and_format_dates before writing.  A '-' input
+    for a date field is stored as-is (clears the date).  After a successful
+    write the pinned performance summary in the group is refreshed.
+    """
     raw_value = update.message.text.strip()
     if raw_value.lower() == "/cancel":
         await context.bot.send_message(
@@ -249,7 +227,6 @@ async def apply_modify_value(update: Update, context: ContextTypes.DEFAULT_TYPE)
             break
 
     if row_number is None or record is None:
-        print("[DEBUG] Thread ID not found in sheet")
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
             text="❌ This thread is not registered in the sheet."
@@ -257,23 +234,21 @@ async def apply_modify_value(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return ConversationHandler.END
 
     status = record.get("STATUS", "").strip().upper()
-    if status not in {"", "ACCEPTED"}:
+    if status == "REJECTED":
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
             text="❌ This performance is already REJECTED. You cannot modify it."
         )
         return ConversationHandler.END
 
-    allowed_fields: list[str]
-    if status == "":
-        allowed_fields = ["EVENT", "PROPOSED DATE | TIME", "LOCATION", "PERFORMANCE INFO"]
-    else:
-        allowed_fields = ["EVENT", "CONFIRMED DATE | TIME", "LOCATION", "PERFORMANCE INFO", "STATUS"]
+    allowed_fields = ["EVENT TYPE", "EVENT NAME", "REHEARSAL DATE | TIME", "PERF DATE | TIME", "LOCATION", "OTHER INFO"]
+    if status != "":
+        allowed_fields.append("STATUS")
 
     if field not in allowed_fields:
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
-            text=f"⛔ You can’t modify *{field}* while the status is *{status or 'PENDING'}*.",
+            text=f"⛔ You can't modify *{field}* at this stage.",
             parse_mode="Markdown",
         )
         return ConversationHandler.END
@@ -288,10 +263,10 @@ async def apply_modify_value(update: Update, context: ContextTypes.DEFAULT_TYPE)
     normalized_value = raw_value
 
     try:
-        if field in {"PROPOSED DATE | TIME", "CONFIRMED DATE | TIME"}:
-            formatted_dates = parse_and_format_dates(raw_value)
-            normalized_value = "\n".join(formatted_dates)
-            print(f"[DEBUG] Normalized date value: {normalized_value}")
+        if field in DATE_FIELDS and raw_value.strip() != "-":
+            formatted = parse_and_format_dates(raw_value)
+            normalized_value = "\n".join(formatted)
+            print(f"[DEBUG] Normalised date value: {normalized_value}")
 
         for key in ["modify_error_msg_id", "invalid_input_msg_id"]:
             msg_id = context.chat_data.pop(key, None)
@@ -325,7 +300,7 @@ async def apply_modify_value(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         return ConversationHandler.END
 
-    # Clean up DM prompt messages to keep the conversation tidy
+    # Clean up DM prompt messages
     prompt_ids = context.chat_data.pop("modify_prompt_msg_ids", [])
     for msg_id in prompt_ids:
         try:
@@ -346,35 +321,36 @@ async def apply_modify_value(update: Update, context: ContextTypes.DEFAULT_TYPE)
         updated_row.append("")
     updated_record = dict(zip(SHEET_COLUMNS, updated_row))
 
-    date_text = updated_record.get("CONFIRMED DATE | TIME") or updated_record.get("PROPOSED DATE | TIME") or ""
     summary_preview = build_performance_summary(
-        event=updated_record.get("EVENT", ""),
-        date_text=date_text,
+        event_name=updated_record.get("EVENT NAME", ""),
+        rehearsal_date=updated_record.get("REHEARSAL DATE | TIME", ""),
+        perf_date=updated_record.get("PERF DATE | TIME", ""),
         location=updated_record.get("LOCATION", ""),
-        info=updated_record.get("PERFORMANCE INFO", ""),
+        other_info=updated_record.get("OTHER INFO", ""),
     )
 
     group_chat_data_cache = context.application.bot_data.setdefault("group_chat_data", {})
     group_chat_data = group_chat_data_cache.setdefault(CHAT_ID, {})
 
-    await publish_performance_summary(
-        bot=context.bot,
-        chat_data_store=group_chat_data,
-        sheet=sheet,
-        chat_id=CHAT_ID,
-        thread_id=thread_id,
-        event=updated_record.get("EVENT", ""),
-        date_text=date_text,
-        location=updated_record.get("LOCATION", ""),
-        info=updated_record.get("PERFORMANCE INFO", ""),
-    )
+    try:
+        await publish_performance_summary(
+            bot=context.bot,
+            chat_data_store=group_chat_data,
+            sheet=sheet,
+            chat_id=CHAT_ID,
+            thread_id=thread_id,
+            event_name=updated_record.get("EVENT NAME", ""),
+            rehearsal_date=updated_record.get("REHEARSAL DATE | TIME", ""),
+            perf_date=updated_record.get("PERF DATE | TIME", ""),
+            location=updated_record.get("LOCATION", ""),
+            other_info=updated_record.get("OTHER INFO", ""),
+        )
+    except BadRequest as exc:
+        print(f"[WARNING] Could not refresh pinned summary for thread {thread_id}: {exc}")
 
     await context.bot.send_message(
         chat_id=update.effective_chat.id,
-        text=(
-            f"✅ Updated *{field}* for thread `{thread_id}`.\n\n"
-            f"{summary_preview}"
-        ),
+        text=f"✅ Updated *{field}* for thread `{thread_id}`.\n\n{summary_preview}",
         parse_mode="Markdown",
     )
 
@@ -383,127 +359,22 @@ async def apply_modify_value(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     return ConversationHandler.END
 
+
 async def handle_modify_date_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Stub — the date picker is no longer used in the modify flow.
+
+    Kept registered so stale modify_date_selected callbacks don't raise errors.
+    """
     query = update.callback_query
-    data = query.data.split("|")
-    if len(data) != 2:
-        await query.answer()
-        return
+    await query.answer("This action is no longer available.", show_alert=True)
 
-    _, selected = data
-    thread_id = context.user_data.get("modify_thread_id")
-    proposed_dates = context.user_data.get("proposed_dates", [])
-    selected_indices = set(context.user_data.get("selected_date_indices", []))
-
-    if selected == "CONFIRM":
-        if not selected_indices:
-            await query.answer("Select at least one date before confirming.", show_alert=True)
-            return
-
-        await query.answer()
-
-        ordered_indices = sorted(selected_indices, key=lambda x: int(x))
-        final_dates = [proposed_dates[int(idx)] for idx in ordered_indices]
-        final_value = "\n".join(final_dates)
-
-        sheet = get_gspread_sheet()
-        records = sheet.get_all_records()
-        row_number = None
-        record = None
-        for idx, row in enumerate(records, start=2):
-            if str(row.get("THREAD ID")) == str(thread_id):
-                row_number = idx
-                record = row
-                break
-
-        if row_number is None or record is None:
-            await context.bot.send_message(
-                chat_id=query.from_user.id,
-                text="❌ Unable to locate this performance entry in the sheet."
-            )
-            return
-
-        try:
-            sheet.update_cell(row_number, SHEET_COLUMNS.index("CONFIRMED DATE | TIME") + 1, final_value)
-        except Exception as exc:
-            print(f"[ERROR] Failed to update confirmed date: {exc}")
-            await context.bot.send_message(
-                chat_id=query.from_user.id,
-                text=f"❌ Failed to save confirmed dates: `{exc}`",
-                parse_mode="Markdown",
-            )
-            return
-
-        updated_row = sheet.row_values(row_number)
-        while len(updated_row) < len(SHEET_COLUMNS):
-            updated_row.append("")
-        updated_record = dict(zip(SHEET_COLUMNS, updated_row))
-
-        group_chat_data_cache = context.application.bot_data.setdefault("group_chat_data", {})
-        group_chat_data = group_chat_data_cache.setdefault(CHAT_ID, {})
-
-        await publish_performance_summary(
-            bot=context.bot,
-            chat_data_store=group_chat_data,
-            sheet=sheet,
-            chat_id=CHAT_ID,
-            thread_id=thread_id,
-            event=updated_record.get("EVENT", ""),
-            date_text=final_value,
-            location=updated_record.get("LOCATION", ""),
-            info=updated_record.get("PERFORMANCE INFO", ""),
-        )
-
-        summary_preview = build_performance_summary(
-            event=updated_record.get("EVENT", ""),
-            date_text=final_value,
-            location=updated_record.get("LOCATION", ""),
-            info=updated_record.get("PERFORMANCE INFO", ""),
-        )
-
-        context.user_data.pop("proposed_dates", None)
-        context.user_data.pop("selected_date_indices", None)
-
-        try:
-            await context.bot.delete_message(chat_id=query.message.chat.id, message_id=query.message.message_id)
-        except Exception as exc:
-            print(f"[WARNING] Failed to delete date selection keyboard: {exc}")
-
-        await context.bot.send_message(
-            chat_id=query.from_user.id,
-            text=(
-                "✅ Confirmed date/time updated successfully.\n\n"
-                f"{summary_preview}"
-            ),
-            parse_mode="Markdown",
-        )
-
-        context.user_data.pop("modify_field", None)
-        context.user_data.pop("modify_thread_id", None)
-
-        return
-
-    await query.answer()
-
-    if selected in selected_indices:
-        selected_indices.remove(selected)
-    else:
-        selected_indices.add(selected)
-    context.user_data["selected_date_indices"] = selected_indices
-
-    buttons = []
-    for i, date_display in enumerate(proposed_dates):
-        is_selected = str(i) in selected_indices
-        label = f"✅ {date_display}" if is_selected else date_display
-        buttons.append([InlineKeyboardButton(label, callback_data=f"modify_date_selected|{i}")])
-    buttons.append([InlineKeyboardButton("✅ Confirm Selection", callback_data="modify_date_selected|CONFIRM")])
-
-    try:
-        await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(buttons))
-    except Exception as exc:
-        print(f"[WARNING] Could not update date selection buttons: {exc}")
 
 async def handle_modify_status_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle STATUS change buttons — currently only supports REJECTED.
+
+    On REJECTED: updates the sheet, unpins and deletes the summary, notifies
+    the group, then schedules topic deletion via delete_topic_with_delay.
+    """
     query = update.callback_query
     data = query.data.split("|")
     if len(data) != 2:
@@ -606,4 +477,3 @@ async def handle_modify_status_selection(update: Update, context: ContextTypes.D
     await delete_topic_with_delay(context, chat_id=CHAT_ID, thread_id=thread_id)
     context.user_data.pop("modify_field", None)
     context.user_data.pop("modify_thread_id", None)
-

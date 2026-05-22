@@ -6,7 +6,11 @@ from config import (GOOGLE_CREDENTIALS_JSON, SHEET_NAME, SHEET_TAB_NAME,
 from utils.constants import OTHERS_THREAD_IDS
 
 def get_gspread_sheet(sheet_name=SHEET_NAME, tab_name=SHEET_TAB_NAME):
-    """Get Google Sheet worksheet"""
+    """Return a gspread Worksheet object for the given sheet and tab.
+
+    Creates a fresh OAuth2 client on every call — no session is reused, so
+    callers should avoid calling this in tight loops.
+    """
     # creds_dict = json.loads(GOOGLE_CREDENTIALS_JSON)
     creds_dict = GOOGLE_CREDENTIALS_JSON
     scope = ["https://spreadsheets.google.com/feeds", 
@@ -49,28 +53,22 @@ def load_topic_rules():
     except Exception as e:
         print(f"[ERROR] Failed to load topic rules: {e}")
 
-def append_to_others_list(thread_id):
-    """Append thread ID to OTHERS list tab in the main sheet."""
+def append_to_others_list(thread_id, event_name: str = ""):
+    """Append thread ID and event name to the OTHERS tab in the main sheet."""
     try:
         from config import SHEET_NAME
-        # Specifically target the "OTHERS List" tab within your main sheet
-        sheet = get_gspread_sheet(sheet_name=SHEET_NAME, tab_name="OTHERS List")
-        
-        # We convert thread_id to string and use USER_ENTERED to avoid format errors
-        sheet.append_row([str(thread_id)], value_input_option="USER_ENTERED")
-        
-        print(f"[INFO] Thread ID {thread_id} successfully logged to OTHERS List.")
-        
-        # Update our memory so the bot knows this thread is active
+        sheet = get_gspread_sheet(sheet_name=SHEET_NAME, tab_name="OTHERS")
+        sheet.append_row([str(thread_id), event_name], value_input_option="USER_ENTERED")
+        print(f"[INFO] Thread ID {thread_id} ({event_name}) logged to OTHERS tab.")
         from utils.constants import OTHERS_THREAD_IDS
         OTHERS_THREAD_IDS.add(int(thread_id))
-        
     except Exception as e:
-        # We use str(e) to ensure we get a readable error message
-        print(f"[ERROR] Failed to write Thread ID {thread_id} to OTHERS List: {str(e)}")
+        print(f"[ERROR] Failed to write Thread ID {thread_id} to OTHERS tab: {str(e)}")
 
 def matric_valid(matric_number: str) -> bool:
-    """Validate matriculation number"""
+    """Return True if the matric number exists in the Welcome Tea sheet AND
+    has Attendance == "1" (i.e. the person physically attended Welcome Tea).
+    """
     sheet = get_gspread_sheet(WELCOME_TEA_SHEET, WELCOME_TEA_TAB)
     rows = sheet.get_all_records()
 
@@ -107,7 +105,11 @@ def update_user_id_in_sheet(matric_number: str, telegram_user_id: int):
     print("[WARN] Matric number not found when trying to update User ID.")
 
 def copy_user_to_timeline(welcome_row: dict, telegram_user_id: int):
-    """Copy user to timeline sheet"""
+    """Append a new member row to the PERFORMER Info sheet.
+
+    welcome_row should be a dict from the Welcome Tea responses (or a minimal
+    fallback dict with just name/nickname keys).
+    """
     others_sheet = get_gspread_sheet("PERFORMER Info")
     name = welcome_row.get("Your Full Name (according to matric card)", "").strip()
     nickname = welcome_row.get("What name or nickname do you prefer to be called? ", "").strip()

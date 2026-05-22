@@ -9,8 +9,12 @@ from services.google_sheets import (
 from config import WELCOME_TEA_SHEET, WELCOME_TEA_TAB
 
 
-# Manually adding new member
 async def handle_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Fallback handler for NEW_CHAT_MEMBERS status updates.
+
+    Inserts a minimal row into the PERFORMER Info sheet if the user is not
+    already present.  Acts as a safety net alongside handle_member_status.
+    """
     for member in update.message.new_chat_members:
         user_id = member.id
         name = member.first_name or member.last_name
@@ -33,6 +37,11 @@ async def handle_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # )
         
 async def handle_member_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Track member join and leave events via ChatMember updates.
+
+    On first join: adds the member to PERFORMER Info if not already present.
+    On leave/kick: stamps the member's row with status "Left" and the timestamp.
+    """
     status_change = update.chat_member
     old_status = status_change.old_chat_member.status
     new_status = status_change.new_chat_member.status

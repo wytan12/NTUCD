@@ -435,12 +435,18 @@ async def handle_private_command(update: Update, context: ContextTypes.DEFAULT_T
             await status_loading.edit_text(f"❌ Failed to read thread maps: {e}")
         return
 
+    if command in ("attd", "attendance"):
+        from handlers.attendance_handlers import start_attendance_modify
+        await start_attendance_modify(update, context)
+        return
+
     if command == "help" or text == "/start":
         await message.reply_text(
             "🚀 **Admin DM Dashboard**\n\n"
             "• `new` — Create new topic + sheet entry\n"
             "• `list` — See all thread IDs and events\n"
             "• `modify` — Edit a performance details\n"
+            "• `attd` — Mark regular-training attendance\n"
             "• `announce` — Broadcast a multi-line format message to any topic\n"
             "• `remind` — Trigger manual checklist reminder announcement\n"
             "• `threadid` — Print the entire group topic directory chart\n"

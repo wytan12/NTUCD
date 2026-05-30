@@ -14,6 +14,19 @@ GOOGLE_CREDENTIALS_JSON = {
 SHEET_NAME = "NTUFD AY26/27 Timeline (Tele Bot Debug)"
 SHEET_TAB_NAME = "PERF"
 ATTENDANCE_TAB = "ATTENDANCE"
+MEMBER_INFO_TAB = "MEMBER INFO AY26/27"  # holds Nickname (col B) + Tele ID (col P)
+
+# --- Attendance tab layout (1-based row/column indices) ---
+# Col A = member NAME (nickname), Col B = TOTAL, Col C = row labels
+# ("POLL ID" in row 1, "TRAINING DATE [REG]" in row 2),
+# Cols D onward = one training date each (row 1 = poll id, row 2 = date, rows 3+ = "1"/blank)
+ATT_NAME_COL = 1          # A
+ATT_TOTAL_COL = 2         # B
+ATT_LABEL_COL = 3         # C
+ATT_FIRST_DATE_COL = 4    # D
+ATT_POLL_ROW = 1
+ATT_DATE_ROW = 2
+ATT_FIRST_MEMBER_ROW = 3
 WELCOME_TEA_SHEET = "NTUCD Welcome Tea Registration 2025 (Responses)"
 WELCOME_TEA_TAB = "Form Responses 1"
 

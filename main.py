@@ -15,7 +15,8 @@ import asyncio
 from handlers.admin_handlers import start, thread_id_command, remind_command, daily_reminder_cron_job, manual_test_reminder_trigger, execute_manual_remind_dispatch
 from handlers.message_handlers import handle_message
 from handlers.private_handlers import handle_private_command
-from handlers.poll_handlers import send_poll_handler, handle_poll_answer
+from handlers.poll_handlers import send_poll_handler, handle_poll_answer, auto_poll_check
+from handlers.attendance_handlers import attendance_callback
 from handlers.verification_handlers import start_verification, handle_matric, join_request_handler
 from handlers.modify_handlers import start_modify, get_modify_field_callback
 from handlers.modify_handlers import handle_modify_status_selection, handle_modify_date_selection
@@ -25,7 +26,8 @@ from handlers.private_handlers import handle_confirm_new_perf
 from services.google_sheets import get_gspread_sheet
 from handlers.private_handlers import handle_list_modify_callback
 from handlers.modify_handlers import handle_modify_type_selection
-from config import BOT_TOKEN, SHEET_NAME, CHAT_ID, sg_tz, ADMIN_DM_USER_IDS
+from config import BOT_TOKEN, SHEET_NAME, CHAT_ID, sg_tz, ADMIN_DM_USER_IDS, sg_tz
+from datetime import time as dt_time
 from utils.constants import (
     initialized_topics,
     DATE,
@@ -128,6 +130,7 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_modify_type_selection, pattern="^modify_type_selected\\|"))
     app.add_handler(CommandHandler("poll", send_poll_handler))
     app.add_handler(PollAnswerHandler(handle_poll_answer))
+    app.add_handler(CallbackQueryHandler(attendance_callback, pattern="^ATTD_"))
     app.add_handler(verify_conv_handler)
     app.add_handler(ChatMemberHandler(handle_member_status, ChatMemberHandler.CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, handle_new_member))
@@ -150,6 +153,18 @@ def main():
     except Exception as e:
         print(f"[ERROR] Failed to load OTHERS List: {e}")
     
+    # --- 3. Schedule daily auto-poll check (20:00 SGT) ---
+    try:
+        if app.job_queue:
+            app.job_queue.run_daily(auto_poll_check, time=dt_time(20, 0, tzinfo=sg_tz))
+            print("[INFO] Auto-poll daily check scheduled for 20:00 SGT.")
+        else:
+            print("[WARN] JobQueue unavailable — auto-poll not scheduled. "
+                  "Install python-telegram-bot[job-queue].")
+    except Exception as e:
+        print(f"[ERROR] Failed to schedule auto-poll: {e}")
+
+    # --- 4. Start the Bot ---
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":

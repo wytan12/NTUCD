@@ -281,38 +281,25 @@ async def send_reminder(bot, chat_id, thread_id):
     """Send training reminder"""
     from utils.helpers import get_next_tuesday
     try:
-        ws = get_attendance_ws()
-        from services.google_sheets import _find_or_create_header_rows
-        _find_or_create_header_rows(ws)
+        from config import ATT_FIRST_DATE_COL, ATT_POLL_ROW, ATT_DATE_ROW
+        from services.google_sheets import get_attendance_ws as _get_ws, parse_sheet_date
 
-        poll_row = ws.row_values(1)
-        date_row = ws.row_values(2)
+        ws = _get_ws()
+        poll_row = ws.row_values(ATT_POLL_ROW)
+        date_row = ws.row_values(ATT_DATE_ROW)
 
-        max_len = max(len(poll_row), len(date_row))
-        if len(poll_row) < max_len: poll_row += [""] * (max_len - len(poll_row))
-        if len(date_row) < max_len: date_row += [""] * (max_len - len(date_row))
-
+        # Find the right-most date column that has a poll id (the latest poll sent).
         last_col = None
-        for idx in range(max_len, 0, -1):
-            if idx == 1:
-                if (poll_row[0] or "").strip().isdigit(): last_col = 1
-                break
-            if (poll_row[idx - 1] or "").strip():
-                last_col = idx
+        for col in range(max(len(poll_row), len(date_row)), ATT_FIRST_DATE_COL - 1, -1):
+            if col - 1 < len(poll_row) and (poll_row[col - 1] or "").strip():
+                last_col = col
                 break
 
-        if last_col and last_col > 1:
-            date_label_short = (date_row[last_col - 1] or "").strip()
-            pretty_date = date_label_short
-            try:
-                d, m = [int(x) for x in date_label_short.split("/")]
-                today = datetime.now(sg_tz)
-                year = today.year + (1 if today.month > m else 0)
-                dt = datetime(year, m, d, tzinfo=sg_tz)
-                pretty_date = dt.strftime("%d %b %Y")
-            except Exception: pass
-        else:
-            pretty_date = get_next_tuesday().strftime("%d %b %Y")
+        pretty_date = get_next_tuesday().strftime("%d %b %Y")
+        if last_col and last_col - 1 < len(date_row):
+            date_label = (date_row[last_col - 1] or "").strip()
+            parsed = parse_sheet_date(date_label)
+            pretty_date = parsed.strftime("%d %b %Y") if parsed else (date_label or pretty_date)
 
         await bot.send_message(
             chat_id=chat_id,

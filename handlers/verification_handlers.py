@@ -1,5 +1,6 @@
 import os
 from telegram import Update
+from telegram.constants import ParseMode # 🧠 FIX: Explicit import added to prevent silent compiler lockups
 from telegram.ext import ContextTypes, ConversationHandler
 from services.google_sheets import (
     matric_valid, 

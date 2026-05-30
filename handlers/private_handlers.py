@@ -1,60 +1,81 @@
 from __future__ import annotations
-
+import re
+from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.error import BadRequest
-from telegram.ext import ContextTypes
+from telegram.ext import ContextTypes, ConversationHandler
 
 from config import ADMIN_DM_USER_IDS, CHAT_ID
 from handlers.conversation_handlers import build_performance_summary, publish_performance_summary
 from services.date_parser import parse_and_format_dates
 from services.google_sheets import get_gspread_sheet
-from services.google_sheets import append_standard_topic_to_sheet
 from utils.constants import (
-    WAITING_TOPIC_TITLE, WAITING_PERF_DETAILS, WAITING_EVENT_TYPE, TOPIC_RULES_CACHE,
-    PERF_EVENT_NAME, PERF_REHEARSAL, PERF_DATE, PERF_LOCATION, PERF_OTHER_INFO,
+    WAITING_TOPIC_TITLE, PERF_EVENT_NAME, PERF_REHEARSAL, PERF_DATE, PERF_LOCATION, PERF_OTHER_INFO,
 )
 
-ALL_PERMISSIONS = [
-    "TEXT", "MEDIA", "MEDIA_DOC", "GEN_DOC",
-    "POLLS", "POLL_REPLY", "STICKERS", "VOICE",
-    "VIDEO_NOTE", "CONTACT", "LOC_VEN"
-]
-
-# Only EXT and INT event types
 PERF_EVENT_TYPES = [
     ("🎭 EXT (External)", "EXT"),
     ("🏠 INT (Internal)", "INT"),
 ]
-
 
 def _parse_command_payload(text: str) -> tuple[str, str | None, str]:
     """Extract the command keyword, thread id token, and remaining payload."""
     stripped = text.lstrip()
     if not stripped:
         return "", None, ""
-
     first_space = stripped.find(" ")
     if first_space == -1:
         return stripped.lower().lstrip("/"), None, ""
-
     command = stripped[:first_space].lower().lstrip("/")
     remainder = stripped[first_space + 1:].lstrip()
     if not remainder:
         return command, None, ""
-
     idx = 0
     while idx < len(remainder) and remainder[idx].isdigit():
         idx += 1
-
     thread_token = remainder[:idx]
     payload = remainder[idx:].lstrip("\n\r ")
     return command, thread_token or None, payload
 
+def _build_progress_tracker(ud: dict, current_step: int) -> str:
+    """Compile a dynamic status card tracking what the admin has typed."""
+    lines = ["📝 *Current Progress Tracker*"]
+    if ud.get("temp_event_type"):
+        lines.append(f"✅ *Event Type:* {ud['temp_event_type']}")
+    if ud.get("temp_event_name"):
+        lines.append(f"✅ *Event Name:* {ud['temp_event_name']}")
+    rehearsal = ud.get("temp_rehearsal")
+    if rehearsal:
+        if rehearsal == "-":
+            lines.append("✅ *Rehearsal Date:* None")
+        else:
+            r_formatted = "\n" + "\n".join([f"  • {line.strip()}" for line in rehearsal.splitlines() if line.strip()])
+            lines.append(f"✅ *Rehearsal Date:* {r_formatted}")
+    perf = ud.get("temp_perf_date")
+    if perf:
+        p_formatted = "\n" + "\n".join([f"  • {line.strip()}" for line in perf.splitlines() if line.strip()])
+        lines.append(f"✅ *Perf Date:* {p_formatted}")
+    if ud.get("temp_location"):
+        lines.append(f"✅ *Location:* {ud['temp_location']}")
+    if ud.get("temp_other_info"):
+        lines.append(f"✅ *Other Info:* {ud['temp_other_info']}")
+    lines.append("—" * 15)
+    return "\n".join(lines) + "\n\n"
+
+def _get_back_keyboard(field_to_clear: str | None) -> InlineKeyboardMarkup:
+    """Generate layout rows allowing users to step backward configuration states securely."""
+    buttons = []
+    if field_to_clear:
+        buttons.append([InlineKeyboardButton("↩️ Edit Previous Step", callback_data=f"PERF_RESET|{field_to_clear}")])
+    buttons.append([InlineKeyboardButton("❌ Cancel Entire Flow", callback_data="CANCEL_NEW_PERF")])
+    return InlineKeyboardMarkup(buttons)
+
+async def _render_step(message, text: str, reply_markup=None):
+    """Utility wrapper to post updates cleanly, preserving conversation context flows."""
+    return await message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
 
 async def _show_perf_summary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Send the PERF summary preview with CONFIRM and CANCEL buttons."""
+    """Send final summary dashboard preview containing explicit field controls."""
     ud = context.user_data
-    event_type = ud.get("temp_event_type", "")
     event_name = ud.get("temp_event_name", "")
     rehearsal = ud.get("temp_rehearsal", "-")
     perf_date = ud.get("temp_perf_date", "")
@@ -63,171 +84,263 @@ async def _show_perf_summary(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     topic_title = f"PERF - {event_name}"
     summary = build_performance_summary(event_name, rehearsal, perf_date, location, other_info)
-    preview = f"🆕 *Confirm New Performance?*\nTitle: `{topic_title}`\n\n{summary}"
+    preview = f"🆕 *Confirm New Performance Topic?*\nTitle: `{topic_title}`\n\n{summary}"
+    
     keyboard = [
         [InlineKeyboardButton("✅ CREATE & PUBLISH", callback_data="CONFIRM_NEW_PERF")],
-        [InlineKeyboardButton("❌ CANCEL", callback_data="CANCEL_NEW_PERF")],
+        [InlineKeyboardButton("✏️ Edit Event Type", callback_data="PERF_RESET|temp_event_type")],
+        [InlineKeyboardButton("✏️ Edit Event Name", callback_data="PERF_RESET|temp_event_name")],
+        [InlineKeyboardButton("✏️ Edit Rehearsal Dates", callback_data="PERF_RESET|temp_rehearsal")],
+        [InlineKeyboardButton("✏️ Edit Perf Dates", callback_data="PERF_RESET|temp_perf_date")],
+        [InlineKeyboardButton("❌ CANCEL FLOW", callback_data="CANCEL_NEW_PERF")],
     ]
-    await update.effective_message.reply_text(
+    
+    msg = await update.effective_message.reply_text(
         preview, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown"
     )
+    context.user_data["final_preview_msg_id"] = msg.message_id
 
+async def initiate_announce_portal_via_dm(update: Update, context: ContextTypes.DEFAULT_TYPE, incoming_query=None) -> None:
+    """Reusable interactive matrix builder for announcements using absolute local memory caching profiles."""
+    target_chat = update.effective_user
+    
+    # 🧠 CACHE ENGINE: Check if we already have the primary records loaded in memory cache
+    records = context.user_data.get("announce_cached_records", [])
+    cached_others = context.user_data.get("announce_cached_others")
+    
+    status_loading = None
+    # ⚡ ONLY connect to Google Sheets if our memory cache profiles are totally missing!
+    if not records or cached_others is None:
+        if incoming_query is None:
+            status_loading = await context.bot.send_message(chat_id=target_chat.id, text="⏳ Generating channel communication routing links...")
+        
+        # Pull main sheets rows if empty
+        if not records:
+            sheet = get_gspread_sheet()
+            records = sheet.get_all_records()
+            context.user_data["announce_cached_records"] = records
+            
+        # Pull OTHERS rows if empty
+        if cached_others is None:
+            try:
+                sheet_ref = get_gspread_sheet()
+                others_sheet = get_gspread_sheet(sheet_name=sheet_ref.spreadsheet.title, tab_name="OTHERS")
+                others_rows = []
+                for o_row in others_sheet.get_all_values():
+                    if o_row and str(o_row[0]).isdigit():
+                        others_rows.append((o_row[0], o_row[1] if len(o_row) > 1 and o_row[1] else "Others Thread"))
+                context.user_data["announce_cached_others"] = others_rows
+            except Exception:
+                context.user_data["announce_cached_others"] = []
+
+    # Re-read variables from local memory cache profiles securely
+    records = context.user_data.get("announce_cached_records", [])
+    cached_others = context.user_data.get("announce_cached_others", [])
+
+    buttons = [[InlineKeyboardButton("💬 General Topic (Main)", callback_data="ANNOUNCE_TARGET|0|General Topic")]]
+    
+    # Render main sheet items directly from local storage rows
+    for row in records:
+        tid = row.get("THREAD ID")
+        if str(tid).isdigit():
+            event_name = row.get("EVENT NAME", "Unnamed Event")
+            buttons.append([InlineKeyboardButton(f"🎭 {event_name} ({tid})", callback_data=f"ANNOUNCE_TARGET|{tid}|{event_name}")])
+            
+    # Render OTHERS items directly from local storage rows
+    for o_tid, o_name in cached_others:
+        buttons.append([InlineKeyboardButton(f"☕ {o_name} ({o_tid})", callback_data=f"ANNOUNCE_TARGET|{o_tid}|{o_name}")])
+
+    buttons.append([InlineKeyboardButton("❌ Cancel", callback_data="CANCEL_NEW_PERF")])
+    
+    prompt_text = (
+        "📢 *ANNOUNCEMENT Portal*\n"
+        "Please select which TOPIC you want to announce into:"
+    )
+    
+    if incoming_query:
+        # 🚀 LIGHTNING SPEED: Swapping menus instantly because ALL data paths are now 100% running off memory!
+        await incoming_query.edit_message_text(text=prompt_text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
+    else:
+        if status_loading: await status_loading.delete()
+        await context.bot.send_message(chat_id=target_chat.id, text=prompt_text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
 
 async def handle_private_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Main DM entry point for admin commands.
-
-    Only responds to users in ADMIN_DM_USER_IDS.  Manages a lightweight
-    state machine via context.user_data["dm_state"] to handle multi-step
-    flows (/new topic creation, modify field entry).  Single-step commands
-    (list, announce, info, help) are dispatched directly.
-    """
+    """Main private DM state machine routing engine for administrative accounts."""
     message = update.effective_message
     if not message or not message.text or update.effective_chat.type != "private":
         return
 
-    user_id = update.effective_user.id
-    if user_id not in ADMIN_DM_USER_IDS:
+    # Check if user ID belongs to the approved admin set values
+    is_approved_admin = False
+    current_uid = update.effective_user.id
+    
+    if isinstance(ADMIN_DM_USER_IDS, dict):
+        for k, v in ADMIN_DM_USER_IDS.items():
+            if str(k).isdigit() and int(k) == current_uid: is_approved_admin = True
+            if str(v).isdigit() and int(v) == current_uid: is_approved_admin = True
+    elif isinstance(ADMIN_DM_USER_IDS, (list, set)):
+        if current_uid in ADMIN_DM_USER_IDS: is_approved_admin = True
+        
+    if not is_approved_admin:
+        print(f"[SECURITY] Unauthorized access attempt blocked for user ID: {current_uid}")
         return
 
     text = message.text.strip()
-    state = context.user_data.get("dm_state")
+    command, thread_token, payload = _parse_command_payload(text)
 
-    # --- /new shortcut ---
+    # 🧠 EMERGENCY TESTREMIND ESCAPE LATCH
+    if command == "testremind":
+        context.user_data.pop("modify_field", None)
+        from handlers.admin_handlers import execute_manual_test_scan
+        await execute_manual_test_scan(update, context)
+        return ConversationHandler.END
+
+    # 🧠 NEW REMIND DM REDIRECT HOOK: If admin types 'remind' in private DM, show menu!
+    if command == "remind":
+        context.user_data.pop("modify_field", None)
+        from handlers.admin_handlers import initiate_remind_portal_via_dm
+        await initiate_remind_portal_via_dm(update, context)
+        return ConversationHandler.END
+
+    if context.user_data.get("waiting_announcement_text") is not None:
+        target_thread = context.user_data.pop("waiting_announcement_text")
+        display_target_name = context.user_data.pop("waiting_announcement_name", "the group topic")
+        try:
+            thread_param = None if target_thread == 0 else target_thread
+            
+            await context.bot.send_message(
+                chat_id=CHAT_ID,
+                text=message.text_markdown,
+                message_thread_id=thread_param,
+                parse_mode="Markdown"
+            )
+            # 🎯 FIXED: Standardized text feedback to explicitly echo your selected Event Name string!
+            await message.reply_text(f"✅ Announcement broadcasted successfully into *{display_target_name}*!", parse_mode="Markdown")
+        except Exception as e:
+            await message.reply_text(f"❌ Failed to dispatch announcement: {e}")
+        return
+
     if text.lower() == "/new":
+        context.user_data.clear()
         keyboard = [
             [InlineKeyboardButton("🎭 PERFORMANCE", callback_data="TYPE_SELECTED|PERF")],
             [InlineKeyboardButton("☕ OTHERS (Bonding/Misc)", callback_data="TYPE_SELECTED|OTHERS")],
-            [InlineKeyboardButton("🛠 STANDARD (Necessary)", callback_data="TYPE_SELECTED|STANDARD")],
         ]
         await message.reply_text("What kind of topic are you creating?", reply_markup=InlineKeyboardMarkup(keyboard))
         return
 
-    # --- PERF step-by-step: event name ---
+    state = context.user_data.get("dm_state")
+
     if state == PERF_EVENT_NAME:
         context.user_data["temp_event_name"] = text
         context.user_data["dm_state"] = PERF_REHEARSAL
-        keyboard = [[InlineKeyboardButton("⏭ Skip (No Rehearsal)", callback_data="SKIP_PERF_FIELD|rehearsal")]]
-        await message.reply_text(
-            "📅 *Step 3/6: Rehearsal Date & Time*\n\n"
-            "One date per line. Multiple times on the same day go on the same line, space-separated.\n\n"
+        tracker = _build_progress_tracker(context.user_data, 3)
+        prompt = (
+            f"{tracker}📅 *Step 3/6: Rehearsal Date & Time*\n\n"
+            
             "*Examples:*\n"
-            "Single date + time: `28 aug 8pm`\n"
-            "Multiple times same day: `28 aug 8am 1030pm`\n"
-            "Multiple days (Shift+Enter for new line):\n"
-            "`28 aug 8am 1030pm`\n"
-            "`30 aug 1130pm`\n\n"
-            "Or click Skip if there's no rehearsal.",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="Markdown",
+            "Single date Single time: `31 aug, 9pm`\n"
+            "Single date Multiple times: `1 sep, 7pm 9pm`\n"
+            "Multiple dates Single/Multiple times:\n"
+            "`31 aug, 9pm`\n"
+            "`1 sep, 7pm 9pm`\n\n"
+
+            "Separate the date and time using a **comma (,)**."
         )
+        keyboard = [
+            [InlineKeyboardButton("⏭ Skip (No Rehearsal)", callback_data="SKIP_PERF_FIELD|rehearsal")],
+            [InlineKeyboardButton("↩️ Edit Event Name", callback_data="PERF_RESET|temp_event_name")],
+            [InlineKeyboardButton("❌ Cancel Flow", callback_data="CANCEL_NEW_PERF")]
+        ]
+        await _render_step(message, prompt, InlineKeyboardMarkup(keyboard))
         return
 
-    # --- PERF step-by-step: rehearsal date ---
     if state == PERF_REHEARSAL:
-        try:
-            rehearsal_date = "\n".join(parse_and_format_dates(text))
+        try: rehearsal_date = "\n".join(parse_and_format_dates(text))
         except ValueError as e:
             await message.reply_text(str(e), parse_mode="Markdown")
             return
         context.user_data["temp_rehearsal"] = rehearsal_date
         context.user_data["dm_state"] = PERF_DATE
-        await message.reply_text(
-            "📅 *Step 4/6: Performance Date & Time*\n\n"
-            "One date per line. Multiple times on the same day go on the same line, space-separated.\n\n"
+        tracker = _build_progress_tracker(context.user_data, 4)
+        prompt = (
+            f"{tracker}📅 *Step 4/6: Performance Date & Time*\n\n"
+            
             "*Examples:*\n"
-            "Single date + time: `31 aug 9pm`\n"
-            "Multiple times same day: `31 aug 7pm 9pm`\n"
-            "Multiple days (Shift+Enter for new line):\n"
-            "`31 aug 7pm`\n"
-            "`1 sep 9pm`",
-            parse_mode="Markdown",
+            "Single date Single time: `31 aug, 9pm`\n"
+            "Single date Multiple times: `1 sep, 7pm 9pm`\n"
+            "Multiple dates Single/Multiple times:\n"
+            "`31 aug, 9pm`\n"
+            "`1 sep, 7pm 9pm`\n\n"
+
+            "Separate the date and time using a **comma (,)**."
         )
+        await _render_step(message, prompt, _get_back_keyboard("temp_rehearsal"))
         return
 
-    # --- PERF step-by-step: performance date ---
     if state == PERF_DATE:
-        try:
-            perf_date = "\n".join(parse_and_format_dates(text))
+        try: perf_date = "\n".join(parse_and_format_dates(text))
         except ValueError as e:
             await message.reply_text(str(e), parse_mode="Markdown")
             return
         context.user_data["temp_perf_date"] = perf_date
         context.user_data["dm_state"] = PERF_LOCATION
-        await message.reply_text(
-            "📌 *Step 5/6: Location*\nWhere is the performance?",
-            parse_mode="Markdown",
-        )
+        tracker = _build_progress_tracker(context.user_data, 5)
+        prompt = f"{tracker}📌 *Step 5/6: Location*\nWhere is the performance taking place?"
+        await _render_step(message, prompt, _get_back_keyboard("temp_perf_date"))
         return
 
-    # --- PERF step-by-step: location ---
     if state == PERF_LOCATION:
         context.user_data["temp_location"] = text
         context.user_data["dm_state"] = PERF_OTHER_INFO
-        keyboard = [[InlineKeyboardButton("⏭ Skip (No Additional Info)", callback_data="SKIP_PERF_FIELD|other_info")]]
-        await message.reply_text(
-            "📝 *Step 6/6: Other Info*\n"
-            "Any additional info (e.g. dress code, requirements)?\n\n"
-            "Or click Skip if there's nothing to add.",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="Markdown",
-        )
+        tracker = _build_progress_tracker(context.user_data, 6)
+        prompt = f"{tracker}📝 *Step 6/6: Other Info*\nAny additional info?"
+        keyboard = [
+            [InlineKeyboardButton("⏭ Skip (No Additional Info)", callback_data="SKIP_PERF_FIELD|other_info")],
+            [InlineKeyboardButton("↩️ Edit Location", callback_data="PERF_RESET|temp_location")],
+            [InlineKeyboardButton("❌ Cancel Entire Flow", callback_data="CANCEL_NEW_PERF")]
+        ]
+        await _render_step(message, prompt, InlineKeyboardMarkup(keyboard))
         return
 
-    # --- PERF step-by-step: other info ---
     if state == PERF_OTHER_INFO:
         context.user_data["temp_other_info"] = text
         context.user_data["dm_state"] = None
         await _show_perf_summary(update, context)
         return
 
-    # --- Step 1: waiting for Forum Topic title (OTHERS / STANDARD only) ---
     if state == WAITING_TOPIC_TITLE:
         context.user_data["temp_title"] = text
-        topic_type = context.user_data.get("temp_type")
-
-        if topic_type == "STANDARD":
-            context.user_data["dm_state"] = None
-            context.user_data["temp_rules"] = set()
-            await handle_standard_setup(update, context, step="CHOOSE_RULES")
-            return
-
-        if topic_type == "OTHERS":
+        if context.user_data.get("temp_type") == "OTHERS":
             keyboard = [
                 [InlineKeyboardButton("✅ CREATE OTHERS TOPIC", callback_data="CONFIRM_NEW_OTHERS")],
                 [InlineKeyboardButton("❌ CANCEL", callback_data="CANCEL_NEW_PERF")],
             ]
-            await message.reply_text(
-                f"Confirm creating **OTHERS** topic: `{text}`?\n(This will NOT be added to the performance sheet.)",
-                reply_markup=InlineKeyboardMarkup(keyboard),
-                parse_mode="Markdown"
-            )
+            await message.reply_text(f"Confirm creating **OTHERS** topic: `{text}`?", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
             context.user_data["dm_state"] = None
             return
 
-    # --- Ongoing modify field input ---
     if context.user_data.get("modify_field") and not text.startswith("/"):
         from handlers.modify_handlers import apply_modify_value
         await apply_modify_value(update, context)
         return
 
-    # --- Single-step DM commands ---
-    command, thread_token, payload = _parse_command_payload(text)
-
     if command == "new":
+        context.user_data.clear()
         keyboard = [
             [InlineKeyboardButton("🎭 PERFORMANCE", callback_data="TYPE_SELECTED|PERF")],
             [InlineKeyboardButton("☕ OTHERS (Bonding/Misc)", callback_data="TYPE_SELECTED|OTHERS")],
-            [InlineKeyboardButton("🛠 STANDARD (Necessary)", callback_data="TYPE_SELECTED|STANDARD")],
         ]
         await message.reply_text("What kind of topic are you creating?", reply_markup=InlineKeyboardMarkup(keyboard))
         return
 
     if command == "list":
+        status_loading = await message.reply_text("⏳ Fetching live performance list...")
         try:
             sheet = get_gspread_sheet()
             records = sheet.get_all_records()
             if not records:
-                await message.reply_text("📋 The performance sheet is currently empty.")
+                await status_loading.edit_text("📋 The performance sheet is empty.")
                 return
             lines = ["📋 **Performance Overview**\n"]
             for row in records:
@@ -237,235 +350,242 @@ async def handle_private_command(update: Update, context: ContextTypes.DEFAULT_T
                     status = row.get("STATUS", "").strip().upper() or "PENDING"
                     emoji = "⏳" if status == "PENDING" else "✅" if status == "ACCEPTED" else "❌"
                     lines.append(f"{emoji} `{tid}` | **{event_name}**")
+            await status_loading.delete()
             await message.reply_text("\n".join(lines), parse_mode="Markdown")
         except Exception as e:
-            await message.reply_text(f"❌ Failed to fetch list: {e}")
-        return
-
-    if command == "announce":
-        if not thread_token or not payload:
-            await message.reply_text("Usage: `announce <thread_id> <message>`")
-            return
-        try:
-            await context.bot.send_message(chat_id=CHAT_ID, text=payload, message_thread_id=int(thread_token))
-            await message.reply_text(f"✅ Sent to thread `{thread_token}`")
-        except Exception as e:
-            await message.reply_text(f"❌ Failed: {e}")
+            await status_loading.edit_text(f"❌ Failed to fetch overview log: {e}")
         return
 
     if command == "modify":
         from handlers.modify_handlers import initiate_modify_via_dm
-        if not thread_token:
-            await message.reply_text("Please provide a thread ID. Example: `modify 123` (Use `list` to see IDs)")
-        else:
+        if thread_token:
             await initiate_modify_via_dm(update, context, int(thread_token), True)
+            return
+        try:
+            status_loading = await message.reply_text("⏳ Fetching active performance log...")
+            sheet = get_gspread_sheet()
+            records = sheet.get_all_records()
+            if not records:
+                await status_loading.edit_text("📋 The performance sheet is empty.")
+                return
+            context.user_data["cached_records"] = records
+            buttons = []
+            for row in records:
+                tid = row.get("THREAD ID")
+                if str(tid).isdigit():
+                    event_name = row.get("EVENT NAME", "Unnamed Event")
+                    buttons.append([InlineKeyboardButton(f"⚙️ {event_name} ({tid})", callback_data=f"LIST_MODIFY|{tid}")])
+            await status_loading.delete()
+            await message.reply_text(
+                "🛠 *PERFORMANCE Modification Portal*\n\n"
+                "Which PERFORMANCE topic you would like to modify:",
+                reply_markup=InlineKeyboardMarkup(buttons),
+                parse_mode="Markdown"
+            )
+        except Exception as e:
+            await message.reply_text(f"❌ Failed to load modification dashboard menu: {e}")
+        return
+
+    if command == "announce":
+        # Clear out any old configuration cache rows beforehand to make sure we load fresh boundaries
+        context.user_data.pop("announce_cached_records", None)
+        context.user_data.pop("announce_cached_others", None)
+        await initiate_announce_portal_via_dm(update, context)
         return
 
     if command == "info" and thread_token:
+        status_loading = await message.reply_text(f"⏳ Downloading details card snapshot for ID {thread_token}...")
         sheet = get_gspread_sheet()
         row = next((r for r in sheet.get_all_records() if str(r.get("THREAD ID")) == thread_token), None)
+        await status_loading.delete()
         if row:
             await message.reply_text(
                 build_performance_summary(
-                    event_name=row.get("EVENT NAME", ""),
-                    rehearsal_date=row.get("REHEARSAL DATE | TIME", ""),
-                    perf_date=row.get("PERF DATE | TIME", ""),
-                    location=row.get("LOCATION", ""),
-                    other_info=row.get("OTHER INFO", ""),
-                ),
-                parse_mode="Markdown"
+                    event_name=row.get("EVENT NAME", ""), rehearsal_date=row.get("REHEARSAL DATE | TIME", ""),
+                    perf_date=row.get("PERF DATE | TIME", ""), location=row.get("LOCATION", ""), other_info=row.get("OTHER INFO", ""),
+                ), parse_mode="Markdown"
             )
+        else:
+            await message.reply_text("❌ Performance ID not found inside Google Sheets records.")
+        return
+
+    if command in ["threadid", "threads", "thread"]:
+        status_loading = await message.reply_text("⏳ Analyzing group channel layouts and compiling index...")
+        try:
+            sheet = get_gspread_sheet()
+            records = sheet.get_all_records()
+            lines = ["🧵 *Active Workspace Thread Directory*\n"]
+            lines.append("• `0` | 💬 **General/Main Landing Channel**")
+            
+            for row in records:
+                tid = row.get("THREAD ID")
+                if str(tid).isdigit():
+                    lines.append(f"• `{tid}` | 🎭 *PERF:* **{row.get('EVENT NAME', 'Unnamed Event')}**")
+                    
+            try:
+                others_sheet = get_gspread_sheet(sheet_name=sheet.spreadsheet.title, tab_name="OTHERS")
+                for o_row in others_sheet.get_all_values():
+                    if o_row and str(o_row[0]).isdigit():
+                        lines.append(f"• `{o_row[0]}` | ☕ *OTHERS:* **{o_row[1] if len(o_row) > 1 and o_row[1] else 'Unnamed'}**")
+            except Exception: pass
+            
+            await status_loading.delete()
+            await message.reply_text("\n".join(lines), parse_mode="Markdown")
+        except Exception as e:
+            await status_loading.edit_text(f"❌ Failed to read thread maps: {e}")
         return
 
     if command == "help" or text == "/start":
         await message.reply_text(
             "🚀 **Admin DM Dashboard**\n\n"
-            "• `/new` — Create new topic + sheet entry\n"
+            "• `new` — Create new topic + sheet entry\n"
             "• `list` — See all thread IDs and events\n"
-            "• `modify <id>` — Edit a performance\n"
-            "• `announce <id> <msg>` — Message to group topic\n"
+            "• `modify` — Edit a performance details\n"
+            "• `announce` — Broadcast a multi-line format message to any topic\n"
+            "• `remind` — Trigger manual checklist reminder announcement\n"
+            "• `threadid` — Print the entire group topic directory chart\n"
             "• `info <id>` — Preview summary in DM",
             parse_mode="Markdown"
         )
 
-
-async def handle_standard_setup(update: Update, context: ContextTypes.DEFAULT_TYPE, step="START"):
-    """Render the permission-rule checklist for creating a STANDARD topic.
-
-    Builds an inline keyboard from ALL_PERMISSIONS with toggle checkmarks
-    driven by context.user_data["temp_rules"].  Called both from text input
-    (first entry) and from TOGGLE_RULE callbacks (re-renders on each toggle).
-    """
-    query = update.callback_query
-    user_data = context.user_data
-
-    if step == "CHOOSE_RULES":
-        selected = user_data.get("temp_rules", set())
-        keyboard = []
-        for i in range(0, len(ALL_PERMISSIONS), 2):
-            row = []
-            for tag in ALL_PERMISSIONS[i:i + 2]:
-                label = f"✅ {tag}" if tag in selected else tag
-                row.append(InlineKeyboardButton(label, callback_data=f"TOGGLE_RULE|{tag}"))
-            keyboard.append(row)
-        keyboard.append([InlineKeyboardButton("🚀 CONFIRM & CREATE", callback_data="CONFIRM_STANDARD")])
-        keyboard.append([InlineKeyboardButton("❌ CANCEL", callback_data="CANCEL_NEW_PERF")])
-
-        text = f"🛠 **Rule Setup for: {user_data.get('temp_title')}**\nSelect what non-admins CAN do:"
-
-        if query:
-            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
-        else:
-            await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
-
-
 async def handle_confirm_new_perf(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Dispatch all callback actions from the /new topic creation flow.
-
-    Handles: TYPE_SELECTED (set type; PERF goes straight to event-type buttons,
-    OTHERS/STANDARD go to title step), PERF_EVENT_TYPE (store event type, advance
-    to event-name step), SKIP_PERF_FIELD (skip rehearsal or other-info step),
-    TOGGLE_RULE (permission checklist toggle), CONFIRM_STANDARD (create STANDARD
-    topic), CONFIRM_NEW_OTHERS (create OTHERS topic), CONFIRM_NEW_PERF (create PERF
-    topic + post summary + interest poll), CANCEL_NEW_PERF (abort).
-    """
+    """Callback matrix router handling all administrative wizard modifications."""
     query = update.callback_query
     data = query.data
-    await query.answer()
 
-    # --- Topic type selection (PERF / OTHERS / STANDARD) ---
-    if data.startswith("TYPE_SELECTED|"):
-        selected_type = data.split("|")[1]
-        context.user_data["temp_type"] = selected_type
+    # 🧠 INTERCEPT MANUAL REMINDER TRIGGER SELECTION CALLBACK BUTTONS
+    if data.startswith("MANUAL_REMIND_TID|"):
+        await query.answer()
+        parts = data.split("|")
+        target_tid = int(parts[1])
+        from handlers.admin_handlers import execute_manual_remind_dispatch
+        await execute_manual_remind_dispatch(update, context, target_tid)
+        return
 
-        if selected_type == "PERF":
-            # Skip the title step — title is auto-generated as "PERF - {event_name}"
-            keyboard = [[InlineKeyboardButton(label, callback_data=f"PERF_EVENT_TYPE|{value}")]
-                        for label, value in PERF_EVENT_TYPES]
-            keyboard.append([InlineKeyboardButton("❌ CANCEL", callback_data="CANCEL_NEW_PERF")])
-            await query.edit_message_text(
-                "🎭 *New PERF Topic*\n\n*Step 1/6: Event Type*\nIs this External or Internal?",
-                reply_markup=InlineKeyboardMarkup(keyboard),
-                parse_mode="Markdown",
-            )
-            return
-
-        context.user_data["dm_state"] = WAITING_TOPIC_TITLE
-        icon = "☕" if selected_type == "OTHERS" else "🛠"
+    if data.startswith("ANNOUNCE_TARGET|"):
+        await query.answer()
+        parts = data.split("|")
+        target_thread = int(parts[1])
+        display_name = parts[2] if len(parts) > 2 else f"Thread {target_thread}"
+        
+        context.user_data["waiting_announcement_text"] = target_thread
+        context.user_data["waiting_announcement_name"] = display_name
+        
+        # ✅ FIXED TYPO: Changed InlineKeyboardMarkup to InlineKeyboardMarkup
+        escape_keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("↩️ Back to Topics Menu", callback_data="ANNOUNCE_BACK_MAPPED")],
+            [InlineKeyboardButton("❌ Cancel Completely", callback_data="CANCEL_NEW_PERF")]
+        ])
+        
         await query.edit_message_text(
-            f"Selected Type: **{selected_type}** {icon}\n\n"
-            "**Step 1:** Please enter the **Topic Title** for the group forum:",
-            parse_mode="Markdown",
+            text=(
+                f"✍️ *Target set to: {display_name}*\n\n"
+                f"Please type or paste your announcement message directly below this text line.\n"
+                f"You can use multiple paragraphs, line breaks, bold text, or emojis freely. "
+                f"The bot will forward it exactly as you format it."
+            ),
+            reply_markup=escape_keyboard,
+            parse_mode="Markdown"
         )
         return
 
-    # --- Event type selected for PERF (EXT / INT) ---
+    if data == "ANNOUNCE_BACK_MAPPED":
+        await query.answer()
+        context.user_data.pop("waiting_announcement_text", None)
+        context.user_data.pop("waiting_announcement_name", None)
+        await initiate_announce_portal_via_dm(update, context, incoming_query=query)
+        return
+
+    if context.user_data.get("creation_completed") and not data.startswith("CONFIRM_NEW_PERF"):
+        await query.answer("This menu has expired.", show_alert=False)
+        return
+
+    await query.answer()
+
+    if data.startswith("PERF_RESET|"):
+        field_to_clear = data.split("|")[1]
+        state_map = {
+            "temp_event_type": (None, "🎭 *Resetting Step 1/6: Event Type*\nIs this External or Internal?"),
+            "temp_event_name": (PERF_EVENT_NAME, "🎭 *Resetting Step 2/6: Event Name*\nWhat is the name of this performance?"),
+            "temp_rehearsal": (PERF_REHEARSAL, "📅 *Resetting Step 1/6: Rehearsal Date & Time*\nEnter details:"),
+            "temp_perf_date": (PERF_DATE, "📅 *Resetting Step 4/6: Performance Date & Time*\nEnter scheduling details below:"),
+            "temp_location": (PERF_LOCATION, "📌 *Resetting Step 5/6: Location*\nEnter localized arena info below:")
+        }
+        if field_to_clear in state_map:
+            target_state, text_prompt = state_map[field_to_clear]
+            fields = ["temp_event_type", "temp_event_name", "temp_rehearsal", "temp_perf_date", "temp_location", "temp_other_info"]
+            start_flushing = False
+            for f in fields:
+                if f == field_to_clear: start_flushing = True
+                if start_flushing: context.user_data.pop(f, None)
+            context.user_data["dm_state"] = target_state
+            if field_to_clear == "temp_event_type":
+                keyboard = [[InlineKeyboardButton(label, callback_data=f"PERF_EVENT_TYPE|{value}")] for label, value in PERF_EVENT_TYPES]
+                keyboard.append([InlineKeyboardButton("❌ CANCEL", callback_data="CANCEL_NEW_PERF")])
+                await query.edit_message_text(text_prompt, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+                return
+            tracker = _build_progress_tracker(context.user_data, target_state)
+            if target_state == PERF_EVENT_NAME:
+                keyboard = [[InlineKeyboardButton("↩️ Edit Event Type", callback_data="PERF_RESET|temp_event_type")], [InlineKeyboardButton("❌ Cancel Flow", callback_data="CANCEL_NEW_PERF")]]
+            else:
+                back_targets = {PERF_REHEARSAL: "temp_event_name", PERF_DATE: "temp_rehearsal", PERF_LOCATION: "temp_perf_date"}
+                keyboard = _get_back_keyboard(back_targets.get(target_state)).inline_keyboard
+            await query.edit_message_text(f"{tracker}{text_prompt}", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+        return
+
+    if data.startswith("TYPE_SELECTED|"):
+        selected_type = data.split("|")[1]
+        context.user_data["temp_type"] = selected_type
+        if selected_type == "PERF":
+            keyboard = [[InlineKeyboardButton(label, callback_data=f"PERF_EVENT_TYPE|{value}")] for label, value in PERF_EVENT_TYPES]
+            keyboard.append([InlineKeyboardButton("❌ CANCEL", callback_data="CANCEL_NEW_PERF")])
+            await query.edit_message_text("🎭 *New PERF Topic*\n\n*Step 1/6: Event Type*\nIs this External or Internal?", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+            return
+        context.user_data["dm_state"] = WAITING_TOPIC_TITLE
+        await query.edit_message_text(f"Selected Type: **{selected_type}** ☕\n\n**Step 1:** Please enter the **Topic Title** for the group forum:", parse_mode="Markdown")
+        return
+
     if data.startswith("PERF_EVENT_TYPE|"):
         event_type = data.split("|")[1]
         context.user_data["temp_event_type"] = event_type
         context.user_data["dm_state"] = PERF_EVENT_NAME
-        await query.edit_message_text(
-            f"✅ Event type: *{event_type}*\n\n"
-            "*Step 2/6: Event Name*\nWhat is the name of this performance?",
-            parse_mode="Markdown",
-        )
+        tracker = _build_progress_tracker(context.user_data, 2)
+        keyboard = [[InlineKeyboardButton("↩️ Edit Event Type", callback_data="PERF_RESET|temp_event_type")], [InlineKeyboardButton("❌ Cancel Flow", callback_data="CANCEL_NEW_PERF")]]
+        await query.edit_message_text(f"{tracker}📍 *Step 2/6: Event Name*\nWhat is the name of this performance?", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
         return
 
-    # --- Skip optional PERF fields ---
     if data.startswith("SKIP_PERF_FIELD|"):
         field = data.split("|")[1]
-
         if field == "rehearsal":
             context.user_data["temp_rehearsal"] = "-"
             context.user_data["dm_state"] = PERF_DATE
-            await query.edit_message_text(
-                "📅 *Step 4/6: Performance Date & Time*\n\n"
-                "One date per line. Multiple times on the same day go on the same line, space-separated.\n\n"
-                "*Examples:*\n"
-                "Single date + time: `31 aug 9pm`\n"
-                "Multiple times same day: `31 aug 7pm 9pm`\n"
-                "Multiple days (Shift+Enter for new line):\n"
-                "`31 aug 7pm`\n"
-                "`1 sep 9pm`",
-                parse_mode="Markdown",
-            )
-
+            tracker = _build_progress_tracker(context.user_data, 4)
+            prompt = f"{tracker}📅 *Step 4/6: Performance Date & Time*\n\nSeparate the date and time using a **comma (,)**."
+            await query.edit_message_text(text=prompt, reply_markup=_get_back_keyboard("temp_rehearsal"), parse_mode="Markdown")
         elif field == "other_info":
-            context.user_data["temp_other_info"] = ""
+            context.user_data["temp_other_info"] = "-"
             context.user_data["dm_state"] = None
-            ud = context.user_data
-            summary = build_performance_summary(
-                event_name=ud.get("temp_event_name", ""),
-                rehearsal_date=ud.get("temp_rehearsal", "-"),
-                perf_date=ud.get("temp_perf_date", ""),
-                location=ud.get("temp_location", ""),
-                other_info="",
-            )
-            topic_title = f"PERF - {ud.get('temp_event_name', '')}"
-            preview = f"🆕 *Confirm New Performance?*\nTitle: `{topic_title}`\n\n{summary}"
-            keyboard = [
-                [InlineKeyboardButton("✅ CREATE & PUBLISH", callback_data="CONFIRM_NEW_PERF")],
-                [InlineKeyboardButton("❌ CANCEL", callback_data="CANCEL_NEW_PERF")],
-            ]
-            await query.edit_message_text(preview, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+            await query.edit_message_text("⏳ Compiling Final Summary Dashboard Preview...")
+            await _show_perf_summary(update, context)
         return
 
-    # --- Permission rule toggle for STANDARD ---
-    if data.startswith("TOGGLE_RULE|"):
-        tag = data.split("|")[1]
-        if "temp_rules" not in context.user_data:
-            context.user_data["temp_rules"] = set()
-        rules = context.user_data["temp_rules"]
-        if tag in rules:
-            rules.remove(tag)
-        else:
-            rules.add(tag)
-        await handle_standard_setup(update, context, step="CHOOSE_RULES")
-        return
-
-    if data == "CONFIRM_STANDARD":
-        title = context.user_data.get("temp_title")
-        rules = context.user_data.get("temp_rules", set())
-        rules_str = ",".join(sorted(list(rules))) if rules else ""
-
-        await query.edit_message_text(f"⏳ Creating STANDARD topic: `{title}`...")
-        try:
-            topic = await context.bot.create_forum_topic(chat_id=CHAT_ID, name=title)
-            tid = topic.message_thread_id
-            TOPIC_RULES_CACHE[tid] = [r.upper() for r in list(rules)]
-            append_standard_topic_to_sheet(tid, title, rules_str)
-            await query.message.reply_text(f"✅ Created `{title}` (ID: `{tid}`)\nRules: `{rules_str or 'READ_ONLY'}`")
-            context.user_data.clear()
-        except Exception as e:
-            await query.message.reply_text(f"❌ Failed: {e}")
-        return
-
-    # --- Create OTHERS topic ---
     if data == "CONFIRM_NEW_OTHERS":
         title = context.user_data.get("temp_title")
         await query.edit_message_text(f"⏳ Creating OTHERS topic: `{title}`...")
         try:
             topic = await context.bot.create_forum_topic(chat_id=CHAT_ID, name=title)
             tid = topic.message_thread_id
-
             from utils.constants import OTHERS_THREAD_IDS, initialized_topics
             OTHERS_THREAD_IDS.add(tid)
             initialized_topics.add(tid)
-
-            try:
-                from services.google_sheets import append_to_others_list
-                append_to_others_list(tid, title)
-            except Exception as e:
-                print(f"[ERROR] Sheet log failed: {e}")
-
+            from services.google_sheets import append_to_others_list
+            append_to_others_list(tid, title)
             await query.message.reply_text(f"✅ Successfully created OTHERS Topic `{tid}`.")
             context.user_data.clear()
         except Exception as e:
-            print(f"[ERROR] Topic creation block failed: {e}")
-            await query.message.reply_text("❌ Failed to create topic. Check if I am Admin in the group.")
+            await query.message.reply_text(f"❌ Failed to create topic: {e}")
         return
 
-    # --- Create PERF topic ---
     if data == "CONFIRM_NEW_PERF":
         ud = context.user_data
         event_type = ud.get("temp_event_type", "")
@@ -477,67 +597,62 @@ async def handle_confirm_new_perf(update: Update, context: ContextTypes.DEFAULT_
         title = f"PERF - {event_name}"
 
         if not event_name or not perf_date or not location:
-            await query.edit_message_text("❌ Data expired. Please use /new again.")
+            await query.edit_message_text("❌ Data expired. Please use `/new` to restart.")
             return
 
-        await query.edit_message_text("⏳ Processing: Creating Topic & Logging...")
+        context.user_data["creation_completed"] = True
+        preview_msg_id = context.user_data.get("final_preview_msg_id")
+        if preview_msg_id:
+            try: await context.bot.edit_message_reply_markup(chat_id=query.message.chat.id, message_id=preview_msg_id, reply_markup=None)
+            except Exception: pass
 
-        # Step 1: create forum topic
+        status_msg = await query.message.reply_text("⏳ Processing: Building forum channels and updating logs...")
         try:
             topic = await context.bot.create_forum_topic(chat_id=CHAT_ID, name=title)
             thread_id = topic.message_thread_id
             from utils.constants import initialized_topics
             initialized_topics.add(thread_id)
-            print(f"[DEBUG] Forum topic created: {thread_id}")
         except Exception as e:
-            print(f"[ERROR] Topic creation failed: {e}")
-            await query.message.reply_text(f"❌ Failed to create forum topic: {e}")
+            await status_msg.edit_text(f"❌ Forum setup failed: {e}")
             return
 
-        # Step 2: write to Google Sheet
         try:
             sheet = get_gspread_sheet()
-            sheet.append_row(
-                [thread_id, event_type, event_name, rehearsal_date, perf_date, location, other_info, "", ""],
-                value_input_option="USER_ENTERED",
-            )
-            print(f"[DEBUG] Sheet row appended for thread {thread_id}")
+            sheet.append_row([thread_id, event_type, event_name, rehearsal_date, perf_date, location, other_info, "", "", ""], value_input_option="USER_ENTERED")
         except Exception as e:
-            error_detail = e.response.text if hasattr(e, "response") else str(e)
-            print(f"[ERROR] Sheet write failed: {error_detail}")
-            await query.message.reply_text(f"❌ Topic created (ID: `{thread_id}`) but sheet write failed:\n`{error_detail}`", parse_mode="Markdown")
+            await status_msg.edit_text(f"❌ Topic created (`{thread_id}`), but logging encountered a write failure: {e}")
             return
 
-        # Step 3: post pinned summary + interest poll
         try:
             group_data = context.application.bot_data.setdefault("group_chat_data", {}).setdefault(CHAT_ID, {})
-            await publish_performance_summary(
-                bot=context.bot,
-                chat_data_store=group_data,
-                sheet=sheet,
-                chat_id=CHAT_ID,
-                thread_id=thread_id,
-                event_name=event_name,
-                rehearsal_date=rehearsal_date,
-                perf_date=perf_date,
-                location=location,
-                other_info=other_info,
-            )
+            await publish_performance_summary(bot=context.bot, chat_data_store=group_data, sheet=sheet, chat_id=CHAT_ID, thread_id=thread_id, event_name=event_name, rehearsal_date=rehearsal_date, perf_date=perf_date, location=location, other_info=other_info)
         except Exception as e:
-            print(f"[ERROR] publish_performance_summary failed: {e}")
-            await query.message.reply_text(f"⚠️ Topic + sheet done, but summary/poll failed: {e}")
+            await status_msg.edit_text(f"⚠️ Channel created successfully, but publishing summary logs failed: {e}")
             context.user_data.clear()
             return
 
-        await query.message.reply_text(
-            f"✅ *Success!* Topic `{thread_id}` (`{title}`) is ready.",
-            parse_mode="Markdown",
-        )
+        await status_msg.edit_text(f"✅ *Success!* Forum Topic `{thread_id}` (`{title}`) has been established and published.", parse_mode="Markdown")
         context.user_data.clear()
         return
 
-    # --- Cancel ---
     if data == "CANCEL_NEW_PERF":
         context.user_data.clear()
-        await query.edit_message_text("❌ Action cancelled.")
+        await query.edit_message_text("❌ Action cancelled")
         return
+
+async def handle_list_modify_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle clicking a specific performance button directly from the list prompt."""
+    query = update.callback_query
+    await query.answer()
+    _, thread_id_str = query.data.split("|")
+    thread_id = int(thread_id_str)
+    try: await query.message.delete()
+    except Exception: pass
+    
+    records = context.user_data.get("cached_records", [])
+    row = next((r for r in records if str(r.get("THREAD ID")) == str(thread_id)), None)
+    if row:
+        context.user_data["modify_event_name"] = row.get("EVENT NAME", "Unnamed Event")
+        
+    from handlers.modify_handlers import initiate_modify_via_dm
+    await initiate_modify_via_dm(update=update, context=context, thread_id=thread_id, initiated_via_dm=True)

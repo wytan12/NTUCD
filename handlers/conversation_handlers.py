@@ -372,7 +372,6 @@ def build_performance_summary(
 
     return "\n".join(lines)
 
-
 async def publish_performance_summary(
     bot,
     chat_data_store: dict,
@@ -385,25 +384,33 @@ async def publish_performance_summary(
     location: str,
     other_info: str,
 ):
-    """Post (or refresh) the pinned performance summary and interest poll.
+    """Post or refresh the pinned summary using persistent Google Sheet tracking."""
+    from config import SHEET_COLUMNS
+    
+    # 1. Look up the row matching this thread ID
+    records = sheet.get_all_records()
+    row_number = None
+    old_msg_id = None
+    
+    for idx, row in enumerate(records, start=2):
+        if str(row.get("THREAD ID")) == str(thread_id):
+            row_number = idx
+            old_msg_id = row.get("SUMMARY MSG ID")
+            break
 
-    Deletes and unpins any previous summary/poll for this thread before posting
-    the updated version.  Tracks the new message IDs in chat_data_store so
-    future calls can clean them up correctly.
-    """
-    summary_key = f"summary_msg_{thread_id}"
-
-    previous_summary_id = chat_data_store.get(summary_key)
-    if previous_summary_id:
+    # 2. Hard Target: If an old summary ID exists in the sheet, destroy it immediately
+    if old_msg_id and str(old_msg_id).isdigit():
         try:
-            await bot.unpin_chat_message(chat_id=chat_id, message_id=previous_summary_id)
-        except BadRequest as exc:
-            print(f"[WARNING] Failed to unpin previous summary: {exc}")
+            await bot.unpin_chat_message(chat_id=chat_id, message_id=int(old_msg_id))
+        except BadRequest:
+            pass
         try:
-            await bot.delete_message(chat_id=chat_id, message_id=previous_summary_id)
-        except BadRequest as exc:
-            print(f"[WARNING] Failed to delete previous summary: {exc}")
+            await bot.delete_message(chat_id=chat_id, message_id=int(old_msg_id))
+            print(f"[INFO] Cleaned up old summary message ID: {old_msg_id} from thread {thread_id}")
+        except BadRequest:
+            pass
 
+    # 3. Create and send the fresh summary text banner
     template = build_performance_summary(
         event_name=event_name,
         rehearsal_date=rehearsal_date,
@@ -412,22 +419,30 @@ async def publish_performance_summary(
         other_info=other_info,
     )
 
-    message = await bot.send_message(
+    new_message = await bot.send_message(
         chat_id=chat_id,
         text=template,
         parse_mode="Markdown",
         message_thread_id=thread_id,
     )
 
+    # 4. Pin the new summary message
     try:
         await bot.pin_chat_message(
             chat_id=chat_id,
-            message_id=message.message_id,
+            message_id=new_message.message_id,
             disable_notification=True,
         )
     except BadRequest as exc:
-        print(f"[WARNING] Failed to pin performance summary: {exc}")
+        print(f"[WARNING] Failed to pin new summary: {exc}")
 
-    chat_data_store[summary_key] = message.message_id
+    # 5. Save the new message ID directly to the Google Sheet for future lookups
+    if row_number:
+        try:
+            msg_col_idx = SHEET_COLUMNS.index("SUMMARY MSG ID") + 1
+            sheet.update_cell(row_number, msg_col_idx, str(new_message.message_id))
+            print(f"[GSHEET] Saved new summary message ID {new_message.message_id} to row {row_number}")
+        except Exception as e:
+            print(f"[ERROR] Failed to save message ID to Google Sheets: {e}")
 
-    return message, None
+    return new_message, None

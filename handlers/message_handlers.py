@@ -1,23 +1,21 @@
 from telegram import Update
-from telegram.ext import ContextTypes
-from utils.decorators import is_admin
+from telegram.ext import ContextTypes, ConversationHandler
 from utils.constants import OTHERS_THREAD_IDS, initialized_topics
 
-
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Route incoming group messages.
-
-    Blocks topics created manually outside the bot flow (admins must use /new
-    via DM).  All other messages from admins and members are allowed through
-    without restriction.
-    """
+    """Route incoming group messages seamlessly, keeping channels completely untouched by admin inputs."""
     msg = update.effective_message
     if not msg:
         return
 
     chat = update.effective_chat
-    user = update.effective_user
     thread_id = msg.message_thread_id
+
+    # 🤐 TOTAL PASSIVITY ENGINE: If anyone types slash commands or plain words, exit quietly with NO deletions.
+    if msg.text:
+        cleaned_text = msg.text.strip().lower()
+        if cleaned_text.startswith("/") or cleaned_text in ["testremind", "remind", "modify", "new", "list", "announce", "threadid"]:
+            return ConversationHandler.END
 
     # Block topics created manually — only topics created via the bot's /new
     # flow should exist, so any manually-created topic is deleted and the
@@ -29,6 +27,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await context.bot.delete_forum_topic(chat_id=chat.id, message_thread_id=thread_id)
 
+            user = update.effective_user
             if user and not user.is_bot:
                 try:
                     await context.bot.send_message(

@@ -7,53 +7,100 @@ from config import (GOOGLE_CREDENTIALS_JSON, SHEET_NAME, SHEET_TAB_NAME,
                    ATT_POLL_ROW, ATT_DATE_ROW, ATT_FIRST_MEMBER_ROW, sg_tz)
 from utils.constants import OTHERS_THREAD_IDS
 
+# Cached OAuth client + opened spreadsheet handles. Re-authenticating and
+# re-opening the spreadsheet on every call costs ~3 network round-trips; caching
+# them means we pay that once. gspread refreshes the OAuth token automatically,
+# so the cached client stays valid for the life of the process.
+_client = None
+_spreadsheets = {}
+
+def _get_client():
+    """Return a cached authorized gspread client, creating it on first use."""
+    global _client
+    if _client is None:
+        scope = ["https://spreadsheets.google.com/feeds",
+                 "https://www.googleapis.com/auth/drive"]
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(GOOGLE_CREDENTIALS_JSON, scope)
+        _client = gspread.authorize(creds)
+    return _client
+
 def get_gspread_sheet(sheet_name=SHEET_NAME, tab_name=SHEET_TAB_NAME):
     """Return a gspread Worksheet object for the given sheet and tab.
 
-    Creates a fresh OAuth2 client on every call — no session is reused, so
-    callers should avoid calling this in tight loops.
+    The authorized client and opened spreadsheet are cached at module level, so
+    repeated calls only cost a single worksheet lookup instead of a fresh OAuth
+    handshake + spreadsheet open each time.
     """
-    # creds_dict = json.loads(GOOGLE_CREDENTIALS_JSON)
-    creds_dict = GOOGLE_CREDENTIALS_JSON
-    scope = ["https://spreadsheets.google.com/feeds", 
-             "https://www.googleapis.com/auth/drive"]
-    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-    client = gspread.authorize(creds)
-    return client.open(sheet_name).worksheet(tab_name)
+    if sheet_name not in _spreadsheets:
+        _spreadsheets[sheet_name] = _get_client().open(sheet_name)
+    return _spreadsheets[sheet_name].worksheet(tab_name)
 
 def get_attendance_ws():
     """Get attendance worksheet (the ATTENDANCE_TAB tab inside the main sheet)."""
     return get_gspread_sheet(tab_name=ATTENDANCE_TAB)
 
-def load_topic_rules():
-    """Fetches rules from 'STANDARD TOPIC Rules' tab and caches them as lists."""
+# ---- Smart data cache: Drive modifiedTime freshness check -------------------
+# Each entry is keyed by (sheet_name, tab_name) and stores the fetched data plus
+# the spreadsheet's Drive `modifiedTime` at fetch time. Before serving, we ask
+# Google only for that timestamp (a tiny request — NOT the cell contents):
+#   • unchanged  -> serve the in-memory copy instantly (no full download)
+#   • changed    -> someone edited the sheet, so re-download and re-stamp
+#   • force=True -> always re-download (manual Refresh)
+# `modifiedTime` is a per-FILE property, so an edit to ANY tab bumps it and
+# refreshes every tab's cache for that spreadsheet — conservative but always
+# correct. Bot writes also bump it, so the cache self-heals after any update.
+_records_cache = {}
+_values_cache = {}
+
+def _spreadsheet_modified_time(sheet_name):
+    """Return the spreadsheet's live Drive modifiedTime string, or None on error."""
     try:
-        from config import SHEET_NAME
-        from utils.constants import TOPIC_RULES_CACHE
-        
-        # Using your preferred tab name
-        sheet = get_gspread_sheet(sheet_name=SHEET_NAME, tab_name="STANDARD TOPIC Rules")
-        records = sheet.get_all_records()
-        
-        TOPIC_RULES_CACHE.clear()
-        for row in records:
-            tid_raw = str(row.get("THREAD ID", "")).strip()
-            
-            # Convert ID: '0' or empty becomes None (General Topic)
-            if tid_raw == "0" or not tid_raw:
-                tid = None
-            else:
-                try: tid = int(tid_raw)
-                except: continue 
-                
-            raw_rules = row.get("RULE PROFILE", "")
-            # Split comma-string into a clean list of uppercase tags
-            rule_list = [r.strip().upper() for r in str(raw_rules).split(",") if r.strip()]
-            TOPIC_RULES_CACHE[tid] = rule_list
-            
-        print(f"[INFO] Successfully cached {len(TOPIC_RULES_CACHE)} standard topic rules.")
+        if sheet_name not in _spreadsheets:
+            _spreadsheets[sheet_name] = _get_client().open(sheet_name)
+        return _spreadsheets[sheet_name].get_lastUpdateTime()
     except Exception as e:
-        print(f"[ERROR] Failed to load topic rules: {e}")
+        print(f"[WARN] modifiedTime check failed for '{sheet_name}': {e}")
+        return None
+
+def get_cached_records(sheet_name=SHEET_NAME, tab_name=SHEET_TAB_NAME, force=False):
+    """`get_all_records()` guarded by a Drive modifiedTime freshness check.
+
+    Serves the cached rows while the sheet is unchanged; re-downloads only when
+    Google reports the file changed (someone edited it) or when ``force=True``.
+    """
+    key = (sheet_name, tab_name)
+    cached = _records_cache.get(key)
+    stamp = None if force else _spreadsheet_modified_time(sheet_name)
+    if cached is not None and stamp is not None and cached["stamp"] == stamp:
+        return cached["records"]
+    records = get_gspread_sheet(sheet_name, tab_name).get_all_records()
+    if stamp is None:  # forced, or the pre-check failed — stamp it now
+        stamp = _spreadsheet_modified_time(sheet_name)
+    _records_cache[key] = {"records": records, "stamp": stamp}
+    return records
+
+def get_cached_values(sheet_name=SHEET_NAME, tab_name=SHEET_TAB_NAME, force=False):
+    """`get_all_values()` guarded by the same modifiedTime freshness check."""
+    key = (sheet_name, tab_name)
+    cached = _values_cache.get(key)
+    stamp = None if force else _spreadsheet_modified_time(sheet_name)
+    if cached is not None and stamp is not None and cached["stamp"] == stamp:
+        return cached["values"]
+    values = get_gspread_sheet(sheet_name, tab_name).get_all_values()
+    if stamp is None:
+        stamp = _spreadsheet_modified_time(sheet_name)
+    _values_cache[key] = {"values": values, "stamp": stamp}
+    return values
+
+def invalidate_sheet_cache(sheet_name=None, tab_name=None):
+    """Drop cached snapshots so the next read re-downloads (manual Refresh)."""
+    for cache in (_records_cache, _values_cache):
+        if sheet_name is None:
+            cache.clear()
+        else:
+            for k in list(cache):
+                if k[0] == sheet_name and (tab_name is None or k[1] == tab_name):
+                    cache.pop(k, None)
 
 def append_to_others_list(thread_id, event_name: str = ""):
     """Append thread ID and event name to the OTHERS tab in the main sheet."""
@@ -197,14 +244,38 @@ def parse_sheet_date(s):
 
 
 def get_training_date_columns():
-    """Return [(col_index, date_str), ...] for every defined training date (row 2, col D+)."""
+    """Return [(col_index, date_str, present_count), ...] for polled training dates.
+
+    Only columns with BOTH a date (row 2) and a poll id (row 1) are returned, so
+    the attendance menus list just the dates that have actually been polled.
+    Un-polled prefilled dates and any analysis column placed to the right of the
+    date region (e.g. a 'Tabulation' header) have no poll id, so they're excluded.
+
+    `present_count` is how many members are marked "1" in that column. The list
+    is sorted by date with the **latest date first** (unparseable dates sink to
+    the bottom).
+    """
+    from datetime import date as _date
+
     ws = get_attendance_ws()
-    row2 = ws.row_values(ATT_DATE_ROW)
+    values = ws.get_all_values()
+    row1 = values[ATT_POLL_ROW - 1] if len(values) >= ATT_POLL_ROW else []
+    row2 = values[ATT_DATE_ROW - 1] if len(values) >= ATT_DATE_ROW else []
+
     out = []
     for col in range(ATT_FIRST_DATE_COL, len(row2) + 1):
-        val = (row2[col - 1] or "").strip()
-        if val:
-            out.append((col, val))
+        date_val = (row2[col - 1] or "").strip()
+        poll_val = (row1[col - 1] or "").strip() if col - 1 < len(row1) else ""
+        if not (date_val and poll_val):
+            continue
+        present = 0
+        for r in range(ATT_FIRST_MEMBER_ROW, len(values) + 1):
+            row = values[r - 1]
+            if col - 1 < len(row) and (row[col - 1] or "").strip() == "1":
+                present += 1
+        out.append((col, date_val, present))
+
+    out.sort(key=lambda item: parse_sheet_date(item[1]) or _date.min, reverse=True)
     return out
 
 
@@ -240,6 +311,35 @@ def record_training_poll(poll_id, training_date) -> int:
 
     ws.update_cell(ATT_POLL_ROW, target_col, str(poll_id))
     return target_col
+
+
+def replace_training_date_column(col, new_date_str, poll_id=None):
+    """Replace an existing training-date column in place.
+
+    Writes `new_date_str` into row 2 of `col`, and clears every member mark in
+    that column (the old marks belonged to the old date, so a date change starts
+    the column fresh). Row 1 (the poll id) is set to `poll_id` if one is given,
+    otherwise it is CLEARED — so `auto_poll_check` will post the poll itself once
+    the new date is 2 days away (same rule as every other date). The TOTAL column
+    (B) is a sheet formula and is never touched. Done in a single batch_update.
+    """
+    from gspread.utils import rowcol_to_a1
+
+    ws = get_attendance_ws()
+    values = ws.get_all_values()
+    last_row = len(values)
+
+    requests = [
+        {"range": rowcol_to_a1(ATT_DATE_ROW, col), "values": [[new_date_str]]},
+        {"range": rowcol_to_a1(ATT_POLL_ROW, col), "values": [[str(poll_id) if poll_id else ""]]},
+    ]
+    if last_row >= ATT_FIRST_MEMBER_ROW:
+        c_start = rowcol_to_a1(ATT_FIRST_MEMBER_ROW, col)
+        c_end = rowcol_to_a1(last_row, col)
+        cleared = [[""] for _ in range(ATT_FIRST_MEMBER_ROW, last_row + 1)]
+        requests.append({"range": f"{c_start}:{c_end}", "values": cleared})
+
+    ws.batch_update(requests, value_input_option="USER_ENTERED")
 
 
 def is_training_poll_id(poll_id) -> bool:

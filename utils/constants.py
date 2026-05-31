@@ -20,6 +20,3 @@ active_polls = {}
 yes_voters = set()
 interest_votes = {}
 pending_users = {}
-# RAM Cache for Standard Topics: {thread_id: ['TEXT', 'MEDIA', ...]}
-# Thread ID 0 or None represents the 'General' topic.
-TOPIC_RULES_CACHE = {}

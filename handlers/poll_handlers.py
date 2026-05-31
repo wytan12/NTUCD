@@ -1,79 +1,15 @@
 from telegram import Update
 from telegram.ext import ContextTypes
 from utils.decorators import admin_only, is_admin
-from utils.helpers import get_next_tuesday, get_next_monday_8pm
 from utils.constants import active_polls, yes_voters, interest_votes
 from services.google_sheets import (
-    record_training_poll, set_attendance, is_training_poll_id, get_gspread_sheet
+    set_attendance, is_training_poll_id, get_gspread_sheet
 )
 from config import sg_tz, TOPIC_VOTING_ID, SHEET_COLUMNS
 from datetime import datetime
 import threading
 import asyncio
 import re
-
-@admin_only
-async def send_poll_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /poll command"""
-    from handlers.admin_handlers import send_reminder
-    
-    print("[DEBUG] send_poll_handler triggered")
-    next_tuesday = get_next_tuesday()
-    now = datetime.now(sg_tz)
-    reminder_time = get_next_monday_8pm(now)
-    delay_sec = (reminder_time - now).total_seconds()
-
-    global yes_voters
-    chat_id = update.effective_chat.id
-    thread_id = getattr(update.effective_message, "message_thread_id", None)
-
-    if thread_id != TOPIC_VOTING_ID:
-        try:
-            await context.bot.delete_message(
-                chat_id=chat_id, 
-                message_id=update.message.message_id
-            )
-        except Exception as e:
-            print(f"[ERROR] Failed to delete message in wrong thread: {e}")
-        return
-
-    if not await is_admin(update, context):
-        try:
-            await context.bot.delete_message(
-                chat_id=chat_id, 
-                message_id=update.message.message_id
-            )
-        except Exception as e:
-            print(f"[DELETE ERROR] {e}")
-        return
-
-    try:
-        await context.bot.delete_message(chat_id, update.message.message_id)
-    except:
-        pass
-    
-    tues_date = next_tuesday.strftime('%B %d, %Y')
-
-    msg = await context.bot.send_poll(
-        chat_id=chat_id,
-        question=f"Are you joining the training on {tues_date}?",
-        options=["Yes", "No"],
-        is_anonymous=False,
-        message_thread_id=thread_id
-    )
-
-    active_polls[msg.poll.id] = "training"
-    yes_voters.clear()
-
-    try:
-        record_training_poll(msg.poll.id, next_tuesday)
-    except Exception as e:
-        print(f"[ERROR] Failed to record training poll id: {e}")
-
-    threading.Timer(
-        delay_sec, 
-        lambda: asyncio.run(send_reminder(context.bot, chat_id, thread_id))
-    ).start()
 
 async def handle_poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle poll answers"""

@@ -1,17 +1,36 @@
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from utils.decorators import admin_only
-from services.google_sheets import get_gspread_sheet, get_attendance_ws
+from services.google_sheets import get_gspread_sheet, get_attendance_ws, get_cached_records
 from config import sg_tz, CHAT_ID, ADMIN_DM_USER_IDS
 from datetime import datetime, timedelta
 import re
 
 @admin_only
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /start command inside Private DMs strictly."""
+    """Handle /start command inside Private DMs strictly (admins only)."""
     if update.effective_chat.type != "private":
         return # 🤐 TOTAL PASSIVITY: Leaves the message completely untouched inside group channels
-    await update.message.reply_text("👋 Hi!")
+
+    # 🛡️ Only verified dashboard admins get a response — stay silent otherwise.
+    is_approved_admin = False
+    current_uid = update.effective_user.id
+    if isinstance(ADMIN_DM_USER_IDS, dict):
+        if current_uid in ADMIN_DM_USER_IDS or str(current_uid) in ADMIN_DM_USER_IDS: is_approved_admin = True
+    elif isinstance(ADMIN_DM_USER_IDS, (list, set)) and current_uid in ADMIN_DM_USER_IDS:
+        is_approved_admin = True
+
+    if not is_approved_admin:
+        print(f"[SECURITY] Unauthorized /start attempt blocked for user ID: {current_uid}")
+        return
+
+    # Show the full Admin DM Dashboard (with the 🔄 Refresh control).
+    from handlers.private_handlers import DASHBOARD_TEXT, _dashboard_keyboard
+    await update.message.reply_text(
+        DASHBOARD_TEXT,
+        reply_markup=_dashboard_keyboard(),
+        parse_mode="Markdown",
+    )
 
 @admin_only
 async def thread_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -165,6 +184,19 @@ async def manual_test_reminder_trigger(update: Update, context: ContextTypes.DEF
     """Direct diagnostic command hook allowing admins to run validation tests manually via private dashboard."""
     if update.effective_chat.type != "private":
         return # 🤐 TOTAL PASSIVITY: Leaves the message completely untouched inside group channels
+
+    # 🛡️ Only verified dashboard admins may fire the reminder scan — stay silent otherwise.
+    is_approved_admin = False
+    current_uid = update.effective_user.id
+    if isinstance(ADMIN_DM_USER_IDS, dict):
+        if current_uid in ADMIN_DM_USER_IDS or str(current_uid) in ADMIN_DM_USER_IDS: is_approved_admin = True
+    elif isinstance(ADMIN_DM_USER_IDS, (list, set)) and current_uid in ADMIN_DM_USER_IDS:
+        is_approved_admin = True
+
+    if not is_approved_admin:
+        print(f"[SECURITY] Unauthorized /testremind attempt blocked for user ID: {current_uid}")
+        return
+
     await execute_manual_test_scan(update, context)
 
 # 🧠 NEW DM PORTAL GENERATOR: Prompts admin to select which event they want to trigger manual reminders for
@@ -172,10 +204,9 @@ async def initiate_remind_portal_via_dm(update: Update, context: ContextTypes.DE
     """Prompts admin to select which event they want to trigger manual reminders for."""
     target_chat = update.effective_user
     status_loading = await context.bot.send_message(chat_id=target_chat.id, text="⏳ Fetching performance log records...")
-    
+
     try:
-        sheet = get_gspread_sheet()
-        records = sheet.get_all_records()
+        records = get_cached_records()
         if not records:
             await status_loading.edit_text("📋 The performance sheet is currently empty.")
             return

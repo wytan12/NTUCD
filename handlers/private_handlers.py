@@ -7,7 +7,7 @@ from telegram.ext import ContextTypes, ConversationHandler
 from config import ADMIN_DM_USER_IDS, CHAT_ID
 from handlers.conversation_handlers import build_performance_summary, publish_performance_summary
 from services.date_parser import parse_and_format_dates
-from services.google_sheets import get_gspread_sheet
+from services.google_sheets import get_gspread_sheet, get_cached_records, get_cached_values, invalidate_sheet_cache
 from utils.constants import (
     WAITING_TOPIC_TITLE, PERF_EVENT_NAME, PERF_REHEARSAL, PERF_DATE, PERF_LOCATION, PERF_OTHER_INFO,
 )
@@ -17,15 +17,55 @@ PERF_EVENT_TYPES = [
     ("🏠 INT (Internal)", "INT"),
 ]
 
+# Per-session snapshot keys mirrored in user_data. The shared module cache
+# (services.google_sheets) auto-refreshes via a modifiedTime check, so these are
+# only convenience copies; the dashboard "🔄 Refresh" also force-invalidates the
+# shared cache so the next read re-downloads immediately.
+_DASHBOARD_CACHE_KEYS = (
+    "cached_records",
+    "attd_dates",
+)
+
+DASHBOARD_TEXT = (
+    "🚀 **Admin DM Dashboard**\n\n"
+    "• `/new` — Create new topic + sheet entry\n"
+    "• `/list` — See all thread IDs and events\n"
+    "• `/modify` — Edit a performance details\n"
+    "• `/attd` — Mark regular-training attendance\n"
+    "• `/announce` — Broadcast a multi-line format message to any topic\n"
+    "• `/remind` — Trigger manual checklist reminder announcement\n"
+    "• `/threadid` — Print the entire group topic directory chart\n"
+    "• `/info <id>` — Preview summary in DM\n\n"
+    "_Lists are cached for instant back-navigation. Tap 🔄 Refresh after editing "
+    "the sheet directly in your browser to force a fresh pull._"
+)
+
+def _dashboard_keyboard() -> InlineKeyboardMarkup:
+    """Inline keyboard for the dashboard — a single refresh control."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔄 Refresh Data", callback_data="DASH_REFRESH")]
+    ])
+
 def _parse_command_payload(text: str) -> tuple[str, str | None, str]:
-    """Extract the command keyword, thread id token, and remaining payload."""
+    """Extract the command keyword, thread id token, and remaining payload.
+
+    A command is recognised **only** when the text begins with a leading slash
+    (e.g. `/modify`, `/announce 5 hi`). Plain text with no slash returns an empty
+    command, so it falls through to the multi-step flow state machine (event
+    names, dates, announcement text, …) or is ignored — typing `modify` or
+    `Modify start` will NOT trigger the command.
+    """
     stripped = text.lstrip()
+    if not stripped.startswith("/"):
+        return "", None, ""
+    # Drop the leading slash, then tokenise the rest.
+    stripped = stripped[1:].lstrip()
     if not stripped:
         return "", None, ""
     first_space = stripped.find(" ")
     if first_space == -1:
-        return stripped.lower().lstrip("/"), None, ""
-    command = stripped[:first_space].lower().lstrip("/")
+        return stripped.lower(), None, ""
+    command = stripped[:first_space].lower()
     remainder = stripped[first_space + 1:].lstrip()
     if not remainder:
         return command, None, ""
@@ -103,39 +143,21 @@ async def _show_perf_summary(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def initiate_announce_portal_via_dm(update: Update, context: ContextTypes.DEFAULT_TYPE, incoming_query=None) -> None:
     """Reusable interactive matrix builder for announcements using absolute local memory caching profiles."""
     target_chat = update.effective_user
-    
-    # 🧠 CACHE ENGINE: Check if we already have the primary records loaded in memory cache
-    records = context.user_data.get("announce_cached_records", [])
-    cached_others = context.user_data.get("announce_cached_others")
-    
-    status_loading = None
-    # ⚡ ONLY connect to Google Sheets if our memory cache profiles are totally missing!
-    if not records or cached_others is None:
-        if incoming_query is None:
-            status_loading = await context.bot.send_message(chat_id=target_chat.id, text="⏳ Generating channel communication routing links...")
-        
-        # Pull main sheets rows if empty
-        if not records:
-            sheet = get_gspread_sheet()
-            records = sheet.get_all_records()
-            context.user_data["announce_cached_records"] = records
-            
-        # Pull OTHERS rows if empty
-        if cached_others is None:
-            try:
-                sheet_ref = get_gspread_sheet()
-                others_sheet = get_gspread_sheet(sheet_name=sheet_ref.spreadsheet.title, tab_name="OTHERS")
-                others_rows = []
-                for o_row in others_sheet.get_all_values():
-                    if o_row and str(o_row[0]).isdigit():
-                        others_rows.append((o_row[0], o_row[1] if len(o_row) > 1 and o_row[1] else "Others Thread"))
-                context.user_data["announce_cached_others"] = others_rows
-            except Exception:
-                context.user_data["announce_cached_others"] = []
 
-    # Re-read variables from local memory cache profiles securely
-    records = context.user_data.get("announce_cached_records", [])
-    cached_others = context.user_data.get("announce_cached_others", [])
+    status_loading = None
+    if incoming_query is None:
+        status_loading = await context.bot.send_message(chat_id=target_chat.id, text="⏳ Generating channel communication routing links...")
+
+    # 🧠 SMART CACHE: get_cached_records / get_cached_values do a tiny modifiedTime
+    # check — they re-download only when the sheet actually changed.
+    records = get_cached_records()
+    cached_others = []
+    try:
+        for o_row in get_cached_values(tab_name="OTHERS"):
+            if o_row and str(o_row[0]).isdigit():
+                cached_others.append((o_row[0], o_row[1] if len(o_row) > 1 and o_row[1] else "Others Thread"))
+    except Exception:
+        cached_others = []
 
     buttons = [[InlineKeyboardButton("💬 General Topic (Main)", callback_data="ANNOUNCE_TARGET|0|General Topic")]]
     
@@ -164,6 +186,55 @@ async def initiate_announce_portal_via_dm(update: Update, context: ContextTypes.
         if status_loading: await status_loading.delete()
         await context.bot.send_message(chat_id=target_chat.id, text=prompt_text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
 
+async def render_modify_list(update: Update, context: ContextTypes.DEFAULT_TYPE, incoming_query=None) -> None:
+    """Render the PERFORMANCE modification list (first layer of the /modify flow).
+
+    Reused both by the `/modify` command and by the "🔙 Back to List" button on the
+    field-selection menu. Data comes from ``get_cached_records()`` which does a
+    tiny Drive modifiedTime check: it serves the cached rows instantly while the
+    sheet is unchanged, and only re-downloads when the sheet was actually edited.
+    """
+    target_chat = update.effective_user
+    try:
+        status_loading = None
+        if incoming_query is None:
+            status_loading = await context.bot.send_message(chat_id=target_chat.id, text="⏳ Fetching active performance log...")
+        records = get_cached_records()
+        context.user_data["cached_records"] = records
+        if not records:
+            text = "📋 The performance sheet is empty."
+            if incoming_query:
+                await incoming_query.edit_message_text(text)
+            elif status_loading:
+                await status_loading.edit_text(text)
+            else:
+                await context.bot.send_message(chat_id=target_chat.id, text=text)
+            return
+        buttons = []
+        for row in records:
+            tid = row.get("THREAD ID")
+            if str(tid).isdigit():
+                event_name = row.get("EVENT NAME", "Unnamed Event")
+                buttons.append([InlineKeyboardButton(f"⚙️ {event_name} ({tid})", callback_data=f"LIST_MODIFY|{tid}")])
+        prompt_text = (
+            "🛠 *PERFORMANCE Modification Portal*\n\n"
+            "Which PERFORMANCE topic you would like to modify:"
+        )
+        markup = InlineKeyboardMarkup(buttons)
+        if incoming_query:
+            await incoming_query.edit_message_text(prompt_text, reply_markup=markup, parse_mode="Markdown")
+        else:
+            if status_loading:
+                await status_loading.delete()
+            await context.bot.send_message(chat_id=target_chat.id, text=prompt_text, reply_markup=markup, parse_mode="Markdown")
+    except Exception as e:
+        err = f"❌ Failed to load modification dashboard menu: {e}"
+        if incoming_query:
+            await incoming_query.edit_message_text(err)
+        else:
+            await context.bot.send_message(chat_id=target_chat.id, text=err)
+
+
 async def handle_private_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Main private DM state machine routing engine for administrative accounts."""
     message = update.effective_message
@@ -187,6 +258,13 @@ async def handle_private_command(update: Update, context: ContextTypes.DEFAULT_T
 
     text = message.text.strip()
     command, thread_token, payload = _parse_command_payload(text)
+
+    # 🧠 ATTENDANCE DATE-MODIFY TEXT CAPTURE: if an attd date change is awaiting a
+    # typed new date, consume this (non-command) message as that date.
+    if not text.startswith("/"):
+        from handlers.attendance_handlers import handle_moddate_text
+        if await handle_moddate_text(update, context):
+            return
 
     # 🧠 EMERGENCY TESTREMIND ESCAPE LATCH
     if command == "testremind":
@@ -337,8 +415,7 @@ async def handle_private_command(update: Update, context: ContextTypes.DEFAULT_T
     if command == "list":
         status_loading = await message.reply_text("⏳ Fetching live performance list...")
         try:
-            sheet = get_gspread_sheet()
-            records = sheet.get_all_records()
+            records = get_cached_records()
             if not records:
                 await status_loading.edit_text("📋 The performance sheet is empty.")
                 return
@@ -361,42 +438,16 @@ async def handle_private_command(update: Update, context: ContextTypes.DEFAULT_T
         if thread_token:
             await initiate_modify_via_dm(update, context, int(thread_token), True)
             return
-        try:
-            status_loading = await message.reply_text("⏳ Fetching active performance log...")
-            sheet = get_gspread_sheet()
-            records = sheet.get_all_records()
-            if not records:
-                await status_loading.edit_text("📋 The performance sheet is empty.")
-                return
-            context.user_data["cached_records"] = records
-            buttons = []
-            for row in records:
-                tid = row.get("THREAD ID")
-                if str(tid).isdigit():
-                    event_name = row.get("EVENT NAME", "Unnamed Event")
-                    buttons.append([InlineKeyboardButton(f"⚙️ {event_name} ({tid})", callback_data=f"LIST_MODIFY|{tid}")])
-            await status_loading.delete()
-            await message.reply_text(
-                "🛠 *PERFORMANCE Modification Portal*\n\n"
-                "Which PERFORMANCE topic you would like to modify:",
-                reply_markup=InlineKeyboardMarkup(buttons),
-                parse_mode="Markdown"
-            )
-        except Exception as e:
-            await message.reply_text(f"❌ Failed to load modification dashboard menu: {e}")
+        await render_modify_list(update, context)
         return
 
     if command == "announce":
-        # Clear out any old configuration cache rows beforehand to make sure we load fresh boundaries
-        context.user_data.pop("announce_cached_records", None)
-        context.user_data.pop("announce_cached_others", None)
         await initiate_announce_portal_via_dm(update, context)
         return
 
     if command == "info" and thread_token:
         status_loading = await message.reply_text(f"⏳ Downloading details card snapshot for ID {thread_token}...")
-        sheet = get_gspread_sheet()
-        row = next((r for r in sheet.get_all_records() if str(r.get("THREAD ID")) == thread_token), None)
+        row = next((r for r in get_cached_records() if str(r.get("THREAD ID")) == thread_token), None)
         await status_loading.delete()
         if row:
             await message.reply_text(
@@ -412,19 +463,17 @@ async def handle_private_command(update: Update, context: ContextTypes.DEFAULT_T
     if command in ["threadid", "threads", "thread"]:
         status_loading = await message.reply_text("⏳ Analyzing group channel layouts and compiling index...")
         try:
-            sheet = get_gspread_sheet()
-            records = sheet.get_all_records()
+            records = get_cached_records()
             lines = ["🧵 *Active Workspace Thread Directory*\n"]
             lines.append("• `0` | 💬 **General/Main Landing Channel**")
-            
+
             for row in records:
                 tid = row.get("THREAD ID")
                 if str(tid).isdigit():
                     lines.append(f"• `{tid}` | 🎭 *PERF:* **{row.get('EVENT NAME', 'Unnamed Event')}**")
-                    
+
             try:
-                others_sheet = get_gspread_sheet(sheet_name=sheet.spreadsheet.title, tab_name="OTHERS")
-                for o_row in others_sheet.get_all_values():
+                for o_row in get_cached_values(tab_name="OTHERS"):
                     if o_row and str(o_row[0]).isdigit():
                         lines.append(f"• `{o_row[0]}` | ☕ *OTHERS:* **{o_row[1] if len(o_row) > 1 and o_row[1] else 'Unnamed'}**")
             except Exception: pass
@@ -442,17 +491,47 @@ async def handle_private_command(update: Update, context: ContextTypes.DEFAULT_T
 
     if command == "help" or text == "/start":
         await message.reply_text(
-            "🚀 **Admin DM Dashboard**\n\n"
-            "• `new` — Create new topic + sheet entry\n"
-            "• `list` — See all thread IDs and events\n"
-            "• `modify` — Edit a performance details\n"
-            "• `attd` — Mark regular-training attendance\n"
-            "• `announce` — Broadcast a multi-line format message to any topic\n"
-            "• `remind` — Trigger manual checklist reminder announcement\n"
-            "• `threadid` — Print the entire group topic directory chart\n"
-            "• `info <id>` — Preview summary in DM",
-            parse_mode="Markdown"
+            DASHBOARD_TEXT,
+            reply_markup=_dashboard_keyboard(),
+            parse_mode="Markdown",
         )
+
+
+async def handle_dashboard_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Clear all cached list snapshots so the next list pulls fresh from Sheets.
+
+    A single control on the DM dashboard instead of a refresh button on every
+    individual list screen. After this, `/modify`, `/announce`, `/attd`, etc.
+    re-read Google Sheets the next time they build a list.
+    """
+    query = update.callback_query
+
+    # Authorize: only dashboard admins may refresh.
+    uid = update.effective_user.id
+    is_admin = False
+    if isinstance(ADMIN_DM_USER_IDS, dict):
+        is_admin = any(str(v).isdigit() and int(v) == uid for v in ADMIN_DM_USER_IDS.values()) \
+            or any(str(k).isdigit() and int(k) == uid for k in ADMIN_DM_USER_IDS)
+    elif isinstance(ADMIN_DM_USER_IDS, (list, set)):
+        is_admin = uid in ADMIN_DM_USER_IDS
+    if not is_admin:
+        await query.answer()
+        return
+
+    for key in _DASHBOARD_CACHE_KEYS:
+        context.user_data.pop(key, None)
+    # Force the shared module cache to re-download on the next read.
+    invalidate_sheet_cache()
+
+    await query.answer("✅ Cache cleared — lists will pull fresh.", show_alert=False)
+    try:
+        await query.edit_message_text(
+            DASHBOARD_TEXT + "\n\n♻️ *Data refreshed just now.*",
+            reply_markup=_dashboard_keyboard(),
+            parse_mode="Markdown",
+        )
+    except Exception:
+        pass
 
 async def handle_confirm_new_perf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Callback matrix router handling all administrative wizard modifications."""

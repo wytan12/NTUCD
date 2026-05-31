@@ -238,9 +238,16 @@ async def confirmation_callback(update: Update, context: ContextTypes.DEFAULT_TY
     """Process the ACCEPT / REJECT / CANCEL button from the confirmation prompt.
 
     ACCEPT: writes ACCEPTED to the sheet and refreshes the pinned summary.
-    REJECT: writes REJECTED to the sheet and schedules topic deletion.
+    REJECT: writes REJECTED to the sheet and posts a notice. The topic is NOT
+            closed or deleted — the bot never closes a topic on rejection.
     """
     query = update.callback_query
+
+    # 🛡️ These buttons live in a public group topic — only group admins may act.
+    if not await is_admin(update, context):
+        await query.answer("⛔ Only admins can do this.", show_alert=True)
+        return
+
     await query.answer()
 
     parts = query.data.split("|")

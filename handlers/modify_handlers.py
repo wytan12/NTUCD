@@ -4,9 +4,8 @@ from telegram.error import BadRequest
 import asyncio
 
 from utils.constants import MODIFY_VALUE
-from utils.decorators import is_admin
 from config import SHEET_COLUMNS, CHAT_ID
-from services.google_sheets import get_gspread_sheet
+from services.google_sheets import get_gspread_sheet, get_cached_records
 from services.date_parser import parse_and_format_dates
 from handlers.conversation_handlers import build_performance_summary, publish_performance_summary
 
@@ -26,19 +25,20 @@ ALIAS_TO_FIELD = {alias: field for field, alias in FIELD_ALIAS_MAP.items()}
 DATE_FIELDS = {"REHEARSAL DATE | TIME", "PERF DATE | TIME"}
 
 async def start_modify(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """LOCK DOWN: Block public group execution completely to keep channels clean."""
-    msg = update.effective_message
-    try:
-        await update.message.delete()
-    except Exception:
-        pass
+    """Entry point for the `/modify` slash command.
 
-    if msg.is_topic_message or update.effective_chat.type in {"group", "supergroup"}:
+    Group/topic use is fully passive — the message is left untouched (no
+    deletion, no reply), exactly like any other `/something` typed in a topic. In
+    a private DM it delegates straight to the dashboard dispatcher so that
+    `/modify` behaves identically to typing `modify` — the dispatcher runs its
+    own ADMIN_DM_USER_IDS authorization, so no separate admin check is needed
+    here (the old group-only `is_admin()` check wrongly rejected DM use).
+    """
+    # Group/topic use: total passivity — leave the message as a normal message.
+    if update.effective_chat.type != "private":
         return ConversationHandler.END
 
-    if not await is_admin(update, context):
-        return ConversationHandler.END
-
+    # DM: hand off to the unified private-command dispatcher.
     from handlers.private_handlers import handle_private_command
     await handle_private_command(update, context)
     return ConversationHandler.END
@@ -50,13 +50,10 @@ async def initiate_modify_via_dm(
     initiated_via_dm: bool,
 ) -> None:
     """Send the field-selection keyboard drawing details straight from local cache entries."""
-    records = context.user_data.get("cached_records", [])
-    
-    if not records:
-        sheet = get_gspread_sheet()
-        records = sheet.get_all_records()
-        context.user_data["cached_records"] = records
-        
+    # Smart cache: serves instantly while unchanged, re-pulls only when the sheet
+    # was actually edited (modifiedTime check inside get_cached_records).
+    records = get_cached_records()
+    context.user_data["cached_records"] = records
     row = next((r for r in records if str(r.get("THREAD ID")) == str(thread_id)), None)
     target_chat = update.effective_user
 
@@ -82,6 +79,7 @@ async def initiate_modify_via_dm(
         alias = FIELD_ALIAS_MAP.get(opt, opt.replace(" ", "_").upper())
         emoji = emoji_map.get(opt, "")
         keyboard.append([InlineKeyboardButton(f"{emoji} {opt.title()}", callback_data=f"MODIFY|{alias}|{thread_id}")])
+    keyboard.append([InlineKeyboardButton("🔙 Back to List", callback_data=f"MODIFY|BACK_TO_LIST|{thread_id}")])
     keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data=f"MODIFY|CANCEL|{thread_id}")])
 
     current_event_name = row.get("EVENT NAME", "Unnamed Event")
@@ -113,12 +111,24 @@ async def get_modify_field_callback(update: Update, context: ContextTypes.DEFAUL
 
     current_event_name = context.user_data.get("modify_event_name", "Selected Event")
 
+    field = ALIAS_TO_FIELD.get(field_alias, field_alias)
+
+    # 🧠 BACK-TO-LIST ROUTER: edit the existing menu message in place — a single
+    # `edit_message_text`, with no "⏳ Fetching..." placeholder and no
+    # delete→resend. Handled BEFORE the unconditional delete below, otherwise the
+    # message would be gone and we'd fall back to the slower send/delete dance.
+    if field == "BACK_TO_LIST":
+        context.user_data.pop("modify_field", None)
+        from handlers.private_handlers import render_modify_list
+        # Smart cache: serves instantly if unchanged, re-pulls only if edited.
+        await render_modify_list(update, context, incoming_query=query)
+        return ConversationHandler.END
+
+    # Every other branch replaces the menu with a fresh message, so delete it.
     try:
         await context.bot.delete_message(chat_id=query.message.chat.id, message_id=query.message.message_id)
     except Exception:
         pass
-
-    field = ALIAS_TO_FIELD.get(field_alias, field_alias)
 
     if field == "CANCEL":
         await context.bot.send_message(chat_id=query.from_user.id, text="❌ Modification cancelled.")

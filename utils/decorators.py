@@ -3,6 +3,22 @@ from telegram import Update
 from telegram.ext import ContextTypes
 from config import ADMIN_DM_USER_IDS
 
+async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Return True if the calling user is an administrator (or creator) of the
+    current chat. Used to gate group commands like /poll.
+    """
+    try:
+        chat = update.effective_chat
+        user = update.effective_user
+        if chat is None or user is None:
+            return False
+        member = await context.bot.get_chat_member(chat.id, user.id)
+        return member.status in ("administrator", "creator")
+    except Exception as e:
+        print(f"[ERROR] is_admin check failed: {e}")
+        return False
+
+
 async def check_is_authenticated_admin(user_id: int) -> bool:
     """Helper to verify if a user ID exists within the admin configuration list/dict."""
     if isinstance(ADMIN_DM_USER_IDS, dict):

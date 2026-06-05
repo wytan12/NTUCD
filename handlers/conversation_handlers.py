@@ -9,7 +9,7 @@ from utils.constants import (
     DATE, EVENT, LOCATION
 )
 from config import SHEET_COLUMNS, CHAT_ID
-from services.google_sheets import get_gspread_sheet, append_to_others_list
+from services.google_sheets import get_gspread_sheet, append_to_others_list, invalidate_sheet_cache
 from services.date_parser import parse_and_format_dates
 from utils.decorators import is_admin
 
@@ -145,6 +145,7 @@ async def parse_perf_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         sheet.append_row([thread_id, "", event_name, rehearsal_date, perf_date, location, other_info, "", ""])
+        invalidate_sheet_cache()
         print("[DEBUG] Row appended successfully")
     except Exception as e:
         print(f"[ERROR] Failed to append row: {e}")
@@ -284,6 +285,7 @@ async def confirmation_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
     if action == "REJECT":
         sheet.update_cell(row_number, status_col, "REJECTED")
+        invalidate_sheet_cache()
         await query.message.chat.send_message(
             "❌ Performance rejected.",
             message_thread_id=thread_id
@@ -292,6 +294,7 @@ async def confirmation_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
     if action == "ACCEPT":
         sheet.update_cell(row_number, status_col, "ACCEPTED")
+        invalidate_sheet_cache()
 
         group_chat_data_cache = context.application.bot_data.setdefault("group_chat_data", {})
         group_chat_data = group_chat_data_cache.setdefault(CHAT_ID, {})

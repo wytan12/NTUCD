@@ -153,11 +153,13 @@ def main():
     except Exception as e:
         print(f"[ERROR] Failed to load OTHERS List: {e}")
     
-    # --- 3. Schedule daily auto-poll check (20:00 SGT) ---
+    # --- 3. Schedule daily auto-poll check (09:00 SGT) ---
     try:
         if app.job_queue:
-            app.job_queue.run_daily(auto_poll_check, time=dt_time(20, 0, tzinfo=sg_tz))
-            print("[INFO] Auto-poll daily check scheduled for 20:00 SGT.")
+            app.job_queue.run_daily(auto_poll_check, time=dt_time(9, 0, tzinfo=sg_tz))
+            # # TEST: run 20s after start, then every 2 min
+            # app.job_queue.run_repeating(auto_poll_check, interval=120, first=20)
+            print("[INFO] Auto-poll daily check scheduled for 09:00 SGT.")
         else:
             print("[WARN] JobQueue unavailable — auto-poll not scheduled. "
                   "Install python-telegram-bot[job-queue].")

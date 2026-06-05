@@ -5,7 +5,7 @@ import asyncio
 
 from utils.constants import MODIFY_VALUE
 from config import SHEET_COLUMNS, CHAT_ID
-from services.google_sheets import get_gspread_sheet, get_cached_records
+from services.google_sheets import get_gspread_sheet, get_cached_records, invalidate_sheet_cache
 from services.date_parser import parse_and_format_dates
 from handlers.conversation_handlers import build_performance_summary, publish_performance_summary
 
@@ -276,6 +276,10 @@ async def apply_modify_value(update: Update, context: ContextTypes.DEFAULT_TYPE)
     try:
         col_index = SHEET_COLUMNS.index(field) + 1
         sheet.update_cell(row_number, col_index, normalized_value)
+        # We just edited the sheet — drop the cached snapshot immediately so the
+        # next list/menu render re-pulls fresh, rather than waiting for Drive's
+        # modifiedTime (which lags a few seconds behind the write).
+        invalidate_sheet_cache()
     except Exception as exc:
         await context.bot.send_message(chat_id=update.effective_chat.id, text=f"❌ Failed to update sheet: `{exc}`", parse_mode="Markdown")
         return ConversationHandler.END
@@ -361,6 +365,7 @@ async def handle_modify_type_selection(update: Update, context: ContextTypes.DEF
     try:
         col_index = SHEET_COLUMNS.index("EVENT TYPE") + 1
         sheet.update_cell(row_number, col_index, selection)
+        invalidate_sheet_cache()
         await query.message.delete()
     except Exception: pass
 
@@ -417,6 +422,7 @@ async def handle_modify_status_selection(update: Update, context: ContextTypes.D
 
     try:
         sheet.update_cell(row_number, SHEET_COLUMNS.index("STATUS") + 1, db_value)
+        invalidate_sheet_cache()
         await query.message.delete()
     except Exception as exc:
         print(f"[ERROR] Failed to update status cell: {exc}")

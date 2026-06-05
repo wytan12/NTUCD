@@ -704,6 +704,7 @@ async def handle_confirm_new_perf(update: Update, context: ContextTypes.DEFAULT_
         try:
             sheet = get_gspread_sheet()
             sheet.append_row([thread_id, event_type, event_name, rehearsal_date, perf_date, location, other_info, "", "", ""], value_input_option="USER_ENTERED")
+            invalidate_sheet_cache()  # new row — re-pull on next /list or /modify
         except Exception as e:
             await status_msg.edit_text(f"❌ Topic created (`{thread_id}`), but logging encountered a write failure: {e}")
             return

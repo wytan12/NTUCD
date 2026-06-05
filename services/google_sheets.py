@@ -4,7 +4,9 @@ from oauth2client.service_account import ServiceAccountCredentials
 from config import (GOOGLE_CREDENTIALS_JSON, SHEET_NAME, SHEET_TAB_NAME,
                    ATTENDANCE_TAB, WELCOME_TEA_SHEET, WELCOME_TEA_TAB,
                    ATT_NAME_COL, ATT_TOTAL_COL, ATT_LABEL_COL, ATT_FIRST_DATE_COL,
-                   ATT_POLL_ROW, ATT_DATE_ROW, ATT_FIRST_MEMBER_ROW, sg_tz)
+                   ATT_POLL_ROW, ATT_DATE_ROW, ATT_FIRST_MEMBER_ROW, sg_tz,
+                   PERF_TAB_NAME, PERF_NAME_COL, PERF_TOTAL_COL, PERF_FIRST_EVENT_COL,
+                   PERF_THREAD_ROW, PERF_EVENT_ROW, PERF_FIRST_MEMBER_ROW)
 from utils.constants import OTHERS_THREAD_IDS
 
 # Cached OAuth client + opened spreadsheet handles. Re-authenticating and
@@ -483,6 +485,123 @@ def commit_attendance_column(col, marks_by_row: dict):
     ws.batch_update([
         {"range": f"{c_start}:{c_end}", "values": col_cells},
     ], value_input_option="USER_ENTERED")
+
+# ---- PERF TABULATION (performance-event attendance, keyed by thread id) ------
+
+def get_perf_tab_ws():
+    """Worksheet for the PERF TABULATION tab (performance attendance grid)."""
+    return get_gspread_sheet(tab_name=PERF_TAB_NAME)
+
+
+def get_perf_event_list():
+    """Return [(thread_id, event_name, present_count), ...] of performances.
+
+    Events are pulled from the PERF tab (every performance topic, by thread id);
+    `present_count` is read from that event's column in PERF TABULATION (0 if it
+    hasn't been marked yet). Listed latest-first (PERF tab order, newest rows
+    last, so reversed).
+    """
+    ws = get_perf_tab_ws()
+    values = ws.get_all_values()
+    row1 = values[PERF_THREAD_ROW - 1] if len(values) >= PERF_THREAD_ROW else []
+
+    present_by_tid = {}
+    for col in range(PERF_FIRST_EVENT_COL, len(row1) + 1):
+        tid = (row1[col - 1] or "").strip()
+        if not tid:
+            continue
+        cnt = sum(1 for r in range(PERF_FIRST_MEMBER_ROW, len(values) + 1)
+                  if col - 1 < len(values[r - 1]) and (values[r - 1][col - 1] or "").strip() == "1")
+        present_by_tid[tid] = cnt
+
+    events = []
+    for rec in get_cached_records():
+        tid = str(rec.get("THREAD ID", "")).strip()
+        if tid.isdigit():
+            events.append((int(tid), rec.get("EVENT NAME", "Unnamed Event"),
+                           present_by_tid.get(tid, 0)))
+    events.reverse()  # newest performances first
+    return events
+
+
+def get_perf_event_column(thread_id, create=False, event_name=""):
+    """Return the PERF TABULATION column whose row-1 holds `thread_id`.
+
+    If absent and `create` is True, a new column is written (thread id in row 1,
+    event name in row 2) in the first empty slot from col D and its index is
+    returned. Otherwise returns None.
+    """
+    ws = get_perf_tab_ws()
+    row1 = ws.row_values(PERF_THREAD_ROW)
+    for col in range(PERF_FIRST_EVENT_COL, len(row1) + 1):
+        if (row1[col - 1] or "").strip() == str(thread_id):
+            return col
+    if not create:
+        return None
+
+    target = None
+    for col in range(PERF_FIRST_EVENT_COL, len(row1) + 1):
+        if not (row1[col - 1] or "").strip():
+            target = col
+            break
+    if target is None:
+        target = max(len(row1) + 1, PERF_FIRST_EVENT_COL)
+    ws.update_cell(PERF_THREAD_ROW, target, str(thread_id))
+    if event_name:
+        ws.update_cell(PERF_EVENT_ROW, target, event_name)
+    return target
+
+
+def get_perf_attendees(col):
+    """[(member_row, name, total, marked_bool), ...] for a PERF event column.
+
+    Members are read from col A (the admin pre-fills the roster). Sorted by the
+    Tabulation count (col B) descending, like the regular-training view.
+    """
+    ws = get_perf_tab_ws()
+    values = ws.get_all_values()
+    out = []
+    for r in range(PERF_FIRST_MEMBER_ROW, len(values) + 1):
+        row = values[r - 1]
+        name = (row[PERF_NAME_COL - 1] if len(row) >= PERF_NAME_COL else "").strip()
+        if not name:
+            continue
+        total_raw = (row[PERF_TOTAL_COL - 1] if len(row) >= PERF_TOTAL_COL else "").strip()
+        try:
+            total = int(total_raw)
+        except ValueError:
+            total = 0
+        marked = len(row) >= col and (row[col - 1] or "").strip() == "1"
+        out.append((r, name, total, marked))
+    out.sort(key=lambda x: (-x[2], x[1].lower()))
+    return out
+
+
+def commit_perf_column(col, marks_by_row: dict):
+    """Batch-write a full PERF event column. Mirrors commit_attendance_column;
+    the Tabulation column (B) is a sheet formula and is never written."""
+    from gspread.utils import rowcol_to_a1
+
+    ws = get_perf_tab_ws()
+    values = ws.get_all_values()
+    last_row = len(values)
+    if last_row < PERF_FIRST_MEMBER_ROW:
+        return
+
+    col_cells = []
+    for r in range(PERF_FIRST_MEMBER_ROW, last_row + 1):
+        row = values[r - 1]
+        marked = marks_by_row.get(r)
+        if marked is None:
+            marked = len(row) >= col and (row[col - 1] or "").strip() == "1"
+        col_cells.append(["1" if marked else ""])
+
+    c_start = rowcol_to_a1(PERF_FIRST_MEMBER_ROW, col)
+    c_end = rowcol_to_a1(last_row, col)
+    ws.batch_update([
+        {"range": f"{c_start}:{c_end}", "values": col_cells},
+    ], value_input_option="USER_ENTERED")
+
 
 def append_standard_topic_to_sheet(tid, name, rules_string):
     """Adds a new standard topic row to the 'STANDARD TOPIC Rules' tab."""

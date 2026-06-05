@@ -118,12 +118,16 @@ async def send_interest_poll(bot, chat_id, thread_id, sheet):
 
 
 async def auto_poll_check(context: ContextTypes.DEFAULT_TYPE):
-    """Daily job (runs 20:00 SGT). Sends a training poll for any date defined in
-    the Attendance sheet that is exactly 2 days away and not yet polled.
+    """Daily job (runs 09:00 SGT). Sends a training poll for any date defined in
+    the Attendance sheet that is **4 days away or sooner** (but not in the past)
+    and not yet polled.
 
-    For Tuesday training this fires the poll on Sunday 8pm. The poll id is written
-    into that date's column (row 1), and a reminder is scheduled for 10pm the day
-    before training.
+    For Tuesday training this normally fires the poll on the previous Friday 9am.
+    Using "≤ 4 days" rather than "exactly 4 days" means a date that gets moved
+    *inside* the 4-day window — e.g. the admin edits the sheet to bring a date
+    from 7 days to 1 day away — is still caught on the next daily run instead of
+    being skipped forever. The poll id is written into that date's column (row 1),
+    and a reminder is scheduled for 10pm the day before training.
     """
     from datetime import datetime, timedelta, time as dtime
     from config import (CHAT_ID, ATT_FIRST_DATE_COL, ATT_POLL_ROW, ATT_DATE_ROW)
@@ -148,7 +152,11 @@ async def auto_poll_check(context: ContextTypes.DEFAULT_TYPE):
             continue
 
         already_polled = col - 1 < len(row1) and (row1[col - 1] or "").strip()
-        if d - today != timedelta(days=2) or already_polled:
+        # Poll when the date is 4 days away or sooner (down to today), but never
+        # for past dates or dates already polled. "≤ 4 days" (instead of "== 4")
+        # catches dates moved inside the window by a manual sheet edit.
+        days_away = (d - today).days
+        if already_polled or not (0 <= days_away <= 4):
             continue
 
         try:

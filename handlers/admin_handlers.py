@@ -34,21 +34,73 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @admin_only
 async def thread_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /threadid command safely."""
+    """🧠 COMPREHENSIVE DIRECTORY INDEXER: Maps out all available forum channels
+
+    grouped beautifully into performance and non-performance layout segments.
+    """
     if update.effective_chat.type != "private":
-        return # 🤐 TOTAL PASSIVITY: No action and no deletion if typed inside a group topic thread channel
+        return  # 🤐 Stay completely passive inside public group topic chats
 
-    # Only verified administrators can use it inside private DMs
-    is_approved_admin = False
-    current_uid = update.effective_user.id
-    if isinstance(ADMIN_DM_USER_IDS, dict):
-        if current_uid in ADMIN_DM_USER_IDS or str(current_uid) in ADMIN_DM_USER_IDS: is_approved_admin = True
-    elif isinstance(ADMIN_DM_USER_IDS, (list, set)) and current_uid in ADMIN_DM_USER_IDS:
-        is_approved_admin = True
+    status_msg = await update.effective_message.reply_text("⏳ Compiling live workspace forum index...")
+    
+    try:
+        # 1. Fetch Performance Records directly from cache ledger tracking
+        sheet = get_gspread_sheet()
+        records = sheet.get_all_records()
         
-    if is_approved_admin:
-        await update.effective_message.reply_text("❗ Use `threadid` or `threads` inside our private administrative dashboard to print data directory grids.")
+        chart_lines = ["🧵 *NTU Festive Drums — Forum Directory Chart*\n"]
+        chart_lines.append("• 0 | **General Topic (Main Channel)**\n")
 
+        # 2. Compile Performance List segment
+        chart_lines.append("🎭 *Performance Thread IDs*")
+        if records:
+            perf_count = 0
+            for row in records:
+                tid = row.get("THREAD ID")
+                if str(tid).isdigit():
+                    name = row.get("EVENT NAME", "Unnamed Event")
+                    status = row.get("STATUS", "PENDING").strip() or "PENDING"
+                    chart_lines.append(f"• {tid} | *{name}* ({status})")
+                    perf_count += 1
+            if perf_count == 0:
+                chart_lines.append("  _(No performance topics listed)_")
+        else:
+            chart_lines.append("  _(No performance topics listed)_")
+
+        chart_lines.append("") # Spacer line breakout block
+
+        # 3. Compile Non-Performance List segment pulling name fields from OTHERS tab cache
+        chart_lines.append("☕️ *Non-Performance Thread IDs*")
+        try:
+            cached_others = []
+            # Read from the active global storage layout row structures matching your friend's cache
+            from services.google_sheets import get_cached_values
+            others_rows = get_cached_values(tab_name="OTHERS")
+            
+            if others_rows:
+                for o_row in others_rows:
+                    if o_row and str(o_row[0]).isdigit():
+                        o_tid = int(o_row[0])
+                        # Read index column 1 for the custom string title given to the sub-room
+                        o_name = o_row[1].strip() if len(o_row) > 1 and o_row[1] else "Bonding/Misc Thread"
+                        cached_others.append(f"• {o_tid} | *{o_name}*")
+            
+            if cached_others:
+                chart_lines.extend(cached_others)
+            else:
+                chart_lines.append("  _(No non-performance topics listed)_")
+                
+        except Exception as cache_err:
+            print(f"[WARN] Failed to read sub-tab parameters inside map: {cache_err}")
+            chart_lines.append("  _(No non-performance topics listed)_")
+
+        # Join text parameters together and print update
+        final_text = "\n".join(chart_lines)
+        await status_msg.edit_text(final_text, parse_mode="Markdown")
+
+    except Exception as e:
+        await status_msg.edit_text(f"❌ Failed to parse data directory channels: {str(e)}", parse_mode="Markdown")
+        
 def _extract_first_date_object(date_cell_text: str) -> datetime | None:
     """Helper parser to safely read the earliest date entry from multi-line text cells."""
     if not date_cell_text or not date_cell_text.strip():

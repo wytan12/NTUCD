@@ -5,10 +5,7 @@ import pytz
 # BOT_TOKEN = os.environ.get("BOT_TOKEN")
 # GOOGLE_CREDENTIALS_JSON = os.environ.get("GOOGLE_CREDENTIALS_JSON")
 
-BOT_TOKEN = ""
-GOOGLE_CREDENTIALS_JSON = {
-  
-}
+
 
 # Google Sheets Configuration
 SHEET_NAME = "NTUFD AY26/27 Timeline (Tele Bot Debug)"
@@ -27,6 +24,22 @@ ATT_FIRST_DATE_COL = 4    # D
 ATT_POLL_ROW = 1
 ATT_DATE_ROW = 2
 ATT_FIRST_MEMBER_ROW = 3
+
+# --- PERF TABULATION tab layout (performance-event attendance) ---
+# Same grid shape as the Attendance tab, but each event column is keyed by the
+# performance topic's THREAD ID (row 1) instead of a poll id, and row 2 holds the
+# EVENT NAME. No training dates, no auto-poll, no modify-date here.
+# Col A = member nickname (admin pre-fills the roster), Col B = Tabulation
+# (sheet formula, bot never writes), Col C = labels, Cols D+ = one event each.
+PERF_TAB_NAME = "PERF TABULATION"
+PERF_NAME_COL = 1          # A
+PERF_TOTAL_COL = 2         # B
+PERF_LABEL_COL = 3         # C
+PERF_FIRST_EVENT_COL = 4   # D
+PERF_THREAD_ROW = 1        # row 1: thread id per event column
+PERF_EVENT_ROW = 2         # row 2: event name per event column
+PERF_FIRST_MEMBER_ROW = 3
+
 WELCOME_TEA_SHEET = "NTUCD Welcome Tea Registration 2025 (Responses)"
 WELCOME_TEA_TAB = "Form Responses 1"
 

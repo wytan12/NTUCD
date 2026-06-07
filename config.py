@@ -6,7 +6,6 @@ import pytz
 # GOOGLE_CREDENTIALS_JSON = os.environ.get("GOOGLE_CREDENTIALS_JSON")
 
 
-
 # Google Sheets Configuration
 SHEET_NAME = "NTUFD AY26/27 Timeline (Tele Bot Debug)"
 SHEET_TAB_NAME = "PERF"

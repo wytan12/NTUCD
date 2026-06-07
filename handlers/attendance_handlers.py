@@ -264,8 +264,9 @@ async def attendance_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         context.user_data["attd_marks"] = {r: m for r, _n, _t, m in attendees}
 
         await query.edit_message_text(
-            f"📅 *{label}* — tap to toggle, then CONFIRM.\n"
-            "✅ = present · ⬜ = absent (sorted by attendance).",
+            f"📅 *{label}* — tap to toggle, then CONFIRM.\n\n"
+            "✅ = present \n"
+            "⬜ = absent",
             reply_markup=_render_attendance_keyboard(context),
             parse_mode="Markdown",
         )
@@ -494,6 +495,7 @@ async def handle_moddate_text(update: Update, context: ContextTypes.DEFAULT_TYPE
             parse_mode="Markdown",
         )
         return True
+    new_str = d.strftime("%d %b %Y")
     context.user_data["attd_moddate_new"] = new_str
     old_label = context.user_data.get("attd_moddate_label", "")
     keyboard = InlineKeyboardMarkup([

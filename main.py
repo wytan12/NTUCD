@@ -20,7 +20,7 @@ from handlers.attendance_handlers import attendance_callback
 from handlers.verification_handlers import start_verification, handle_matric, join_request_handler
 from handlers.modify_handlers import start_modify, get_modify_field_callback
 from handlers.modify_handlers import handle_modify_status_selection, handle_modify_date_selection
-from handlers.conversation_handlers import confirmation, confirmation_callback, final_date_selection, topic_type_selection, parse_perf_input, cancel
+from handlers.conversation_handlers import final_date_selection, topic_type_selection, parse_perf_input, cancel
 from handlers.member_handlers import handle_member_status, handle_new_member
 from handlers.private_handlers import handle_confirm_new_perf, handle_dashboard_refresh
 from services.google_sheets import get_gspread_sheet
@@ -99,7 +99,8 @@ def main():
     conv_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(topic_type_selection, pattern="^topic_type\\|")],
         states={
-            DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, parse_perf_input)],
+            # Remove & ~filters.COMMAND so the conversation handler captures slash commands!
+            DATE: [MessageHandler(filters.TEXT, parse_perf_input)], 
         },
         fallbacks=[],
     )
@@ -119,9 +120,7 @@ def main():
     app.add_handler(CommandHandler("remind", remind_command))
     app.add_handler(CommandHandler("testremind", manual_test_reminder_trigger))
     app.add_handler(CommandHandler("modify", start_modify))
-    app.add_handler(CommandHandler("confirmation", confirmation))  
     app.add_handler(conv_handler)
-    app.add_handler(CallbackQueryHandler(confirmation_callback, pattern="^CONFIRM\\|"))
     app.add_handler(CallbackQueryHandler(final_date_selection, pattern="^FINALDATE\\|"))
     app.add_handler(CallbackQueryHandler(get_modify_field_callback, pattern="^MODIFY\\|"))
     app.add_handler(CallbackQueryHandler(handle_modify_status_selection, pattern="^modify_status_selected\\|"))
@@ -142,16 +141,29 @@ def main():
 
     print("Bot is running...")
     
+    # 🛠️ UNIFIED REBOOT CACHE LOADER: Synchronizes all valid temporary threads on boot
     try:
-        print("Loading OTHERS List from Google Sheets...")
+        print("📥 Synchronizing active forum directories...")
+        from utils.constants import initialized_topics
+        
+        # Pull and cache miscellaneous event thread IDs from OTHERS sheet
         others_sheet = get_gspread_sheet(sheet_name=SHEET_NAME, tab_name="OTHERS")
-        print("successfully got OTHERS List sheet")
-        rows = others_sheet.col_values(1)
-        print(f"[DEBUG] OTHERS List rows: {rows}")
-        OTHERS_THREAD_IDS.update({int(r.strip()) for r in rows if r.strip().isdigit()})
-        print(f"[INFO] Loaded {len(OTHERS_THREAD_IDS)} OTHERS thread IDs.")
+        others_ids = others_sheet.col_values(1)
+        for tid in others_ids:
+            if tid.strip().isdigit():
+                initialized_topics.add(int(tid.strip()))
+                
+        # Pull and cache performance event thread IDs from PERF sheet
+        perf_sheet = get_gspread_sheet(sheet_name=SHEET_NAME, tab_name="PERF")
+        perf_records = perf_sheet.get_all_records()
+        for row in perf_records:
+            p_tid = row.get("THREAD ID")
+            if str(p_tid).isdigit():
+                initialized_topics.add(int(p_tid))
+                
+        print(f"✅ Framework Online! Cached {len(initialized_topics)} verified event threads.")
     except Exception as e:
-        print(f"[ERROR] Failed to load OTHERS List: {e}")
+        print(f"❌ Critical error sync failed during framework boot: {e}")
     
     # --- 3. Schedule daily auto-poll check (09:00 SGT) ---
     try:

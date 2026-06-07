@@ -151,7 +151,7 @@ async def get_modify_field_callback(update: Update, context: ContextTypes.DEFAUL
             [InlineKeyboardButton("❌ REJECTED", callback_data="modify_status_selected|REJECTED")],
             [InlineKeyboardButton("⏳ PENDING (Reset)", callback_data="modify_status_selected|PENDING")],
             # Uses routing shortcut directly to jump backward easily
-            [InlineKeyboardButton("↩️ Back to Fields Menu", callback_data=f"MODIFY|BACK_TO_MENU|{thread_id}")],
+            [InlineKeyboardButton("🔙 Back to Fields Menu", callback_data=f"MODIFY|BACK_TO_MENU|{thread_id}")],
         ]
         await context.bot.send_message(
             chat_id=query.from_user.id,
@@ -168,7 +168,7 @@ async def get_modify_field_callback(update: Update, context: ContextTypes.DEFAUL
         buttons = [
             [InlineKeyboardButton("🎭 EXT (External)", callback_data="modify_type_selected|EXT")],
             [InlineKeyboardButton("🏠 INT (Internal)", callback_data="modify_type_selected|INT")],
-            [InlineKeyboardButton("↩️ Back to Fields Menu", callback_data=f"MODIFY|BACK_TO_MENU|{thread_id}")],
+            [InlineKeyboardButton("🔙 Back to Fields Menu", callback_data=f"MODIFY|BACK_TO_MENU|{thread_id}")],
         ]
         await context.bot.send_message(
             chat_id=query.from_user.id,
@@ -180,8 +180,8 @@ async def get_modify_field_callback(update: Update, context: ContextTypes.DEFAUL
 
     # 🛠️ UPGRADED UI KEYBOARD: Added dual back and completely cancel button navigation layout lines
     escape_keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("↩️ Back to Fields Menu", callback_data=f"MODIFY|BACK_TO_MENU|{thread_id}")],
-        [InlineKeyboardButton("❌ Cancel Completely", callback_data="MODIFY|CANCEL|0")]
+        [InlineKeyboardButton("🔙 Back to Fields Menu", callback_data=f"MODIFY|BACK_TO_MENU|{thread_id}")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="MODIFY|CANCEL|0")]
     ])
 
     if field == "REHEARSAL DATE | TIME":
@@ -260,8 +260,8 @@ async def apply_modify_value(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 except Exception: pass
     except ValueError as exc:
         escape_keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("↩️ Back to Fields Menu", callback_data=f"MODIFY|BACK_TO_MENU|{thread_id}")],
-            [InlineKeyboardButton("❌ Cancel Completely", callback_data="MODIFY|CANCEL|0")]
+            [InlineKeyboardButton("🔙 Back to Fields Menu", callback_data=f"MODIFY|BACK_TO_MENU|{thread_id}")],
+            [InlineKeyboardButton("❌ Cancel", callback_data="MODIFY|CANCEL|0")]
         ])
         error_msg = await context.bot.send_message(
             chat_id=update.effective_chat.id, 

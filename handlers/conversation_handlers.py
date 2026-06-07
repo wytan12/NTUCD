@@ -62,10 +62,12 @@ async def topic_type_selection(update: Update, context: ContextTypes.DEFAULT_TYP
 
     elif selection == "OTHERS":
         append_to_others_list(thread_id)
+        
+        # 🛠️ DYNAMIC RAM SYNCHRONIZATION: Insert this exact line right here!
+        initialized_topics.add(thread_id)
 
     await query.message.edit_text(f"Topic marked as {selection}. No further action.")
     return ConversationHandler.END
-
 
 async def parse_perf_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Parse the free-text performance details and write a new row to the sheet.
@@ -179,145 +181,6 @@ async def parse_perf_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     return ConversationHandler.END
-
-
-async def confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Initiate the ACCEPT/REJECT confirmation flow for the current topic thread.
-
-    Must be run inside a topic thread.  Aborts if the performance already has
-    a status set.  Sends an inline keyboard (ACCEPT / REJECT / CANCEL) and
-    stores the prompt message ID so it can be cleaned up later.
-    """
-    msg = update.effective_message
-    chat = update.effective_chat
-
-    if not msg.is_topic_message:
-        return await msg.reply_text("⛔ This command must be used inside a topic thread.")
-
-    thread_id = msg.message_thread_id
-    if not await is_admin(update, context):
-        return await msg.reply_text("⛔ Only admins can use this command.")
-
-    try:
-        await msg.delete()
-    except Exception:
-        pass
-
-    sheet = get_gspread_sheet()
-    records = sheet.get_all_records()
-    row_number, row_data = None, None
-    for idx, row in enumerate(records):
-        if str(row["THREAD ID"]) == str(thread_id):
-            row_number = idx + 2
-            row_data = row
-            break
-
-    if not row_data:
-        return await msg.reply_text("❌ This thread is not registered.")
-
-    if row_data["STATUS"]:
-        return await msg.reply_text(
-            f"❌ This performance is already marked as `{row_data['STATUS']}`.",
-            parse_mode="Markdown"
-        )
-
-    keyboard = [
-        [InlineKeyboardButton("✅ ACCEPT", callback_data=f"CONFIRM|{thread_id}|ACCEPT")],
-        [InlineKeyboardButton("❌ REJECT", callback_data=f"CONFIRM|{thread_id}|REJECT")],
-        [InlineKeyboardButton("🚫 CANCEL", callback_data=f"CONFIRM|{thread_id}|CANCEL")]
-    ]
-    prompt = await chat.send_message(
-        "🎯 Is this performance *ACCEPTED* or *REJECTED*?",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        message_thread_id=thread_id
-    )
-    context.chat_data[f"confirm_prompt_{thread_id}"] = prompt.message_id
-
-
-async def confirmation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Process the ACCEPT / REJECT / CANCEL button from the confirmation prompt.
-
-    ACCEPT: writes ACCEPTED to the sheet and refreshes the pinned summary.
-    REJECT: writes REJECTED to the sheet and posts a notice. The topic is NOT
-            closed or deleted — the bot never closes a topic on rejection.
-    """
-    query = update.callback_query
-
-    # 🛡️ These buttons live in a public group topic — only group admins may act.
-    if not await is_admin(update, context):
-        await query.answer("⛔ Only admins can do this.", show_alert=True)
-        return
-
-    await query.answer()
-
-    parts = query.data.split("|")
-    if len(parts) != 3:
-        return
-    _, thread_id, action = parts
-    thread_id = int(thread_id)
-
-    msg_id = context.chat_data.pop(f"confirm_prompt_{thread_id}", None)
-    if msg_id:
-        try:
-            await context.bot.delete_message(
-                chat_id=query.message.chat.id,
-                message_id=msg_id
-            )
-        except Exception:
-            pass
-
-    if action == "CANCEL":
-        return
-
-    sheet = get_gspread_sheet()
-    records = sheet.get_all_records()
-    row_number, row_data = None, None
-    for idx, row in enumerate(records):
-        if str(row["THREAD ID"]) == str(thread_id):
-            row_number = idx + 2
-            row_data = row
-            break
-    if not row_data:
-        return
-
-    status_col = SHEET_COLUMNS.index("STATUS") + 1
-
-    if action == "REJECT":
-        sheet.update_cell(row_number, status_col, "REJECTED")
-        invalidate_sheet_cache()
-        await query.message.chat.send_message(
-            "❌ Performance rejected.",
-            message_thread_id=thread_id
-        )
-        return
-
-    if action == "ACCEPT":
-        sheet.update_cell(row_number, status_col, "ACCEPTED")
-        invalidate_sheet_cache()
-
-        group_chat_data_cache = context.application.bot_data.setdefault("group_chat_data", {})
-        group_chat_data = group_chat_data_cache.setdefault(CHAT_ID, {})
-
-        await publish_performance_summary(
-            bot=context.bot,
-            chat_data_store=group_chat_data,
-            sheet=sheet,
-            chat_id=CHAT_ID,
-            thread_id=thread_id,
-            event_name=row_data.get("EVENT NAME", ""),
-            rehearsal_date=row_data.get("REHEARSAL DATE | TIME", ""),
-            perf_date=row_data.get("PERF DATE | TIME", ""),
-            location=row_data.get("LOCATION", ""),
-            other_info=row_data.get("OTHER INFO", ""),
-        )
-
-        await query.message.chat.send_message(
-            "✅ Performance *accepted*! Summary has been updated.",
-            parse_mode="Markdown",
-            message_thread_id=thread_id
-        )
-
 
 async def final_date_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Stub — date selection is no longer part of the confirmation flow.

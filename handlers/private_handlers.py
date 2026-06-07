@@ -105,8 +105,8 @@ def _get_back_keyboard(field_to_clear: str | None) -> InlineKeyboardMarkup:
     """Generate layout rows allowing users to step backward configuration states securely."""
     buttons = []
     if field_to_clear:
-        buttons.append([InlineKeyboardButton("↩️ Edit Previous Step", callback_data=f"PERF_RESET|{field_to_clear}")])
-    buttons.append([InlineKeyboardButton("❌ Cancel Entire Flow", callback_data="CANCEL_NEW_PERF")])
+        buttons.append([InlineKeyboardButton("🔙 Edit Previous Step", callback_data=f"PERF_RESET|{field_to_clear}")])
+    buttons.append([InlineKeyboardButton("❌ Cancel Flow", callback_data="CANCEL_NEW_PERF")])
     return InlineKeyboardMarkup(buttons)
 
 async def _render_step(message, text: str, reply_markup=None):
@@ -127,12 +127,12 @@ async def _show_perf_summary(update: Update, context: ContextTypes.DEFAULT_TYPE)
     preview = f"🆕 *Confirm New Performance Topic?*\nTitle: `{topic_title}`\n\n{summary}"
     
     keyboard = [
-        [InlineKeyboardButton("✅ CREATE & PUBLISH", callback_data="CONFIRM_NEW_PERF")],
+        [InlineKeyboardButton("✅ Create & Publish", callback_data="CONFIRM_NEW_PERF")],
         [InlineKeyboardButton("✏️ Edit Event Type", callback_data="PERF_RESET|temp_event_type")],
         [InlineKeyboardButton("✏️ Edit Event Name", callback_data="PERF_RESET|temp_event_name")],
         [InlineKeyboardButton("✏️ Edit Rehearsal Dates", callback_data="PERF_RESET|temp_rehearsal")],
         [InlineKeyboardButton("✏️ Edit Perf Dates", callback_data="PERF_RESET|temp_perf_date")],
-        [InlineKeyboardButton("❌ CANCEL FLOW", callback_data="CANCEL_NEW_PERF")],
+        [InlineKeyboardButton("❌ Cancel Flow", callback_data="CANCEL_NEW_PERF")],
     ]
     
     msg = await update.effective_message.reply_text(
@@ -257,6 +257,22 @@ async def handle_private_command(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     text = message.text.strip()
+
+    # 🚨 THE STRICT MENU-COMMAND WHITELIST: Define your actual clickable commands
+    OFFICIAL_MENU_COMMANDS = {
+        "/start", "/modify", "/list", "/attd", "/attendance", 
+        "/announce", "/remind", "/testremind", "/threadid", "/cancel"
+    }
+
+    # Only cancel if the message is exactly one of your registered dashboard buttons
+    if text.lower() in OFFICIAL_MENU_COMMANDS:
+        if context.user_data.get("dm_state") is not None or context.user_data.get("waiting_announcement_text") is not None or context.user_data.get("modify_field") is not None:
+            context.user_data.clear() # 🧼 Wipes the active session parameters cleanly
+            await message.reply_text(
+                "🛑 **Wizard Cancelled**\n"
+                "Your active configuration flow was terminated because an official menu shortcut option was clicked.",
+                parse_mode="Markdown"
+            )
     command, thread_token, payload = _parse_command_payload(text)
 
     # 🧠 ATTENDANCE DATE-MODIFY TEXT CAPTURE: if an attd date change is awaiting a
@@ -376,7 +392,7 @@ async def handle_private_command(update: Update, context: ContextTypes.DEFAULT_T
         keyboard = [
             [InlineKeyboardButton("⏭ Skip (No Additional Info)", callback_data="SKIP_PERF_FIELD|other_info")],
             [InlineKeyboardButton("↩️ Edit Location", callback_data="PERF_RESET|temp_location")],
-            [InlineKeyboardButton("❌ Cancel Entire Flow", callback_data="CANCEL_NEW_PERF")]
+            [InlineKeyboardButton("❌ Cancel Flow", callback_data="CANCEL_NEW_PERF")]
         ]
         await _render_step(message, prompt, InlineKeyboardMarkup(keyboard))
         return
@@ -391,8 +407,8 @@ async def handle_private_command(update: Update, context: ContextTypes.DEFAULT_T
         context.user_data["temp_title"] = text
         if context.user_data.get("temp_type") == "OTHERS":
             keyboard = [
-                [InlineKeyboardButton("✅ CREATE OTHERS TOPIC", callback_data="CONFIRM_NEW_OTHERS")],
-                [InlineKeyboardButton("❌ CANCEL", callback_data="CANCEL_NEW_PERF")],
+                [InlineKeyboardButton("✅ Create Others Topic", callback_data="CONFIRM_NEW_OTHERS")],
+                [InlineKeyboardButton("❌ Cancel", callback_data="CANCEL_NEW_PERF")],
             ]
             await message.reply_text(f"Confirm creating **OTHERS** topic: `{text}`?", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
             context.user_data["dm_state"] = None
@@ -558,8 +574,8 @@ async def handle_confirm_new_perf(update: Update, context: ContextTypes.DEFAULT_
         
         # ✅ FIXED TYPO: Changed InlineKeyboardMarkup to InlineKeyboardMarkup
         escape_keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("↩️ Back to Topics Menu", callback_data="ANNOUNCE_BACK_MAPPED")],
-            [InlineKeyboardButton("❌ Cancel Completely", callback_data="CANCEL_NEW_PERF")]
+            [InlineKeyboardButton("🔙 Back to Topics Menu", callback_data="ANNOUNCE_BACK_MAPPED")],
+            [InlineKeyboardButton("❌ Cancel", callback_data="CANCEL_NEW_PERF")]
         ])
         
         await query.edit_message_text(
@@ -606,7 +622,7 @@ async def handle_confirm_new_perf(update: Update, context: ContextTypes.DEFAULT_
             context.user_data["dm_state"] = target_state
             if field_to_clear == "temp_event_type":
                 keyboard = [[InlineKeyboardButton(label, callback_data=f"PERF_EVENT_TYPE|{value}")] for label, value in PERF_EVENT_TYPES]
-                keyboard.append([InlineKeyboardButton("❌ CANCEL", callback_data="CANCEL_NEW_PERF")])
+                keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="CANCEL_NEW_PERF")])
                 await query.edit_message_text(text_prompt, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
                 return
             tracker = _build_progress_tracker(context.user_data, target_state)
@@ -623,7 +639,7 @@ async def handle_confirm_new_perf(update: Update, context: ContextTypes.DEFAULT_
         context.user_data["temp_type"] = selected_type
         if selected_type == "PERF":
             keyboard = [[InlineKeyboardButton(label, callback_data=f"PERF_EVENT_TYPE|{value}")] for label, value in PERF_EVENT_TYPES]
-            keyboard.append([InlineKeyboardButton("❌ CANCEL", callback_data="CANCEL_NEW_PERF")])
+            keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="CANCEL_NEW_PERF")])
             await query.edit_message_text("🎭 *New PERF Topic*\n\n*Step 1/6: Event Type*\nIs this External or Internal?", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
             return
         context.user_data["dm_state"] = WAITING_TOPIC_TITLE

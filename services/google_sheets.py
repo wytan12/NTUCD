@@ -22,7 +22,11 @@ def _get_client():
     if _client is None:
         scope = ["https://spreadsheets.google.com/feeds",
                  "https://www.googleapis.com/auth/drive"]
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(GOOGLE_CREDENTIALS_JSON, scope)
+        # for heroku 
+        creds_dict = json.loads(GOOGLE_CREDENTIALS_JSON)
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        ## for local testing 
+        # creds = ServiceAccountCredentials.from_json_keyfile_dict(GOOGLE_CREDENTIALS_JSON, scope)
         _client = gspread.authorize(creds)
     return _client
 

@@ -50,8 +50,8 @@ sg_tz = pytz.timezone("Asia/Singapore")
 
 # Thread Configuration
 GENERAL_TOPIC_ID = None
-# TOPIC_VOTING_ID = 4  # Main group voting thread ID
-TOPIC_VOTING_ID = 5   # Debug group voting thread ID
+TOPIC_VOTING_ID = 4  # Main group voting thread ID
+# TOPIC_VOTING_ID = 5   # Debug group voting thread ID
 
 # Threads exempt from /remind and /modify (non-performance threads)
 EXEMPTED_THREAD_IDS = [GENERAL_TOPIC_ID, TOPIC_VOTING_ID]

@@ -81,8 +81,9 @@ def _build_perf_event_list_keyboard(events) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(f"{name} ({present})", callback_data=f"ATTD_PEVT|{tid}")]
         for tid, name, present in events
     ]
-    # THIS DATA MUST MATCH THE HANDLER ABOVE
-    keyboard.append([InlineKeyboardButton("🔙 Back to Performance Topics", callback_data="ATTD_BACK_PERF")])
+    # Back from the event LIST returns to the category menu (the toggle screen's
+    # own back button uses ATTD_BACK_PERF to return here instead).
+    keyboard.append([InlineKeyboardButton("🔙 Back to Category", callback_data="ATTD_HOME")])
     return InlineKeyboardMarkup(keyboard)
 
 # 3. Modify Date Sub-Menu: Keep Back to Training Dates, remove Exit
@@ -127,45 +128,45 @@ def _load_dates(context: ContextTypes.DEFAULT_TYPE, force: bool = False):
     return dates
 
 async def _update_attendance_bubble(query, text, keyboard, context):
-    """The absolute master function for updating the Cockpit."""
-    chat_id = query.message.chat_id
-    msg_id = context.user_data.get("attd_bubble_id")
-    
-    if not msg_id:
-        sent = await query.message.reply_text(text, reply_markup=keyboard, parse_mode="Markdown")
-        context.user_data["attd_bubble_id"] = sent.message_id
-    else:
-        try:
-            await context.bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=msg_id,
-                text=text,
-                reply_markup=keyboard,
-                parse_mode="Markdown"
-            )
-        except Exception as e:
-            # This fallback is critical to prevent crashes
-            print(f"[DEBUG] Edit failed: {e}")
-            sent = await query.message.reply_text(text, reply_markup=keyboard, parse_mode="Markdown")
-            context.user_data["attd_bubble_id"] = sent.message_id
+    """Render into the SINGLE live attendance bubble — never a new message.
 
-async def _show_reg_dates(query, context, force=False):
+    A callback always fires from the currently-visible bubble, so we edit
+    `query.message` in place and keep `attd_bubble_id` in sync with it. A
+    "message is not modified" no-op is swallowed (not turned into a fresh
+    message), so every attendance screen — including the Performance back
+    buttons — stays inside the one dashboard bubble.
+    """
+    context.user_data["attd_bubble_id"] = query.message.message_id
+    try:
+        await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
+    except Exception as e:
+        if "not modified" in str(e).lower():
+            return  # content unchanged — nothing to do, do NOT spawn a new bubble
+        # Last resort: refresh just the buttons in place (still the same message).
+        print(f"[DEBUG] bubble edit failed: {e}")
+        try:
+            await query.edit_message_reply_markup(reply_markup=keyboard)
+        except Exception as e2:
+            print(f"[DEBUG] markup refresh failed: {e2}")
+
+async def _show_reg_dates(query, context, force=False, success_banner: str = ""):
     context.user_data["attd_mode"] = "REG"
     dates = _load_dates(context, force=force)
-    
+    banner = f"{success_banner}\n\n" if success_banner else ""
+
     if not dates:
         await _update_attendance_bubble(
-            query, 
-            "📅 *No polled training dates yet.*", 
-            InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Category", callback_data="ATTD_HOME")]]), 
+            query,
+            banner + "📅 *No polled training dates yet.*",
+            InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Category", callback_data="ATTD_HOME")]]),
             context
         )
         return
 
     await _update_attendance_bubble(
-        query, 
-        "📋 *Mark Attendance [REG]*\nSelect a training date:", 
-        _build_date_list_keyboard(dates), 
+        query,
+        banner + "📋 *Mark Attendance [REG]*\nSelect a training date:",
+        _build_date_list_keyboard(dates),
         context
     )
 
@@ -195,16 +196,33 @@ async def _show_perf_events(query, context: ContextTypes.DEFAULT_TYPE, success_b
 async def start_attendance_modify(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_DM_USER_IDS:
         return
+    old_master = context.user_data.get("master_dash_id")
     _clear(context)
     _clear_moddate(context)
-    
+
+    # Close the previous panel so its sub-section can't be operated anymore.
+    if old_master:
+        try:
+            await context.bot.edit_message_text(
+                chat_id=update.effective_chat.id,
+                message_id=old_master,
+                text="🛑 *This panel has been closed.*\n\nA fresh one is open below.",
+                parse_mode="Markdown",
+                reply_markup=None,
+            )
+        except Exception:
+            pass
+
     # Save the bubble ID immediately
     sent = await update.effective_message.reply_text(
-        "📋 Attendance Cockpit\nSelect a category:", 
-        reply_markup=_build_home_keyboard(), 
+        "📋 Attendance Cockpit\nSelect a category:",
+        reply_markup=_build_home_keyboard(),
         parse_mode="Markdown"
     )
     context.user_data["attd_bubble_id"] = sent.message_id
+    # This new bubble becomes THE live panel — any older dashboard/attendance
+    # bubble is now superseded and will be rejected by the expiry guard below.
+    context.user_data["master_dash_id"] = sent.message_id
 
 
 async def attendance_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -214,19 +232,37 @@ async def attendance_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     
     print(f"[DEBUG] Callback: {data}")
     await query.answer()
-    
-    # Ensure attd_bubble_id is set
-    if not context.user_data.get("attd_bubble_id"):
-        context.user_data["attd_bubble_id"] = query.message.message_id
 
     if update.effective_user.id not in ADMIN_DM_USER_IDS:
         return
 
+    # 🔒 Only the LATEST dashboard / attendance bubble is live. After a fresh
+    # /start (or /attd) `master_dash_id` points at the newest panel, so a click on
+    # any older, superseded bubble is rejected here instead of operating a stale
+    # session. (Matches handle_dashboard_navigation's guard for DASH_VIEW.)
+    active = context.user_data.get("master_dash_id")
+    if active and query.message and query.message.message_id != active:
+        try:
+            await query.message.edit_text(
+                "🛑 *This panel has expired.*\n\n"
+                "You opened a newer dashboard further down the chat — "
+                "please use the latest one (run /start if unsure).",
+                parse_mode="Markdown",
+                reply_markup=None,
+            )
+        except Exception:
+            pass
+        return
+
+    # Ensure attd_bubble_id is set (adopt this live bubble for in-place edits)
+    if not context.user_data.get("attd_bubble_id"):
+        context.user_data["attd_bubble_id"] = query.message.message_id
+
     # --- 1. BACK-BUTTON HANDLERS ---
     if data == "ATTD_BACK_REG":
-        context.user_data["attd_mode"] = "REG" 
         _clear(context)
-        context.user_data["attd_mode"] = "REG" 
+        _clear_moddate(context)  # leaving the modify-date flow: drop any pending date state
+        context.user_data["attd_mode"] = "REG"
         await _show_reg_dates(query, context, force=True)
         return
 
@@ -341,14 +377,13 @@ async def attendance_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             return
         
         if not dates:
-            await _update_attendance_bubble(
-                query, 
-                "📅 No upcoming training dates to modify.", 
-                InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="ATTD_HOME")]]), 
-                context
+            # Show it as a banner on the REG date list rather than a dead-end bubble.
+            await _show_reg_dates(
+                query, context,
+                success_banner="⚠️ *No upcoming training dates to modify.*",
             )
             return
-            
+
         await _update_attendance_bubble(
             query,
             "✏️ *Modify a Training Date*\nSelect the date to change:",
@@ -364,12 +399,17 @@ async def attendance_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         context.user_data["attd_moddate_col"] = col
         context.user_data["attd_moddate_label"] = label
         context.user_data.pop("attd_moddate_new", None)
+        # Show the current date as a tap-to-copy code span, standardised so what
+        # the admin copies is already a valid value to tweak and re-send.
+        d_cur = parse_sheet_date(label)
+        copy_str = d_cur.strftime("%d %b %Y") if d_cur else label
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("🔙 Back", callback_data="ATTD_MODMENU")],
-            [InlineKeyboardButton("❌ CANCEL", callback_data="ATTD_MODDATE_CANCEL")],
+            [InlineKeyboardButton("🔙 Back to Attendance [REG]", callback_data="ATTD_BACK_REG")],
         ])
         await query.edit_message_text(
             f"✏️ Modifying *{label}*.\n\n"
+            f"📋 *Current date (tap to copy, then edit): *\n```\n{copy_str}```\n"
             "Type the *new training date* in standard format — e.g. `12 June`, "
             "`12 Jun`, or `12 June 2026` (not `12/6`).\n\n"
             "⚠️ This column's existing ticks will be cleared. A poll is posted now "
@@ -396,12 +436,11 @@ async def attendance_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         d = parse_sheet_date(new_str)
         today = datetime.now(sg_tz).date()
         if not d or d < today:
-            await query.edit_message_text(
-                f"❌ `{new_str}` is in the past — can't modify a training to a past date.\n"
-                "Run `attd` → Modify a Date again with today or a future date.",
-                parse_mode="Markdown",
-            )
             _clear_moddate(context)
+            await _show_reg_dates(
+                query, context, force=True,
+                success_banner=f"⚠️ *{new_str} is in the past — pick today or a future date.*",
+            )
             return
 
         # Send the poll now when the new date is 4 days away or sooner (down to
@@ -436,12 +475,9 @@ async def attendance_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             tail = "A fresh poll has been posted to the Voting topic (it's within 4 days)."
         else:
             tail = "A poll will be auto-posted when the date is 4 days away."
-        await query.edit_message_text(
-            f"✅ Date changed: *{old_label}* → *{new_str}*.\n"
-            f"The column was reset. {tail}",
-            parse_mode="Markdown",
-        )
         _clear_moddate(context)
+        banner = f"🟢 *Date changed: {old_label} → {new_str}. {tail}*"
+        await _show_reg_dates(query, context, force=True, success_banner=banner)
         return
 
     if data == "ATTD_MODDATE_CANCEL":

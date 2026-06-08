@@ -37,14 +37,17 @@ from utils.constants import (
 
 admin_commands = [
     BotCommand("start", "🚀 Admin DM Dashboard"),
-    BotCommand("new", "📝 Create new topic + sheet entry"),
-    BotCommand("list", "📋 See all thread IDs and events"),
-    BotCommand("modify", "⚙️ Edit a performance details"),
-    BotCommand("attd", "✅ Mark regular-training attendance"),
-    BotCommand("announce", "📢 Broadcast a multi-line format message to any topic"),
-    BotCommand("remind", "🔔 Trigger manual checklist reminder announcement"),
-    BotCommand("threadid", "🧵 Print the entire group topic directory chart"),
-    BotCommand("info", "Preview summary card details in DM")
+    # 🦅 Unified dashboard: every other action lives inside the /start Cockpit, so
+    # the Telegram command menu only advertises /start. (Re-enable any line below
+    # to surface that command in the menu again.)
+    # BotCommand("new", "📝 Create new topic + sheet entry"),
+    # BotCommand("list", "📋 See all thread IDs and events"),
+    # BotCommand("modify", "⚙️ Edit a performance details"),
+    # BotCommand("attd", "✅ Mark regular-training attendance"),
+    # BotCommand("announce", "📢 Broadcast a multi-line format message to any topic"),
+    # BotCommand("remind", "🔔 Trigger manual checklist reminder announcement"),
+    # BotCommand("threadid", "🧵 Print the entire group topic directory chart"),
+    # BotCommand("info", "Preview summary card details in DM")
 ]
 
 async def register_private_admin_menus(application):

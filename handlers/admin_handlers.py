@@ -29,6 +29,23 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     saved_master_id = context.user_data.get("master_dash_id")
     context.user_data.clear()
 
+    # 🛑 Neutralise the PREVIOUS panel so whatever sub-section it was showing can
+    # no longer be operated. Everything runs as one in-place bubble, so the old
+    # master id IS the sub-section the user was on — stripping its keyboard kills
+    # it outright (no reliance on every handler's click-time guard).
+    if saved_master_id:
+        try:
+            await context.bot.edit_message_text(
+                chat_id=update.effective_chat.id,
+                message_id=saved_master_id,
+                text="🛑 *This dashboard has been closed.*\n\n"
+                     "A fresh one is open below — please use that one.",
+                parse_mode="Markdown",
+                reply_markup=None,
+            )
+        except Exception:
+            pass  # old message gone / identical / too old — the click guards still cover it
+
     # 🚀 Send the master cockpit layout and save its ID safely
     msg = await update.message.reply_text(
         DASHBOARD_TEXT,

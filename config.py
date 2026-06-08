@@ -2,9 +2,8 @@ import os
 import pytz
 
 # Bot Configuration
-# BOT_TOKEN = os.environ.get("BOT_TOKEN")
-# GOOGLE_CREDENTIALS_JSON = os.environ.get("GOOGLE_CREDENTIALS_JSON")
-
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+GOOGLE_CREDENTIALS_JSON = os.environ.get("GOOGLE_CREDENTIALS_JSON")
 
 # Google Sheets Configuration
 SHEET_NAME = "NTUFD AY26/27 Timeline (Tele Bot Debug)"
@@ -62,4 +61,4 @@ SHEET_COLUMNS = ["THREAD ID", "EVENT TYPE", "EVENT NAME", "REHEARSAL DATE | TIME
                  "OTHER INFO", "REMUNATION", "STATUS", "SUMMARY MSG ID"]
 
 # Telegram user IDs allowed to control the bot via private DM (WY, WF, PH, MN, JURI)
-ADMIN_DM_USER_IDS = {}
+ADMIN_DM_USER_IDS = {1505249420, 903855240, 362804048}

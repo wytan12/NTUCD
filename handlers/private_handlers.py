@@ -17,48 +17,51 @@ PERF_EVENT_TYPES = [
     ("🏠 INT (Internal)", "INT"),
 ]
 
-# Per-session snapshot keys mirrored in user_data. The shared module cache
-# (services.google_sheets) auto-refreshes via a modifiedTime check, so these are
-# only convenience copies; the dashboard "🔄 Refresh" also force-invalidates the
-# shared cache so the next read re-downloads immediately.
 _DASHBOARD_CACHE_KEYS = (
     "cached_records",
     "attd_dates",
 )
 
 DASHBOARD_TEXT = (
-    "🚀 **Admin DM Dashboard**\n\n"
-    "• `/new` — Create new topic + sheet entry\n"
-    "• `/list` — See all thread IDs and events\n"
-    "• `/modify` — Edit a performance details\n"
-    "• `/attd` — Mark regular-training attendance\n"
-    "• `/announce` — Broadcast a multi-line format message to any topic\n"
-    "• `/remind` — Trigger manual checklist reminder announcement\n"
-    "• `/threadid` — Print the entire group topic directory chart\n"
-    "• `/info <id>` — Preview summary in DM\n\n"
-    "_Lists are cached for instant back-navigation. Tap 🔄 Refresh after editing "
-    "the sheet directly in your browser to force a fresh pull._"
+    "🦅 **NTUFD Master Administration Cockpit**\n\n"
+    "Welcome to the central gateway. Click any option below to manage your data pipelines:\n\n"
+    "• **Create New Topic:** Establish fresh public forum channels.\n"
+    "• **Edit Perf Fields:** Modify cell columns of registered sheet rows.\n"
+    "• **Attendance Portal:** Log regular-training or performance session marks.\n"
+    "• **Performance Ledger:** Review high-level booking verification statuses.\n"
+    "• **Broadcast Message:** Send custom formatted text to any forum thread.\n"
+    "• **Reminder:** Trigger manual checklist announcements into active topics.\n"
+    "• **Forum Thread Index:** View and copy numerical chat topic IDs.\n"
+    "• **Active Member Roster:** Inspect drummer profile seniority logs."
 )
 
 def _dashboard_keyboard() -> InlineKeyboardMarkup:
-    """Inline keyboard for the dashboard — a single refresh control."""
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔄 Refresh Data", callback_data="DASH_REFRESH")]
+        [
+            InlineKeyboardButton("📝 Create New Topic", callback_data="DASH_VIEW|LAUNCH_NEW"),
+            InlineKeyboardButton("⚙️ Edit Perf Fields", callback_data="DASH_VIEW|LAUNCH_MODIFY")
+        ],
+        [
+            InlineKeyboardButton("✅ Attendance Portal", callback_data="DASH_VIEW|LAUNCH_ATTD"),
+            InlineKeyboardButton("📊 Performance Ledger", callback_data="DASH_VIEW|LEDGER")
+        ],
+        [
+            InlineKeyboardButton("📢 Broadcast Message", callback_data="DASH_VIEW|LAUNCH_ANNOUNCE"),
+            InlineKeyboardButton("🔔 Reminder", callback_data="DASH_VIEW|LAUNCH_REMIND")
+        ],
+        [
+            InlineKeyboardButton("🧵 Forum Thread Index", callback_data="DASH_VIEW|THREADS"),
+            InlineKeyboardButton("👥 Active Member Roster", callback_data="DASH_VIEW|MEMBERS")
+        ],
+        [
+            InlineKeyboardButton("🔄 Refresh Master Cache", callback_data="DASH_REFRESH")
+        ]
     ])
 
 def _parse_command_payload(text: str) -> tuple[str, str | None, str]:
-    """Extract the command keyword, thread id token, and remaining payload.
-
-    A command is recognised **only** when the text begins with a leading slash
-    (e.g. `/modify`, `/announce 5 hi`). Plain text with no slash returns an empty
-    command, so it falls through to the multi-step flow state machine (event
-    names, dates, announcement text, …) or is ignored — typing `modify` or
-    `Modify start` will NOT trigger the command.
-    """
     stripped = text.lstrip()
     if not stripped.startswith("/"):
         return "", None, ""
-    # Drop the leading slash, then tokenise the rest.
     stripped = stripped[1:].lstrip()
     if not stripped:
         return "", None, ""
@@ -76,8 +79,7 @@ def _parse_command_payload(text: str) -> tuple[str, str | None, str]:
     payload = remainder[idx:].lstrip("\n\r ")
     return command, thread_token or None, payload
 
-def _build_progress_tracker(ud: dict, current_step: int) -> str:
-    """Compile a dynamic status card tracking what the admin has typed."""
+def _build_progress_tracker(ud: dict) -> str:
     lines = ["📝 *Current Progress Tracker*"]
     if ud.get("temp_event_type"):
         lines.append(f"✅ *Event Type:* {ud['temp_event_type']}")
@@ -102,303 +104,408 @@ def _build_progress_tracker(ud: dict, current_step: int) -> str:
     return "\n".join(lines) + "\n\n"
 
 def _get_back_keyboard(field_to_clear: str | None) -> InlineKeyboardMarkup:
-    """Generate layout rows allowing users to step backward configuration states securely."""
     buttons = []
     if field_to_clear:
         buttons.append([InlineKeyboardButton("🔙 Edit Previous Step", callback_data=f"PERF_RESET|{field_to_clear}")])
-    buttons.append([InlineKeyboardButton("❌ Cancel Flow", callback_data="CANCEL_NEW_PERF")])
+    buttons.append([InlineKeyboardButton("🔙 Back to Type Selection", callback_data="DASH_VIEW|LAUNCH_NEW")])
     return InlineKeyboardMarkup(buttons)
 
-async def _render_step(message, text: str, reply_markup=None):
-    """Utility wrapper to post updates cleanly, preserving conversation context flows."""
-    return await message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+async def _render_step(message, prompt: str, reply_markup: InlineKeyboardMarkup) -> None:
+    from telegram.ext import CallbackContext
+    context = CallbackContext.from_message(message) if hasattr(CallbackContext, "from_message") else None
+    msg = await message.reply_text(prompt, reply_markup=reply_markup, parse_mode="Markdown")
+    if context and hasattr(context, "user_data"):
+        context.user_data["master_dash_id"] = msg.message_id
 
 async def _show_perf_summary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Send final summary dashboard preview containing explicit field controls."""
     ud = context.user_data
+    ud["in_summary_mode"] = True
+
+    event_type = ud.get("temp_event_type", "TBD")
     event_name = ud.get("temp_event_name", "")
     rehearsal = ud.get("temp_rehearsal", "-")
     perf_date = ud.get("temp_perf_date", "")
     location = ud.get("temp_location", "")
-    other_info = ud.get("temp_other_info", "")
+    other_info = ud.get("temp_other_info", "-")
 
-    topic_title = f"PERF - {event_name}"
-    summary = build_performance_summary(event_name, rehearsal, perf_date, location, other_info)
-    preview = f"🆕 *Confirm New Performance Topic?*\nTitle: `{topic_title}`\n\n{summary}"
-    
-    keyboard = [
-        [InlineKeyboardButton("✅ Create & Publish", callback_data="CONFIRM_NEW_PERF")],
-        [InlineKeyboardButton("✏️ Edit Event Type", callback_data="PERF_RESET|temp_event_type")],
-        [InlineKeyboardButton("✏️ Edit Event Name", callback_data="PERF_RESET|temp_event_name")],
-        [InlineKeyboardButton("✏️ Edit Rehearsal Dates", callback_data="PERF_RESET|temp_rehearsal")],
-        [InlineKeyboardButton("✏️ Edit Perf Dates", callback_data="PERF_RESET|temp_perf_date")],
-        [InlineKeyboardButton("❌ Cancel Flow", callback_data="CANCEL_NEW_PERF")],
-    ]
-    
-    msg = await update.effective_message.reply_text(
-        preview, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown"
+    summary_card = build_performance_summary(
+        event_name=event_name, rehearsal_date=rehearsal,
+        perf_date=perf_date, location=location, other_info=other_info
     )
-    context.user_data["final_preview_msg_id"] = msg.message_id
+    
+    prompt_text = (
+        f"📋 **Performance Topic Entry Preview**\n"
+        f"Plss verify all fields details before creating\n\n"
+        f"{summary_card}"
+    )
+    
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✏️ Edit Event Type", callback_data="PERF_RESET|temp_event_type"),
+            InlineKeyboardButton("✏️ Edit Event Name", callback_data="PERF_RESET|temp_event_name")
+        ],
+        [
+            InlineKeyboardButton("✏️ Edit Rehearsal Dates", callback_data="PERF_RESET|temp_rehearsal"),
+            InlineKeyboardButton("✏️ Edit Performance Date", callback_data="PERF_RESET|temp_perf_date")
+        ],
+        [
+            InlineKeyboardButton("✏️ Edit Location", callback_data="PERF_RESET|temp_location"),
+            InlineKeyboardButton("✏️ Edit Other Info", callback_data="PERF_RESET|temp_other_info")
+        ],
+        [
+            InlineKeyboardButton("✅ CONFIRM & PUBLISH FORUM TOPIC", callback_data="CONFIRM_NEW_PERF")
+        ],
+        [
+            InlineKeyboardButton("🔙 Back to Type Selection", callback_data="DASH_VIEW|LAUNCH_NEW")
+        ]
+    ])
+    
+    query = update.callback_query
+    active_dash_id = ud.get("master_dash_id")
+    
+    if query:
+        await query.edit_message_text(prompt_text, reply_markup=keyboard, parse_mode="Markdown")
+    elif active_dash_id:
+        try:
+            await context.bot.edit_message_text(
+                chat_id=update.effective_chat.id, message_id=active_dash_id,
+                text=prompt_text, reply_markup=keyboard, parse_mode="Markdown"
+            )
+        except Exception:
+            msg = await context.bot.send_message(chat_id=update.effective_chat.id, text=prompt_text, reply_markup=keyboard, parse_mode="Markdown")
+            ud["master_dash_id"] = msg.message_id
+    else:
+        msg = await context.bot.send_message(chat_id=update.effective_chat.id, text=prompt_text, reply_markup=keyboard, parse_mode="Markdown")
+        ud["master_dash_id"] = msg.message_id
 
 async def initiate_announce_portal_via_dm(update: Update, context: ContextTypes.DEFAULT_TYPE, incoming_query=None) -> None:
-    """Reusable interactive matrix builder for announcements using absolute local memory caching profiles."""
     target_chat = update.effective_user
-
     status_loading = None
     if incoming_query is None:
         status_loading = await context.bot.send_message(chat_id=target_chat.id, text="⏳ Generating channel communication routing links...")
 
-    # 🧠 SMART CACHE: get_cached_records / get_cached_values do a tiny modifiedTime
-    # check — they re-download only when the sheet actually changed.
     records = get_cached_records()
     cached_others = []
     try:
         for o_row in get_cached_values(tab_name="OTHERS"):
             if o_row and str(o_row[0]).isdigit():
                 cached_others.append((o_row[0], o_row[1] if len(o_row) > 1 and o_row[1] else "Others Thread"))
-    except Exception:
-        cached_others = []
+    except Exception: pass
 
     buttons = [[InlineKeyboardButton("💬 General Topic (Main)", callback_data="ANNOUNCE_TARGET|0|General Topic")]]
-    
-    # Render main sheet items directly from local storage rows
     for row in records:
         tid = row.get("THREAD ID")
         if str(tid).isdigit():
             event_name = row.get("EVENT NAME", "Unnamed Event")
             buttons.append([InlineKeyboardButton(f"🎭 {event_name} ({tid})", callback_data=f"ANNOUNCE_TARGET|{tid}|{event_name}")])
             
-    # Render OTHERS items directly from local storage rows
     for o_tid, o_name in cached_others:
         buttons.append([InlineKeyboardButton(f"☕ {o_name} ({o_tid})", callback_data=f"ANNOUNCE_TARGET|{o_tid}|{o_name}")])
 
-    buttons.append([InlineKeyboardButton("❌ Cancel", callback_data="CANCEL_NEW_PERF")])
-    
-    prompt_text = (
-        "📢 *ANNOUNCEMENT Portal*\n"
-        "Please select which TOPIC you want to announce into:"
-    )
+    buttons.append([InlineKeyboardButton("🦅 Exit to Cockpit", callback_data="DASH_VIEW|HOME")])
+    prompt_text = "📢 *ANNOUNCEMENT Portal*\nPlease select which TOPIC you want to announce into:"
     
     if incoming_query:
-        # 🚀 LIGHTNING SPEED: Swapping menus instantly because ALL data paths are now 100% running off memory!
         await incoming_query.edit_message_text(text=prompt_text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
     else:
         if status_loading: await status_loading.delete()
         await context.bot.send_message(chat_id=target_chat.id, text=prompt_text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
 
 async def render_modify_list(update: Update, context: ContextTypes.DEFAULT_TYPE, incoming_query=None) -> None:
-    """Render the PERFORMANCE modification list (first layer of the /modify flow).
-
-    Reused both by the `/modify` command and by the "🔙 Back to List" button on the
-    field-selection menu. Data comes from ``get_cached_records()`` which does a
-    tiny Drive modifiedTime check: it serves the cached rows instantly while the
-    sheet is unchanged, and only re-downloads when the sheet was actually edited.
-    """
     target_chat = update.effective_user
     try:
         status_loading = None
         if incoming_query is None:
             status_loading = await context.bot.send_message(chat_id=target_chat.id, text="⏳ Fetching active performance log...")
+        
         records = get_cached_records()
         context.user_data["cached_records"] = records
+        
         if not records:
             text = "📋 The performance sheet is empty."
-            if incoming_query:
-                await incoming_query.edit_message_text(text)
-            elif status_loading:
-                await status_loading.edit_text(text)
-            else:
-                await context.bot.send_message(chat_id=target_chat.id, text=text)
+            if incoming_query: await incoming_query.edit_message_text(text)
+            elif status_loading: await status_loading.edit_text(text)
             return
+
         buttons = []
         for row in records:
             tid = row.get("THREAD ID")
             if str(tid).isdigit():
                 event_name = row.get("EVENT NAME", "Unnamed Event")
                 buttons.append([InlineKeyboardButton(f"⚙️ {event_name} ({tid})", callback_data=f"LIST_MODIFY|{tid}")])
-        prompt_text = (
-            "🛠 *PERFORMANCE Modification Portal*\n\n"
-            "Which PERFORMANCE topic you would like to modify:"
-        )
+        
+        buttons.append([InlineKeyboardButton("🦅 Exit to Cockpit", callback_data="DASH_VIEW|HOME")])
+        prompt_text = "🛠️ **Performance Modification Portal**\n\nWhich PERFORMANCE topic would you like to modify:"
         markup = InlineKeyboardMarkup(buttons)
+        
         if incoming_query:
             await incoming_query.edit_message_text(prompt_text, reply_markup=markup, parse_mode="Markdown")
         else:
-            if status_loading:
-                await status_loading.delete()
+            if status_loading: await status_loading.delete()
             await context.bot.send_message(chat_id=target_chat.id, text=prompt_text, reply_markup=markup, parse_mode="Markdown")
     except Exception as e:
-        err = f"❌ Failed to load modification dashboard menu: {e}"
-        if incoming_query:
-            await incoming_query.edit_message_text(err)
-        else:
-            await context.bot.send_message(chat_id=target_chat.id, text=err)
-
+        print(f"Modify List error: {e}")
 
 async def handle_private_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Main private DM state machine routing engine for administrative accounts."""
     message = update.effective_message
     if not message or not message.text or update.effective_chat.type != "private":
         return
 
-    # Check if user ID belongs to the approved admin set values
     is_approved_admin = False
     current_uid = update.effective_user.id
-    
     if isinstance(ADMIN_DM_USER_IDS, dict):
         for k, v in ADMIN_DM_USER_IDS.items():
             if str(k).isdigit() and int(k) == current_uid: is_approved_admin = True
             if str(v).isdigit() and int(v) == current_uid: is_approved_admin = True
-    elif isinstance(ADMIN_DM_USER_IDS, (list, set)):
-        if current_uid in ADMIN_DM_USER_IDS: is_approved_admin = True
+    elif isinstance(ADMIN_DM_USER_IDS, (list, set)) and current_uid in ADMIN_DM_USER_IDS:
+        is_approved_admin = True
         
     if not is_approved_admin:
-        print(f"[SECURITY] Unauthorized access attempt blocked for user ID: {current_uid}")
         return
 
     text = message.text.strip()
+    OFFICIAL_MENU_COMMANDS = {"/start", "/modify", "/list", "/attd", "/attendance", "/announce", "/remind", "/testremind", "/threadid", "/cancel"}
 
-    # 🚨 THE STRICT MENU-COMMAND WHITELIST: Define your actual clickable commands
-    OFFICIAL_MENU_COMMANDS = {
-        "/start", "/modify", "/list", "/attd", "/attendance", 
-        "/announce", "/remind", "/testremind", "/threadid", "/cancel"
-    }
-
-    # Only cancel if the message is exactly one of your registered dashboard buttons
     if text.lower() in OFFICIAL_MENU_COMMANDS:
         if context.user_data.get("dm_state") is not None or context.user_data.get("waiting_announcement_text") is not None or context.user_data.get("modify_field") is not None:
-            context.user_data.clear() # 🧼 Wipes the active session parameters cleanly
-            await message.reply_text(
-                "🛑 **Wizard Cancelled**\n"
-                "Your active configuration flow was terminated because an official menu shortcut option was clicked.",
-                parse_mode="Markdown"
-            )
-    command, thread_token, payload = _parse_command_payload(text)
-
-    # 🧠 ATTENDANCE DATE-MODIFY TEXT CAPTURE: if an attd date change is awaiting a
-    # typed new date, consume this (non-command) message as that date.
-    if not text.startswith("/"):
-        from handlers.attendance_handlers import handle_moddate_text
-        if await handle_moddate_text(update, context):
+            current_dash_id = context.user_data.get("master_dash_id")
+            context.user_data.clear() 
+            if current_dash_id:
+                context.user_data["master_dash_id"] = current_dash_id
+                try:
+                    await context.bot.edit_message_text(chat_id=message.chat.id, message_id=current_dash_id, text=DASHBOARD_TEXT, reply_markup=_dashboard_keyboard(), parse_mode="Markdown")
+                except Exception: pass
+            await message.reply_text("🛑 **Wizard Cancelled**\nYour active configuration flow was terminated cleanly.", parse_mode="Markdown")
             return
 
-    # 🧠 EMERGENCY TESTREMIND ESCAPE LATCH
+    command, thread_token, payload = _parse_command_payload(text)
+
+    if not text.startswith("/"):
+        from handlers.attendance_handlers import handle_moddate_text
+        if await handle_moddate_text(update, context): return
+
     if command == "testremind":
         context.user_data.pop("modify_field", None)
         from handlers.admin_handlers import execute_manual_test_scan
         await execute_manual_test_scan(update, context)
-        return ConversationHandler.END
+        return
 
-    # 🧠 NEW REMIND DM REDIRECT HOOK: If admin types 'remind' in private DM, show menu!
     if command == "remind":
         context.user_data.pop("modify_field", None)
         from handlers.admin_handlers import initiate_remind_portal_via_dm
         await initiate_remind_portal_via_dm(update, context)
-        return ConversationHandler.END
+        return
 
     if context.user_data.get("waiting_announcement_text") is not None:
         target_thread = context.user_data.pop("waiting_announcement_text")
         display_target_name = context.user_data.pop("waiting_announcement_name", "the group topic")
         try:
             thread_param = None if target_thread == 0 else target_thread
-            
-            await context.bot.send_message(
-                chat_id=CHAT_ID,
-                text=message.text_markdown,
-                message_thread_id=thread_param,
-                parse_mode="Markdown"
-            )
-            # 🎯 FIXED: Standardized text feedback to explicitly echo your selected Event Name string!
+            await context.bot.send_message(chat_id=CHAT_ID, text=message.text_markdown, message_thread_id=thread_param, parse_mode="Markdown")
             await message.reply_text(f"✅ Announcement broadcasted successfully into *{display_target_name}*!", parse_mode="Markdown")
+            current_dash_id = context.user_data.get("master_dash_id")
+            if current_dash_id:
+                await context.bot.edit_message_text(chat_id=message.chat.id, message_id=current_dash_id, text=DASHBOARD_TEXT, reply_markup=_dashboard_keyboard(), parse_mode="Markdown")
         except Exception as e:
             await message.reply_text(f"❌ Failed to dispatch announcement: {e}")
         return
 
-    if text.lower() == "/new":
-        context.user_data.clear()
-        keyboard = [
-            [InlineKeyboardButton("🎭 PERFORMANCE", callback_data="TYPE_SELECTED|PERF")],
-            [InlineKeyboardButton("☕ OTHERS (Bonding/Misc)", callback_data="TYPE_SELECTED|OTHERS")],
-        ]
-        await message.reply_text("What kind of topic are you creating?", reply_markup=InlineKeyboardMarkup(keyboard))
+    if command in ["new", "modify", "attd", "attendance", "announce", "list", "threadid", "threads", "thread"]:
+        active_dash_id = context.user_data.get("master_dash_id")
+        if not active_dash_id:
+            msg = await message.reply_text(DASHBOARD_TEXT, reply_markup=_dashboard_keyboard(), parse_mode="Markdown")
+            context.user_data["master_dash_id"] = msg.message_id
+            return
+        from handlers.private_handlers import handle_dashboard_navigation
+        class FakeCallbackQuery:
+            def __init__(self, msg, cmd):
+                self.message = msg
+                self.data = f"DASH_VIEW|{cmd}"
+            async def answer(self): pass
+        class FakeUpdate:
+            def __init__(self, query): self.callback_query = query
+        cmd_map = {"new": "LAUNCH_NEW", "modify": "LAUNCH_MODIFY", "attd": "LAUNCH_ATTD", "attendance": "LAUNCH_ATTD", "announce": "LAUNCH_ANNOUNCE", "list": "LEDGER", "threadid": "THREADS", "threads": "THREADS", "thread": "THREADS"}
+        fake_msg = await context.bot.edit_message_reply_markup(chat_id=message.chat.id, message_id=active_dash_id)
+        fake_event = FakeUpdate(FakeCallbackQuery(fake_msg, cmd_map[command]))
+        await handle_dashboard_navigation(fake_event, context)
         return
 
+    # =========================================================================
+    # WIZARD TEXT ENTRIES STATE SEQUENCES
+    # =========================================================================
     state = context.user_data.get("dm_state")
+    is_summary_mode = context.user_data.get("in_summary_mode", False)
 
     if state == PERF_EVENT_NAME:
         context.user_data["temp_event_name"] = text
+        try: await message.delete()
+        except Exception: pass
+        
+        if is_summary_mode:
+            context.user_data["dm_state"] = None
+            await _show_perf_summary(update, context)
+            return
+            
         context.user_data["dm_state"] = PERF_REHEARSAL
-        tracker = _build_progress_tracker(context.user_data, 3)
+        tracker = _build_progress_tracker(context.user_data)
         prompt = (
             f"{tracker}📅 *Step 3/6: Rehearsal Date & Time*\n\n"
-            
-            "*Examples:*\n"
-            "Single date Single time: `31 aug, 9pm`\n"
-            "Single date Multiple times: `1 sep, 7pm 9pm`\n"
-            "Multiple dates Single/Multiple times:\n"
-            "`31 aug, 9pm`\n"
-            "`1 sep, 7pm 9pm`\n\n"
-
-            "Separate the date and time using a **comma (,)**."
+            f"*Examples:*\n"
+            f"• Single date Single time: `31 aug, 9pm`\n"
+            f"• Single date Multiple times: `1 sep, 7pm 2100`\n"
+            f"• Multiple dates Single/Multiple times:\n"
+            f"`31 aug, 9pm`\n"
+            f"`1 sep, 7pm 2100`"
         )
-        keyboard = [
-            [InlineKeyboardButton("⏭ Skip (No Rehearsal)", callback_data="SKIP_PERF_FIELD|rehearsal")],
-            [InlineKeyboardButton("↩️ Edit Event Name", callback_data="PERF_RESET|temp_event_name")],
-            [InlineKeyboardButton("❌ Cancel Flow", callback_data="CANCEL_NEW_PERF")]
-        ]
-        await _render_step(message, prompt, InlineKeyboardMarkup(keyboard))
+        
+        active_dash_id = context.user_data.get("master_dash_id")
+        if active_dash_id:
+            await context.bot.edit_message_text(chat_id=message.chat.id, message_id=active_dash_id, text=prompt, reply_markup=_get_back_keyboard("temp_event_name"), parse_mode="Markdown")
+            return
+        await _render_step(message, prompt, _get_back_keyboard("temp_event_name"))
         return
 
     if state == PERF_REHEARSAL:
-        try: rehearsal_date = "\n".join(parse_and_format_dates(text))
+        try:
+            rehearsal_date = "\n".join(parse_and_format_dates(text))
         except ValueError as e:
-            await message.reply_text(str(e), parse_mode="Markdown")
+            try: await message.delete()
+            except Exception: pass
+            
+            tracker = _build_progress_tracker(context.user_data)
+            error_prompt = (
+                f"⚠️ **ERROR:** {str(e)}\n\n"
+                f"{tracker}"
+                f"✏️ **Updating Rehearsal Date & Time**\n"
+                f"👉 **Please re-enter matching the format guidelines above:**"
+            )
+            
+            old_val = context.user_data.get("temp_rehearsal", "")
+            if old_val and old_val != "-":
+                error_prompt += f"\n\n📋 *Previous Value (Tap box below to copy instantly):*\n```\n{old_val}```\n"
+
+            active_dash_id = context.user_data.get("master_dash_id")
+            if active_dash_id:
+                # 🎯 FIX: Intercept duplicate text edits to avoid BadRequest crashes
+                try:
+                    await context.bot.edit_message_text(
+                        chat_id=message.chat.id, message_id=active_dash_id, text=error_prompt, 
+                        reply_markup=_get_back_keyboard("temp_event_name"), parse_mode="Markdown"
+                    )
+                except Exception:
+                    pass # Ignore silently if message contents match exactly
             return
+
         context.user_data["temp_rehearsal"] = rehearsal_date
+        try: await message.delete()
+        except Exception: pass
+        
+        if is_summary_mode:
+            context.user_data["dm_state"] = None
+            await _show_perf_summary(update, context)
+            return
+            
         context.user_data["dm_state"] = PERF_DATE
-        tracker = _build_progress_tracker(context.user_data, 4)
+        tracker = _build_progress_tracker(context.user_data)
         prompt = (
             f"{tracker}📅 *Step 4/6: Performance Date & Time*\n\n"
-            
-            "*Examples:*\n"
-            "Single date Single time: `31 aug, 9pm`\n"
-            "Single date Multiple times: `1 sep, 7pm 9pm`\n"
-            "Multiple dates Single/Multiple times:\n"
-            "`31 aug, 9pm`\n"
-            "`1 sep, 7pm 9pm`\n\n"
-
-            "Separate the date and time using a **comma (,)**."
+            f"*Examples:*\n"
+            f"• Single date Single time: `31 aug, 9pm`\n"
+            f"• Single date Multiple times: `1 sep, 7pm 2100`\n"
+            f"• Multiple dates Single/Multiple times:\n"
+            f"`31 aug, 9pm`\n"
+            f"`1 sep, 7pm 2100`"
         )
+        
+        active_dash_id = context.user_data.get("master_dash_id")
+        if active_dash_id:
+            await context.bot.edit_message_text(chat_id=message.chat.id, message_id=active_dash_id, text=prompt, reply_markup=_get_back_keyboard("temp_rehearsal"), parse_mode="Markdown")
+            return
         await _render_step(message, prompt, _get_back_keyboard("temp_rehearsal"))
         return
 
     if state == PERF_DATE:
-        try: perf_date = "\n".join(parse_and_format_dates(text))
+        try:
+            perf_date = "\n".join(parse_and_format_dates(text))
         except ValueError as e:
-            await message.reply_text(str(e), parse_mode="Markdown")
+            try: await message.delete()
+            except Exception: pass
+            
+            tracker = _build_progress_tracker(context.user_data)
+            error_prompt = (
+                f"⚠️ **ERROR:** {str(e)}\n\n"
+                f"{tracker}"
+                f"✏️ **Updating Performance Date & Time**\n"
+                f"👉 **Please re-enter matching the format guidelines above:**"
+            )
+            
+            old_val = context.user_data.get("temp_perf_date", "")
+            if old_val and old_val != "-":
+                error_prompt += f"\n\n📋 *Previous Value (Tap box below to copy instantly):*\n```\n{old_val}```\n"
+
+            active_dash_id = context.user_data.get("master_dash_id")
+            if active_dash_id:
+                # 🎯 FIX: Intercept duplicate text edits to avoid BadRequest crashes
+                try:
+                    await context.bot.edit_message_text(
+                        chat_id=message.chat.id, message_id=active_dash_id, text=error_prompt, 
+                        reply_markup=_get_back_keyboard("temp_rehearsal"), parse_mode="Markdown"
+                    )
+                except Exception:
+                    pass
             return
+
         context.user_data["temp_perf_date"] = perf_date
+        try: await message.delete()
+        except Exception: pass
+        
+        if is_summary_mode:
+            context.user_data["dm_state"] = None
+            await _show_perf_summary(update, context)
+            return
+            
         context.user_data["dm_state"] = PERF_LOCATION
-        tracker = _build_progress_tracker(context.user_data, 5)
+        tracker = _build_progress_tracker(context.user_data)
         prompt = f"{tracker}📌 *Step 5/6: Location*\nWhere is the performance taking place?"
+        
+        active_dash_id = context.user_data.get("master_dash_id")
+        if active_dash_id:
+            await context.bot.edit_message_text(chat_id=message.chat.id, message_id=active_dash_id, text=prompt, reply_markup=_get_back_keyboard("temp_perf_date"), parse_mode="Markdown")
+            return
         await _render_step(message, prompt, _get_back_keyboard("temp_perf_date"))
         return
 
     if state == PERF_LOCATION:
         context.user_data["temp_location"] = text
+        try: await message.delete()
+        except Exception: pass
+        
+        if is_summary_mode or "temp_other_info" in context.user_data:
+            context.user_data["dm_state"] = None
+            await _show_perf_summary(update, context)
+            return
+            
         context.user_data["dm_state"] = PERF_OTHER_INFO
-        tracker = _build_progress_tracker(context.user_data, 6)
+        tracker = _build_progress_tracker(context.user_data)
         prompt = f"{tracker}📝 *Step 6/6: Other Info*\nAny additional info?"
+        
         keyboard = [
             [InlineKeyboardButton("⏭ Skip (No Additional Info)", callback_data="SKIP_PERF_FIELD|other_info")],
-            [InlineKeyboardButton("↩️ Edit Location", callback_data="PERF_RESET|temp_location")],
-            [InlineKeyboardButton("❌ Cancel Flow", callback_data="CANCEL_NEW_PERF")]
+            [InlineKeyboardButton("🔙 Back to Location Entry", callback_data="PERF_RESET|temp_location")],
+            [InlineKeyboardButton("🔙 Back to Type Selection", callback_data="DASH_VIEW|LAUNCH_NEW")]
         ]
+        
+        active_dash_id = context.user_data.get("master_dash_id")
+        if active_dash_id:
+            await context.bot.edit_message_text(chat_id=message.chat.id, message_id=active_dash_id, text=prompt, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+            return
         await _render_step(message, prompt, InlineKeyboardMarkup(keyboard))
         return
 
     if state == PERF_OTHER_INFO:
         context.user_data["temp_other_info"] = text
+        try: await message.delete()
+        except Exception: pass
         context.user_data["dm_state"] = None
         await _show_perf_summary(update, context)
         return
@@ -408,153 +515,64 @@ async def handle_private_command(update: Update, context: ContextTypes.DEFAULT_T
         if context.user_data.get("temp_type") == "OTHERS":
             keyboard = [
                 [InlineKeyboardButton("✅ Create Others Topic", callback_data="CONFIRM_NEW_OTHERS")],
-                [InlineKeyboardButton("❌ Cancel", callback_data="CANCEL_NEW_PERF")],
+                [InlineKeyboardButton("🔙 Back to Type Selection", callback_data="DASH_VIEW|LAUNCH_NEW")]
             ]
-            await message.reply_text(f"Confirm creating **OTHERS** topic: `{text}`?", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
-            context.user_data["dm_state"] = None
-            return
+            active_dash_id = context.user_data.get("master_dash_id")
+            if active_dash_id:
+                try: await message.delete()
+                except Exception: pass
+                await context.bot.edit_message_text(
+                    chat_id=message.chat.id, message_id=active_dash_id,
+                    text=f"❓ **Confirm creation request**\n\nWould you like to build the following **OTHERS** forum topic channel entry?\n• Title: `{text}`",
+                    reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown"
+                )
+                context.user_data["dm_state"] = None
+                return
 
     if context.user_data.get("modify_field") and not text.startswith("/"):
+        current_field = context.user_data.get("modify_field")
+        
+        # 🎯 REDIRECTION HOOK: If text is captured for a broadcast, route to the announcement engine!
+        if current_field == "ANNOUNCEMENT_TEXT_CAPTURE":
+            from handlers.admin_handlers import apply_announcement_broadcast
+            await apply_announcement_broadcast(update, context)
+            return
+            
         from handlers.modify_handlers import apply_modify_value
         await apply_modify_value(update, context)
         return
 
-    if command == "new":
-        context.user_data.clear()
-        keyboard = [
-            [InlineKeyboardButton("🎭 PERFORMANCE", callback_data="TYPE_SELECTED|PERF")],
-            [InlineKeyboardButton("☕ OTHERS (Bonding/Misc)", callback_data="TYPE_SELECTED|OTHERS")],
-        ]
-        await message.reply_text("What kind of topic are you creating?", reply_markup=InlineKeyboardMarkup(keyboard))
-        return
-
-    if command == "list":
-        status_loading = await message.reply_text("⏳ Fetching live performance list...")
-        try:
-            records = get_cached_records()
-            if not records:
-                await status_loading.edit_text("📋 The performance sheet is empty.")
-                return
-            lines = ["📋 **Performance Overview**\n"]
-            for row in records:
-                tid = row.get("THREAD ID")
-                if str(tid).isdigit():
-                    event_name = row.get("EVENT NAME", "Unnamed Event")
-                    status = row.get("STATUS", "").strip().upper() or "PENDING"
-                    emoji = "⏳" if status == "PENDING" else "✅" if status == "ACCEPTED" else "❌"
-                    lines.append(f"{emoji} `{tid}` | **{event_name}**")
-            await status_loading.delete()
-            await message.reply_text("\n".join(lines), parse_mode="Markdown")
-        except Exception as e:
-            await status_loading.edit_text(f"❌ Failed to fetch overview log: {e}")
-        return
-
-    if command == "modify":
-        from handlers.modify_handlers import initiate_modify_via_dm
-        if thread_token:
-            await initiate_modify_via_dm(update, context, int(thread_token), True)
-            return
-        await render_modify_list(update, context)
-        return
-
-    if command == "announce":
-        await initiate_announce_portal_via_dm(update, context)
-        return
-
-    if command == "info" and thread_token:
-        status_loading = await message.reply_text(f"⏳ Downloading details card snapshot for ID {thread_token}...")
-        row = next((r for r in get_cached_records() if str(r.get("THREAD ID")) == thread_token), None)
-        await status_loading.delete()
-        if row:
-            await message.reply_text(
-                build_performance_summary(
-                    event_name=row.get("EVENT NAME", ""), rehearsal_date=row.get("REHEARSAL DATE | TIME", ""),
-                    perf_date=row.get("PERF DATE | TIME", ""), location=row.get("LOCATION", ""), other_info=row.get("OTHER INFO", ""),
-                ), parse_mode="Markdown"
-            )
-        else:
-            await message.reply_text("❌ Performance ID not found inside Google Sheets records.")
-        return
-
-    if command in ["threadid", "threads", "thread"]:
-        status_loading = await message.reply_text("⏳ Analyzing group channel layouts and compiling index...")
-        try:
-            records = get_cached_records()
-            lines = ["🧵 *Active Workspace Thread Directory*\n"]
-            lines.append("• `0` | 💬 **General/Main Landing Channel**")
-
-            for row in records:
-                tid = row.get("THREAD ID")
-                if str(tid).isdigit():
-                    lines.append(f"• `{tid}` | 🎭 *PERF:* **{row.get('EVENT NAME', 'Unnamed Event')}**")
-
-            try:
-                for o_row in get_cached_values(tab_name="OTHERS"):
-                    if o_row and str(o_row[0]).isdigit():
-                        lines.append(f"• `{o_row[0]}` | ☕ *OTHERS:* **{o_row[1] if len(o_row) > 1 and o_row[1] else 'Unnamed'}**")
-            except Exception: pass
-            
-            await status_loading.delete()
-            await message.reply_text("\n".join(lines), parse_mode="Markdown")
-        except Exception as e:
-            await status_loading.edit_text(f"❌ Failed to read thread maps: {e}")
-        return
-
-    if command in ("attd", "attendance"):
-        from handlers.attendance_handlers import start_attendance_modify
-        await start_attendance_modify(update, context)
-        return
-
     if command == "help" or text == "/start":
-        await message.reply_text(
-            DASHBOARD_TEXT,
-            reply_markup=_dashboard_keyboard(),
-            parse_mode="Markdown",
-        )
-
+        await message.reply_text(DASHBOARD_TEXT, reply_markup=_dashboard_keyboard(), parse_mode="Markdown")
 
 async def handle_dashboard_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Clear all cached list snapshots so the next list pulls fresh from Sheets.
-
-    A single control on the DM dashboard instead of a refresh button on every
-    individual list screen. After this, `/modify`, `/announce`, `/attd`, etc.
-    re-read Google Sheets the next time they build a list.
-    """
     query = update.callback_query
-
-    # Authorize: only dashboard admins may refresh.
     uid = update.effective_user.id
     is_admin = False
     if isinstance(ADMIN_DM_USER_IDS, dict):
-        is_admin = any(str(v).isdigit() and int(v) == uid for v in ADMIN_DM_USER_IDS.values()) \
-            or any(str(k).isdigit() and int(k) == uid for k in ADMIN_DM_USER_IDS)
+        is_admin = any(str(v).isdigit() and int(v) == uid for v in ADMIN_DM_USER_IDS.values()) or any(str(k).isdigit() and int(k) == uid for k in ADMIN_DM_USER_IDS)
     elif isinstance(ADMIN_DM_USER_IDS, (list, set)):
         is_admin = uid in ADMIN_DM_USER_IDS
     if not is_admin:
         await query.answer()
         return
 
-    for key in _DASHBOARD_CACHE_KEYS:
-        context.user_data.pop(key, None)
-    # Force the shared module cache to re-download on the next read.
+    for key in _DASHBOARD_CACHE_KEYS: context.user_data.pop(key, None)
     invalidate_sheet_cache()
-
     await query.answer("✅ Cache cleared — lists will pull fresh.", show_alert=False)
     try:
-        await query.edit_message_text(
-            DASHBOARD_TEXT + "\n\n♻️ *Data refreshed just now.*",
-            reply_markup=_dashboard_keyboard(),
-            parse_mode="Markdown",
-        )
-    except Exception:
-        pass
+        await query.edit_message_text(DASHBOARD_TEXT + "\n\n♻️ *Data refreshed just now.*", reply_markup=_dashboard_keyboard(), parse_mode="Markdown")
+    except Exception: pass
 
 async def handle_confirm_new_perf(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Callback matrix router handling all administrative wizard modifications."""
     query = update.callback_query
     data = query.data
 
-    # 🧠 INTERCEPT MANUAL REMINDER TRIGGER SELECTION CALLBACK BUTTONS
+    active_dash_id = context.user_data.get("master_dash_id")
+    if active_dash_id and query.message.message_id != active_dash_id:
+        await query.message.edit_text("🛑 **This menu panel has expired!**\n\nPlease use the latest menu screen at the bottom of your screen!", reply_markup=None)
+        return
+
     if data.startswith("MANUAL_REMIND_TID|"):
         await query.answer()
         parts = data.split("|")
@@ -567,17 +585,14 @@ async def handle_confirm_new_perf(update: Update, context: ContextTypes.DEFAULT_
         await query.answer()
         parts = data.split("|")
         target_thread = int(parts[1])
-        display_name = parts[2] if len(parts) > 2 else f"Thread {target_thread}"
-        
+        display_name = parts[2]
         context.user_data["waiting_announcement_text"] = target_thread
         context.user_data["waiting_announcement_name"] = display_name
         
-        # ✅ FIXED TYPO: Changed InlineKeyboardMarkup to InlineKeyboardMarkup
         escape_keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔙 Back to Topics Menu", callback_data="ANNOUNCE_BACK_MAPPED")],
-            [InlineKeyboardButton("❌ Cancel", callback_data="CANCEL_NEW_PERF")]
+            [InlineKeyboardButton("🔙 Back to Announcement Topics List", callback_data="ANNOUNCE_BACK_MAPPED")],
+            [InlineKeyboardButton("🦅 Exit to Cockpit", callback_data="DASH_VIEW|HOME")]
         ])
-        
         await query.edit_message_text(
             text=(
                 f"✍️ *Target set to: {display_name}*\n\n"
@@ -606,32 +621,49 @@ async def handle_confirm_new_perf(update: Update, context: ContextTypes.DEFAULT_
     if data.startswith("PERF_RESET|"):
         field_to_clear = data.split("|")[1]
         state_map = {
-            "temp_event_type": (None, "🎭 *Resetting Step 1/6: Event Type*\nIs this External or Internal?"),
-            "temp_event_name": (PERF_EVENT_NAME, "🎭 *Resetting Step 2/6: Event Name*\nWhat is the name of this performance?"),
-            "temp_rehearsal": (PERF_REHEARSAL, "📅 *Resetting Step 1/6: Rehearsal Date & Time*\nEnter details:"),
-            "temp_perf_date": (PERF_DATE, "📅 *Resetting Step 4/6: Performance Date & Time*\nEnter scheduling details below:"),
-            "temp_location": (PERF_LOCATION, "📌 *Resetting Step 5/6: Location*\nEnter localized arena info below:")
+            "temp_event_type": (None, "🎭 *Event Type Selection*\nIs this External or Internal?"),
+            "temp_event_name": (PERF_EVENT_NAME, "✏️ **Updating Event Name**\nWhat is the adjusted name of this performance?"),
+            "temp_rehearsal": (PERF_REHEARSAL, "✏️ **Updating Rehearsal Date & Time**\nEnter scheduling details below:"),
+            "temp_perf_date": (PERF_DATE, "✏️ **Updating Performance Date & Time**\nEnter scheduling details below:"),
+            "temp_location": (PERF_LOCATION, "✏️ **Updating Location**\nEnter localized arena info below:"),
+            "temp_other_info": (PERF_OTHER_INFO, "✏️ **Updating Other Info**\nEnter additional remarks below:")
         }
         if field_to_clear in state_map:
             target_state, text_prompt = state_map[field_to_clear]
-            fields = ["temp_event_type", "temp_event_name", "temp_rehearsal", "temp_perf_date", "temp_location", "temp_other_info"]
-            start_flushing = False
-            for f in fields:
-                if f == field_to_clear: start_flushing = True
-                if start_flushing: context.user_data.pop(f, None)
             context.user_data["dm_state"] = target_state
+            
             if field_to_clear == "temp_event_type":
                 keyboard = [[InlineKeyboardButton(label, callback_data=f"PERF_EVENT_TYPE|{value}")] for label, value in PERF_EVENT_TYPES]
-                keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="CANCEL_NEW_PERF")])
+                keyboard.append([InlineKeyboardButton("🔙 Back to Type Selection", callback_data="DASH_VIEW|LAUNCH_NEW")])
                 await query.edit_message_text(text_prompt, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
                 return
-            tracker = _build_progress_tracker(context.user_data, target_state)
-            if target_state == PERF_EVENT_NAME:
-                keyboard = [[InlineKeyboardButton("↩️ Edit Event Type", callback_data="PERF_RESET|temp_event_type")], [InlineKeyboardButton("❌ Cancel Flow", callback_data="CANCEL_NEW_PERF")]]
-            else:
-                back_targets = {PERF_REHEARSAL: "temp_event_name", PERF_DATE: "temp_rehearsal", PERF_LOCATION: "temp_perf_date"}
-                keyboard = _get_back_keyboard(back_targets.get(target_state)).inline_keyboard
-            await query.edit_message_text(f"{tracker}{text_prompt}", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+                
+            tracker = _build_progress_tracker(context.user_data)
+            back_maps = {PERF_EVENT_NAME: "temp_event_type", PERF_REHEARSAL: "temp_event_name", PERF_DATE: "temp_rehearsal", PERF_LOCATION: "temp_perf_date", PERF_OTHER_INFO: "temp_location"}
+            
+            prompt_header = f"{tracker}{text_prompt}"
+            if context.user_data.get("in_summary_mode"):
+                if target_state in (PERF_REHEARSAL, PERF_DATE):
+                    prompt_header = (
+                        f"{tracker}{text_prompt}\n\n"
+                        f"*Examples:*\n"
+                        f"• Single date Single time: `31 aug, 9pm`\n"
+                        f"• Single date Multiple times: `1 sep, 7pm 9pm`\n\n"
+                        f"👉 _Separate date/time with a **comma (,)**._"
+                    )
+
+            # 🎯 FIX FOR POINT 1: Added explicit "\n" right after the open backticks to resolve the markdown language parser glitch!
+            old_value = context.user_data.get(field_to_clear, "")
+            if old_value and old_value != "-":
+                prompt_header = (
+                    f"{prompt_header}\n\n"
+                    f"📋 *Previous Value (Tap box below to copy instantly):*\n"
+                    f"```\n"
+                    f"{old_value}```\n"
+                    f"👉 _Paste your copied text into the chat bar, edit it, and send!_"
+                )
+            
+            await query.edit_message_text(prompt_header, reply_markup=_get_back_keyboard(back_maps.get(target_state)), parse_mode="Markdown")
         return
 
     if data.startswith("TYPE_SELECTED|"):
@@ -639,34 +671,42 @@ async def handle_confirm_new_perf(update: Update, context: ContextTypes.DEFAULT_
         context.user_data["temp_type"] = selected_type
         if selected_type == "PERF":
             keyboard = [[InlineKeyboardButton(label, callback_data=f"PERF_EVENT_TYPE|{value}")] for label, value in PERF_EVENT_TYPES]
-            keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="CANCEL_NEW_PERF")])
+            keyboard.append([InlineKeyboardButton("🔙 Back to Type Selection", callback_data="DASH_VIEW|LAUNCH_NEW")])
             await query.edit_message_text("🎭 *New PERF Topic*\n\n*Step 1/6: Event Type*\nIs this External or Internal?", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
             return
+            
         context.user_data["dm_state"] = WAITING_TOPIC_TITLE
-        await query.edit_message_text(f"Selected Type: **{selected_type}** ☕\n\n**Step 1:** Please enter the **Topic Title** for the group forum:", parse_mode="Markdown")
+        step_one_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Type Selection", callback_data="DASH_VIEW|LAUNCH_NEW")]])
+        await query.edit_message_text(f"Selected Type: **{selected_type}** ☕\n\n**Step 1:** Please type and enter the **Topic Title** for the group forum below:", reply_markup=step_one_keyboard, parse_mode="Markdown")
         return
 
     if data.startswith("PERF_EVENT_TYPE|"):
         event_type = data.split("|")[1]
         context.user_data["temp_event_type"] = event_type
+        if context.user_data.get("in_summary_mode"):
+            await _show_perf_summary(update, context)
+            return
+            
         context.user_data["dm_state"] = PERF_EVENT_NAME
-        tracker = _build_progress_tracker(context.user_data, 2)
-        keyboard = [[InlineKeyboardButton("↩️ Edit Event Type", callback_data="PERF_RESET|temp_event_type")], [InlineKeyboardButton("❌ Cancel Flow", callback_data="CANCEL_NEW_PERF")]]
-        await query.edit_message_text(f"{tracker}📍 *Step 2/6: Event Name*\nWhat is the name of this performance?", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+        tracker = _build_progress_tracker(context.user_data)
+        await query.edit_message_text(f"{tracker}📍 *Step 2/6: Event Name*\nWhat is the name of this performance?", reply_markup=_get_back_keyboard("temp_event_type"), parse_mode="Markdown")
         return
 
     if data.startswith("SKIP_PERF_FIELD|"):
         field = data.split("|")[1]
         if field == "rehearsal":
             context.user_data["temp_rehearsal"] = "-"
+            if context.user_data.get("in_summary_mode"):
+                await _show_perf_summary(update, context)
+                return
+                
             context.user_data["dm_state"] = PERF_DATE
-            tracker = _build_progress_tracker(context.user_data, 4)
-            prompt = f"{tracker}📅 *Step 4/6: Performance Date & Time*\n\nSeparate the date and time using a **comma (,)**."
+            tracker = _build_progress_tracker(context.user_data)
+            prompt = f"{tracker}📅 *Step 4/6: Performance Date & Time*\n\nSeparate date/time with a **comma (,)**."
             await query.edit_message_text(text=prompt, reply_markup=_get_back_keyboard("temp_rehearsal"), parse_mode="Markdown")
         elif field == "other_info":
             context.user_data["temp_other_info"] = "-"
             context.user_data["dm_state"] = None
-            await query.edit_message_text("⏳ Compiling Final Summary Dashboard Preview...")
             await _show_perf_summary(update, context)
         return
 
@@ -681,8 +721,12 @@ async def handle_confirm_new_perf(update: Update, context: ContextTypes.DEFAULT_
             initialized_topics.add(tid)
             from services.google_sheets import append_to_others_list
             append_to_others_list(tid, title)
-            await query.message.reply_text(f"✅ Successfully created OTHERS Topic `{tid}`.")
+            
+            await query.answer(f"🎉 Success! OTHERS Topic '{title}' established!", show_alert=True)
+            current_dash_id = context.user_data.get("master_dash_id")
             context.user_data.clear()
+            if current_dash_id: context.user_data["master_dash_id"] = current_dash_id
+            await query.edit_message_text(DASHBOARD_TEXT, reply_markup=_dashboard_keyboard(), parse_mode="Markdown")
         except Exception as e:
             await query.message.reply_text(f"❌ Failed to create topic: {e}")
         return
@@ -698,63 +742,151 @@ async def handle_confirm_new_perf(update: Update, context: ContextTypes.DEFAULT_
         title = f"PERF - {event_name}"
 
         if not event_name or not perf_date or not location:
-            await query.edit_message_text("❌ Data expired. Please use `/new` to restart.")
+            await query.edit_message_text("❌ Data expired. Please restart.")
             return
 
         context.user_data["creation_completed"] = True
-        preview_msg_id = context.user_data.get("final_preview_msg_id")
-        if preview_msg_id:
-            try: await context.bot.edit_message_reply_markup(chat_id=query.message.chat.id, message_id=preview_msg_id, reply_markup=None)
-            except Exception: pass
-
-        status_msg = await query.message.reply_text("⏳ Processing: Building forum channels and updating logs...")
+        await query.edit_message_text("⏳ Processing: Building forum channels and updating sheet logs...")
+        
         try:
             topic = await context.bot.create_forum_topic(chat_id=CHAT_ID, name=title)
             thread_id = topic.message_thread_id
             from utils.constants import initialized_topics
             initialized_topics.add(thread_id)
         except Exception as e:
-            await status_msg.edit_text(f"❌ Forum setup failed: {e}")
+            await query.edit_message_text(f"❌ Forum setup failed: {e}")
             return
 
         try:
             sheet = get_gspread_sheet()
             sheet.append_row([thread_id, event_type, event_name, rehearsal_date, perf_date, location, other_info, "", "", ""], value_input_option="USER_ENTERED")
-            invalidate_sheet_cache()  # new row — re-pull on next /list or /modify
+            invalidate_sheet_cache()
         except Exception as e:
-            await status_msg.edit_text(f"❌ Topic created (`{thread_id}`), but logging encountered a write failure: {e}")
+            await query.edit_message_text(f"❌ Sheet Write failure: {e}")
             return
 
         try:
             group_data = context.application.bot_data.setdefault("group_chat_data", {}).setdefault(CHAT_ID, {})
             await publish_performance_summary(bot=context.bot, chat_data_store=group_data, sheet=sheet, chat_id=CHAT_ID, thread_id=thread_id, event_name=event_name, rehearsal_date=rehearsal_date, perf_date=perf_date, location=location, other_info=other_info)
-        except Exception as e:
-            await status_msg.edit_text(f"⚠️ Channel created successfully, but publishing summary logs failed: {e}")
-            context.user_data.clear()
-            return
+        except Exception: pass
 
-        await status_msg.edit_text(f"✅ *Success!* Forum Topic `{thread_id}` (`{title}`) has been established and published.", parse_mode="Markdown")
+        await query.answer(f"🎉 Success! Forum Topic ID {thread_id} established and published!", show_alert=True)
+        current_dash_id = context.user_data.get("master_dash_id")
         context.user_data.clear()
+        if current_dash_id: context.user_data["master_dash_id"] = current_dash_id
+        await query.edit_message_text(DASHBOARD_TEXT, reply_markup=_dashboard_keyboard(), parse_mode="Markdown")
         return
 
-    if data == "CANCEL_NEW_PERF":
+    if data == "CANCEL_NEW_PERF" or data == "DASH_VIEW|HOME":
+        current_dash_id = context.user_data.get("master_dash_id")
         context.user_data.clear()
-        await query.edit_message_text("❌ Action cancelled")
+        if current_dash_id: context.user_data["master_dash_id"] = current_dash_id
+        await query.edit_message_text(DASHBOARD_TEXT, reply_markup=_dashboard_keyboard(), parse_mode="Markdown")
         return
 
 async def handle_list_modify_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle clicking a specific performance button directly from the list prompt."""
     query = update.callback_query
     await query.answer()
     _, thread_id_str = query.data.split("|")
     thread_id = int(thread_id_str)
-    try: await query.message.delete()
-    except Exception: pass
-    
     records = context.user_data.get("cached_records", [])
+    if not records:
+        from services.google_sheets import get_cached_records
+        records = get_cached_records()
+        context.user_data["cached_records"] = records
     row = next((r for r in records if str(r.get("THREAD ID")) == str(thread_id)), None)
-    if row:
-        context.user_data["modify_event_name"] = row.get("EVENT NAME", "Unnamed Event")
-        
+    if row: context.user_data["modify_event_name"] = row.get("EVENT NAME", "Unnamed Event")
     from handlers.modify_handlers import initiate_modify_via_dm
     await initiate_modify_via_dm(update=update, context=context, thread_id=thread_id, initiated_via_dm=True)
+
+async def handle_dashboard_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    _, target_view = data.split("|")
+
+    active_dash_id = context.user_data.get("master_dash_id")
+    if active_dash_id and query.message.message_id != active_dash_id:
+        await query.message.edit_text(
+            "🛑 **This menu panel has expired!**\n\n"
+            "You opened a newer dashboard bubble further down in your chat history. "
+            "Please use the latest menu screen at the bottom of your screen!",
+            reply_markup=None
+        )
+        return
+
+    if target_view == "HOME":
+        await query.edit_message_text(DASHBOARD_TEXT, reply_markup=_dashboard_keyboard(), parse_mode="Markdown")
+        return
+
+    elif target_view == "LEDGER":
+        records = get_cached_records()
+        if not records: text = "📋 The performance sheet is currently empty."
+        else:
+            lines = ["📊 **Performance Status Ledger**\n_Quick overview of all registered bookings (IDs stripped)_\n"]
+            for row in records:
+                event_name = row.get("EVENT NAME", "Unnamed Event")
+                status = row.get("STATUS", "").strip().upper() or "PENDING"
+                emoji = "⏳" if status == "PENDING" else "✅" if status == "ACCEPTED" else "❌"
+                lines.append(f"{emoji} **{event_name}**")
+            text = "\n".join(lines)
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🦅 Exit to Cockpit", callback_data="DASH_VIEW|HOME")]])
+        await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
+        return
+
+    elif target_view == "THREADS":
+        records = get_cached_records()
+        lines = ["🧵 **Forum Thread Directory Chart**\n_Copy these numerical index IDs for broadcasts/reminders_\n"]
+        lines.append("• `0` | 💬 **General/Main Landing Channel**")
+        for row in records:
+            tid = row.get("THREAD ID")
+            if str(tid).isdigit(): lines.append(f"• `{tid}` | 🎭 *PERF:* **{row.get('EVENT NAME', 'Unnamed Event')}**")
+        try:
+            for o_row in get_cached_values(tab_name="OTHERS"):
+                if o_row and str(o_row[0]).isdigit(): lines.append(f"• `{o_row[0]}` | ☕ *OTHERS:* **{o_row[1] if len(o_row) > 1 and o_row[1] else 'Unnamed'}**")
+        except Exception: pass
+        text = "\n".join(lines)
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🦅 Exit to Cockpit", callback_data="DASH_VIEW|HOME")]])
+        await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
+        return
+
+    elif target_view == "MEMBERS":
+        text = "👥 **Active Member Roster Listing**\n\n⏳ *Roster framework online!*\nWe are completely ready to plug your Year sorting features right here during the next step."
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🦅 Exit to Cockpit", callback_data="DASH_VIEW|HOME")]])
+        await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
+        return
+
+    elif target_view == "LAUNCH_NEW":
+        current_dash_id = context.user_data.get("master_dash_id")
+        context.user_data.clear()
+        if current_dash_id: context.user_data["master_dash_id"] = current_dash_id
+        
+        keyboard = [
+            [InlineKeyboardButton("🎭 PERFORMANCE", callback_data="TYPE_SELECTED|PERF")],
+            [InlineKeyboardButton("☕ OTHERS (Bonding/Misc)", callback_data="TYPE_SELECTED|OTHERS")],
+            [InlineKeyboardButton("🦅 Exit to Cockpit", callback_data="DASH_VIEW|HOME")]
+        ]
+        await query.edit_message_text("📝 **Topic Creation Wizard**\nWhat kind of topic are you creating inside the group forum?", reply_markup=InlineKeyboardMarkup(keyboard))
+        return
+
+    elif target_view == "LAUNCH_MODIFY":
+        from handlers.private_handlers import render_modify_list
+        await render_modify_list(update, context, incoming_query=query)
+        return
+
+    elif target_view == "LAUNCH_ATTD":
+        from handlers.attendance_handlers import HOME_TEXT, _build_home_keyboard
+        await query.edit_message_text(HOME_TEXT, reply_markup=_build_home_keyboard(), parse_mode="Markdown")
+        return
+
+    # 🎯 FIX: Point this to the new single-bubble portal inside admin_handlers
+    elif target_view == "LAUNCH_ANNOUNCE":
+        from handlers.admin_handlers import initiate_announce_portal_via_dm
+        await initiate_announce_portal_via_dm(update, context)
+        return
+
+    # 🎯 FIX: Point this to the new single-bubble reminder portal inside admin_handlers
+    elif target_view == "LAUNCH_REMIND":
+        from handlers.admin_handlers import initiate_remind_portal_via_dm
+        await initiate_remind_portal_via_dm(update, context)
+        return

@@ -12,7 +12,7 @@ from telegram.ext import (
 )
 import datetime
 import asyncio
-from handlers.admin_handlers import start, thread_id_command, remind_command, daily_reminder_cron_job, manual_test_reminder_trigger, execute_manual_remind_dispatch
+from handlers.admin_handlers import handle_remind_escrow_callback, start, thread_id_command, remind_command, daily_reminder_cron_job, manual_test_reminder_trigger, execute_manual_remind_dispatch, execute_manual_announcement_dispatch
 from handlers.message_handlers import handle_message
 from handlers.private_handlers import handle_private_command
 from handlers.poll_handlers import handle_poll_answer, auto_poll_check
@@ -22,7 +22,7 @@ from handlers.modify_handlers import start_modify, get_modify_field_callback
 from handlers.modify_handlers import handle_modify_status_selection, handle_modify_date_selection
 from handlers.conversation_handlers import final_date_selection, topic_type_selection, parse_perf_input, cancel
 from handlers.member_handlers import handle_member_status, handle_new_member
-from handlers.private_handlers import handle_confirm_new_perf, handle_dashboard_refresh
+from handlers.private_handlers import handle_confirm_new_perf, handle_dashboard_refresh, handle_dashboard_navigation
 from services.google_sheets import get_gspread_sheet
 from handlers.private_handlers import handle_list_modify_callback
 from handlers.modify_handlers import handle_modify_type_selection
@@ -103,6 +103,7 @@ def main():
             DATE: [MessageHandler(filters.TEXT, parse_perf_input)], 
         },
         fallbacks=[],
+        per_message=False,
     )
     
     verify_conv_handler = ConversationHandler(
@@ -135,10 +136,14 @@ def main():
     app.add_handler(ChatJoinRequestHandler(join_request_handler))
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT, handle_private_command))
     app.add_handler(MessageHandler(filters.ChatType.GROUPS, handle_message))
-    app.add_handler(CallbackQueryHandler(handle_confirm_new_perf, pattern="^(CONFIRM_NEW_PERF|CONFIRM_NEW_OTHERS|CANCEL_NEW_PERF|ANNOUNCE_TARGET\\||ANNOUNCE_BACK_MAPPED|TYPE_SELECTED\\||TOGGLE_RULE\\||CONFIRM_STANDARD|PERF_EVENT_TYPE\\||SKIP_PERF_FIELD\\||PERF_RESET\\|)"))
+    #app.add_handler(CallbackQueryHandler(handle_confirm_new_perf, pattern="^(CONFIRM_NEW_PERF|CONFIRM_NEW_OTHERS|CANCEL_NEW_PERF|ANNOUNCE_TARGET\\||ANNOUNCE_BACK_MAPPED|TYPE_SELECTED\\||TOGGLE_RULE\\||CONFIRM_STANDARD|PERF_EVENT_TYPE\\||SKIP_PERF_FIELD\\||PERF_RESET\\|)"))
+    app.add_handler(CallbackQueryHandler(handle_confirm_new_perf, pattern="^(CONFIRM_NEW_PERF|CONFIRM_NEW_OTHERS|CANCEL_NEW_PERF|ANNOUNCE_BACK_MAPPED|TYPE_SELECTED\\||TOGGLE_RULE\\||CONFIRM_STANDARD|PERF_EVENT_TYPE\\||SKIP_PERF_FIELD\\||PERF_RESET\\|)"))
     app.add_handler(CallbackQueryHandler(execute_manual_remind_dispatch, pattern="^MANUAL_REMIND_TID\\|"))
     app.add_handler(CallbackQueryHandler(handle_dashboard_refresh, pattern="^DASH_REFRESH$"))
-
+    app.add_handler(CallbackQueryHandler(handle_dashboard_navigation, pattern="^DASH_VIEW\\|"))
+    app.add_handler(CallbackQueryHandler(handle_remind_escrow_callback, pattern=r"^REMIND_ESCROW_CONFIRM\|"))
+    app.add_handler(CallbackQueryHandler(execute_manual_announcement_dispatch, pattern=r"^ANNOUNCE_TARGET\|"))
+    
     print("Bot is running...")
     
     # 🛠️ UNIFIED REBOOT CACHE LOADER: Synchronizes all valid temporary threads on boot

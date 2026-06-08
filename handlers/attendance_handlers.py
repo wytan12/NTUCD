@@ -29,7 +29,6 @@ HOME_TEXT = "✅ *Take Attendance*\nChoose a category:"
 
 
 def _render_attendance_keyboard(context: ContextTypes.DEFAULT_TYPE) -> InlineKeyboardMarkup:
-    """Build the toggle keyboard from cached marks (2 attendees per row)."""
     marks = context.user_data.get("attd_marks", {})
     names = context.user_data.get("attd_names", {})
     order = context.user_data.get("attd_order", [])
@@ -41,53 +40,58 @@ def _render_attendance_keyboard(context: ContextTypes.DEFAULT_TYPE) -> InlineKey
         if len(buf) == 2:
             keyboard.append(buf)
             buf = []
-    if buf:
-        keyboard.append(buf)
+    if buf: keyboard.append(buf)
 
-    keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="ATTD_BACK")])
-    keyboard.append([InlineKeyboardButton("💾 CONFIRM & SAVE", callback_data="ATTD_CONFIRM")])
-    keyboard.append([InlineKeyboardButton("❌ CANCEL", callback_data="ATTD_CANCEL")])
+    # 🎯 FIX: Apply the new dynamic naming and remove the Exit button
+    mode = context.user_data.get("attd_mode", "REG")
+    
+    # 🎯 FIX: Use the mode to set the correct destination and label
+    if mode == "REG":
+        back_label = "🔙 Back to Training Dates"
+        back_data = "ATTD_BACK_REG" 
+    else:
+        back_label = "🔙 Back to Performance Topics"
+        back_data = "ATTD_BACK_PERF"
+    
+    keyboard.append([InlineKeyboardButton("💾 Confirm & Save Record", callback_data="ATTD_CONFIRM")])
+    keyboard.append([InlineKeyboardButton(back_label, callback_data=back_data)])
     return InlineKeyboardMarkup(keyboard)
 
-
+# 1. Main Home Menu: Keep the Exit button (this is the top level)
 def _build_home_keyboard() -> InlineKeyboardMarkup:
-    """Top-level attendance menu: Regular Training vs Performance."""
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📋 Regular Training", callback_data="ATTD_MODE|REG")],
-        [InlineKeyboardButton("🎭 Performance", callback_data="ATTD_MODE|PERF")],
-        [InlineKeyboardButton("❌ CANCEL", callback_data="ATTD_CANCEL")],
+        [InlineKeyboardButton("🏋️ For Regular Training", callback_data="ATTD_CAT|REGULAR")],
+        [InlineKeyboardButton("🎭 For Performance", callback_data="ATTD_CAT|PERF")],
+        [InlineKeyboardButton("🦅 Exit to Cockpit", callback_data="DASH_VIEW|HOME")] 
     ])
 
-
+# 2. Date/Event Selection Lists: Remove Exit, keep Back to Category
 def _build_date_list_keyboard(dates) -> InlineKeyboardMarkup:
-    """Build the training-date picker keyboard (the first layer of the flow).
-
-    Latest date first; each button shows the present count in brackets.
-    """
-    keyboard = [[InlineKeyboardButton(f"{label} ({present})", callback_data=f"ATTD_DATE|{col}")]
-                for col, label, present in dates]
+    keyboard = [
+        [InlineKeyboardButton(f"{label} ({present})", callback_data=f"ATTD_DATE|{col}")]
+        for col, label, present in dates
+    ]
     keyboard.append([InlineKeyboardButton("✏️ Modify a Date", callback_data="ATTD_MODMENU")])
-    keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="ATTD_HOME")])
-    keyboard.append([InlineKeyboardButton("❌ CANCEL", callback_data="ATTD_CANCEL")])
+    # THIS DATA MUST MATCH THE HANDLER ABOVE
+    keyboard.append([InlineKeyboardButton("🔙 Back to Category Menu", callback_data="ATTD_HOME")])
     return InlineKeyboardMarkup(keyboard)
-
 
 def _build_perf_event_list_keyboard(events) -> InlineKeyboardMarkup:
-    """Performance-event picker — one button per PERF-tab event, latest first,
-    each showing the present count in brackets."""
-    keyboard = [[InlineKeyboardButton(f"{name} ({present})", callback_data=f"ATTD_PEVT|{tid}")]
-                for tid, name, present in events]
-    keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="ATTD_HOME")])
-    keyboard.append([InlineKeyboardButton("❌ CANCEL", callback_data="ATTD_CANCEL")])
+    keyboard = [
+        [InlineKeyboardButton(f"{name} ({present})", callback_data=f"ATTD_PEVT|{tid}")]
+        for tid, name, present in events
+    ]
+    # THIS DATA MUST MATCH THE HANDLER ABOVE
+    keyboard.append([InlineKeyboardButton("🔙 Back to Performance Topics", callback_data="ATTD_BACK_PERF")])
     return InlineKeyboardMarkup(keyboard)
 
-
+# 3. Modify Date Sub-Menu: Keep Back to Training Dates, remove Exit
 def _build_moddate_list_keyboard(dates) -> InlineKeyboardMarkup:
-    """Build the date picker for the 'modify a date' sub-flow (latest date first)."""
-    keyboard = [[InlineKeyboardButton(f"{label} ({present})", callback_data=f"ATTD_MODDATE|{col}")]
-                for col, label, present in dates]
-    keyboard.append([InlineKeyboardButton("🔙 Back to Dates", callback_data="ATTD_BACK")])
-    keyboard.append([InlineKeyboardButton("❌ CANCEL", callback_data="ATTD_CANCEL")])
+    keyboard = [
+        [InlineKeyboardButton(f"{label} ({present})", callback_data=f"ATTD_MODDATE|{col}")]
+        for col, label, present in dates
+    ]
+    keyboard.append([InlineKeyboardButton("🔙 Back to Training Dates", callback_data="ATTD_BACK")])
     return InlineKeyboardMarkup(keyboard)
 
 
@@ -122,87 +126,135 @@ def _load_dates(context: ContextTypes.DEFAULT_TYPE, force: bool = False):
     context.user_data["attd_dates"] = dates
     return dates
 
+async def _update_attendance_bubble(query, text, keyboard, context):
+    """The absolute master function for updating the Cockpit."""
+    chat_id = query.message.chat_id
+    msg_id = context.user_data.get("attd_bubble_id")
+    
+    if not msg_id:
+        sent = await query.message.reply_text(text, reply_markup=keyboard, parse_mode="Markdown")
+        context.user_data["attd_bubble_id"] = sent.message_id
+    else:
+        try:
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=msg_id,
+                text=text,
+                reply_markup=keyboard,
+                parse_mode="Markdown"
+            )
+        except Exception as e:
+            # This fallback is critical to prevent crashes
+            print(f"[DEBUG] Edit failed: {e}")
+            sent = await query.message.reply_text(text, reply_markup=keyboard, parse_mode="Markdown")
+            context.user_data["attd_bubble_id"] = sent.message_id
 
-async def _show_reg_dates(query, context: ContextTypes.DEFAULT_TYPE, force: bool = False):
-    """Edit the message to show the Regular-Training date picker."""
+async def _show_reg_dates(query, context, force=False):
     context.user_data["attd_mode"] = "REG"
     dates = _load_dates(context, force=force)
+    
     if not dates:
-        await query.edit_message_text(
-            "📅 No polled training dates yet. A date appears here once it has a poll id "
-            "(auto-polled at D-4, or via Modify a Date)."
+        await _update_attendance_bubble(
+            query, 
+            "📅 *No polled training dates yet.*", 
+            InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Category", callback_data="ATTD_HOME")]]), 
+            context
         )
         return
-    await query.edit_message_text(
-        "📋 *Mark Attendance [REG]*\nSelect a training date:",
-        reply_markup=_build_date_list_keyboard(dates),
-        parse_mode="Markdown",
+
+    await _update_attendance_bubble(
+        query, 
+        "📋 *Mark Attendance [REG]*\nSelect a training date:", 
+        _build_date_list_keyboard(dates), 
+        context
     )
 
-
-async def _show_perf_events(query, context: ContextTypes.DEFAULT_TYPE):
-    """Edit the message to show the Performance-event picker."""
+async def _show_perf_events(query, context: ContextTypes.DEFAULT_TYPE, success_banner: str = ""):
+    """Edit the message to show the Performance-event picker with optional success banner."""
     context.user_data["attd_mode"] = "PERF"
     events = get_perf_event_list()
     context.user_data["attd_pevents"] = events
+    
+    # 🎯 Build the text, prepending the banner if it exists
+    text = f"{success_banner}\n\n" if success_banner else ""
+    text += "🎭 *Mark Attendance [PERF]*\nSelect a performance event:"
+
     if not events:
-        await query.edit_message_text(
-            "🎭 No performances found in the PERF tab yet. Create one with `/new` first."
-        )
+        error_text = "🎭 No performances found in the PERF tab yet. Create one with `/new` first."
+        await _update_attendance_bubble(query, error_text, None, context)
         return
-    await query.edit_message_text(
-        "🎭 *Mark Attendance [PERF]*\nSelect a performance event:",
-        reply_markup=_build_perf_event_list_keyboard(events),
-        parse_mode="Markdown",
+        
+    await _update_attendance_bubble(
+        query, 
+        text, 
+        _build_perf_event_list_keyboard(events), 
+        context
     )
 
 
 async def start_attendance_modify(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Entry point (DM `attd`): show the top-level category menu (REG / PERF)."""
     if update.effective_user.id not in ADMIN_DM_USER_IDS:
         return
     _clear(context)
     _clear_moddate(context)
-    context.user_data.pop("attd_dates", None)
-    context.user_data.pop("attd_pevents", None)
-    await update.effective_message.reply_text(
-        HOME_TEXT, reply_markup=_build_home_keyboard(), parse_mode="Markdown"
+    
+    # Save the bubble ID immediately
+    sent = await update.effective_message.reply_text(
+        "📋 Attendance Cockpit\nSelect a category:", 
+        reply_markup=_build_home_keyboard(), 
+        parse_mode="Markdown"
     )
+    context.user_data["attd_bubble_id"] = sent.message_id
 
 
 async def attendance_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle all ATTD_* callbacks for the modify-attendance flow."""
     query = update.callback_query
+    # 🎯 Data must be defined here
+    data = query.data 
+    
+    print(f"[DEBUG] Callback: {data}")
     await query.answer()
+    
+    # Ensure attd_bubble_id is set
+    if not context.user_data.get("attd_bubble_id"):
+        context.user_data["attd_bubble_id"] = query.message.message_id
 
     if update.effective_user.id not in ADMIN_DM_USER_IDS:
         return
 
-    data = query.data
-
-    # --- Top-level category menu ---
-    if data == "ATTD_MODE|REG":
+    # --- 1. BACK-BUTTON HANDLERS ---
+    if data == "ATTD_BACK_REG":
+        context.user_data["attd_mode"] = "REG" 
         _clear(context)
-        try:
-            await _show_reg_dates(query, context, force=True)
-        except Exception as e:
-            await query.edit_message_text(f"❌ Failed to read Attendance sheet: {e}")
+        context.user_data["attd_mode"] = "REG" 
+        await _show_reg_dates(query, context, force=True)
         return
 
-    if data == "ATTD_MODE|PERF":
+    if data == "ATTD_BACK_PERF":
+        context.user_data["attd_mode"] = "PERF"
         _clear(context)
-        try:
-            await _show_perf_events(query, context)
-        except Exception as e:
-            await query.edit_message_text(f"❌ Failed to read PERF TABULATION: {e}")
+        context.user_data["attd_mode"] = "PERF"
+        await _show_perf_events(query, context)
         return
 
+    # --- 2. ENTRY HANDLERS ---
+    if data == "ATTD_CAT|REGULAR":
+        _clear(context)
+        context.user_data["attd_mode"] = "REG"
+        await _show_reg_dates(query, context, force=True)
+        return
+    
+    if data == "ATTD_CAT|PERF":
+        _clear(context)
+        context.user_data["attd_mode"] = "PERF"
+        await _show_perf_events(query, context)
+        return
+
+    # --- 3. OTHER HANDLERS (The rest of your logic) ---
     if data == "ATTD_HOME":
         _clear(context)
         _clear_moddate(context)
-        await query.edit_message_text(
-            HOME_TEXT, reply_markup=_build_home_keyboard(), parse_mode="Markdown"
-        )
+        await _update_attendance_bubble(query, HOME_TEXT, _build_home_keyboard(), context)
         return
 
     # --- Performance event chosen: find/create its column, render toggles ---
@@ -233,7 +285,7 @@ async def attendance_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         await query.edit_message_text(
             f"🎭 *{name}* — tap to toggle, then CONFIRM.\n"
-            "✅ = present · ⬜ = absent (sorted by attendance).",
+            "✅ = present | ⬜ = absent",
             reply_markup=_render_attendance_keyboard(context),
             parse_mode="Markdown",
         )
@@ -265,8 +317,7 @@ async def attendance_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         await query.edit_message_text(
             f"📅 *{label}* — tap to toggle, then CONFIRM.\n\n"
-            "✅ = present \n"
-            "⬜ = absent",
+            "✅ = present | ⬜ = absent",
             reply_markup=_render_attendance_keyboard(context),
             parse_mode="Markdown",
         )
@@ -276,20 +327,33 @@ async def attendance_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     if data == "ATTD_MODMENU":
         _clear(context)
         _clear_moddate(context)
+        
         try:
-            dates = _future_dates(_load_dates(context))  # past trainings can't be re-dated
+            dates = _future_dates(_load_dates(context))
         except Exception as e:
-            await query.edit_message_text(f"❌ Failed to read Attendance sheet: {e}")
-            return
-        if not dates:
-            await query.edit_message_text(
-                "📅 No upcoming training dates to modify (all polled dates are in the past)."
+            # 🎯 THIS IS THE FIX: Use _update_attendance_bubble instead of reply_text
+            await _update_attendance_bubble(
+                query, 
+                f"❌ Failed to read Attendance sheet: {e}", 
+                InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="ATTD_HOME")]]), 
+                context
             )
             return
-        await query.edit_message_text(
-            "✏️ *Modify a Training Date*\nSelect the date to change (upcoming only):",
-            reply_markup=_build_moddate_list_keyboard(dates),
-            parse_mode="Markdown",
+        
+        if not dates:
+            await _update_attendance_bubble(
+                query, 
+                "📅 No upcoming training dates to modify.", 
+                InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="ATTD_HOME")]]), 
+                context
+            )
+            return
+            
+        await _update_attendance_bubble(
+            query,
+            "✏️ *Modify a Training Date*\nSelect the date to change:",
+            _build_moddate_list_keyboard(dates),
+            context
         )
         return
 
@@ -408,7 +472,7 @@ async def attendance_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         marks[row] = not marks[row]
         await query.edit_message_reply_markup(reply_markup=_render_attendance_keyboard(context))
         return
-
+    
     # --- Confirm: batch-write the column (to the right tab for the mode) ---
     if data == "ATTD_CONFIRM":
         col = context.user_data.get("attd_col")
@@ -430,84 +494,82 @@ async def attendance_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             _clear(context)
             return
 
-        present = sum(1 for v in marks.values() if v)
-        await query.edit_message_text(
-            f"✅ Attendance saved for *{label}*.\n{present} present / {len(marks)} members.",
-            parse_mode="Markdown",
-        )
+        # 🟢 Success banner
+        banner = f"🟢 *Success: Attendance roster log record for {label} has been successfully compiled and saved to Google Sheets!*"
+        
+        # 🎯 FIX: Determine mode and re-trigger the appropriate list view instead of the Cockpit
         _clear(context)
+        
+        if mode == "PERF":
+            # Pass the banner into the performance event list view
+            await _show_perf_events(query, context, success_banner=banner)
+        else:
+            # Pass the banner into the regular training dates list view
+            await _show_reg_dates(query, context, force=True, success_banner=banner)
         return
 
     # --- Cancel ---
     if data == "ATTD_CANCEL":
         _clear(context)
-        await query.edit_message_text("❌ Attendance editing cancelled.")
+        from handlers.private_handlers import DASHBOARD_TEXT, _dashboard_keyboard
+        await _update_attendance_bubble(query, DASHBOARD_TEXT, _dashboard_keyboard(), context)
         return
 
 
 async def handle_moddate_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Capture the typed new date during the 'modify a date' sub-flow.
-
-    Returns True if the message was consumed (i.e. a date modification is in
-    progress), so the DM dispatcher can stop processing it as anything else.
-    """
-    if not context.user_data.get("attd_moddate_col"):
-        return False
-    if update.effective_user.id not in ADMIN_DM_USER_IDS:
-        return False
-
+    if not context.user_data.get("attd_moddate_col"): return False
+    
+    msg_id = context.user_data.get("attd_bubble_id")
+    chat_id = update.effective_chat.id
     text = (update.effective_message.text or "").strip()
+    
+    # Delete the user's typed message to keep the chat clean
+    await update.effective_message.delete()
+
     try:
-        # Enforce the standardised date format via the shared date parser:
-        # accepts "12 June", "12 Jun", "12 June 2026" — rejects slash formats like
-        # "12/6". Output is the canonical "DD Mon YYYY" label; drop any trailing
-        # time component so the cell stays a pure date (parse_sheet_date reads it).
         new_str = parse_date_line(text).split("  ")[0].strip()
     except ValueError:
-        await update.effective_message.reply_text(
-            "⚠️ Please enter the date in a standard format like `12 June`, "
-            "`12 Jun`, or `12 June 2026` — *not* `12/6`.",
+        await context.bot.edit_message_text(
+            chat_id=chat_id, message_id=msg_id,
+            text="⚠️ Invalid format. Use `12 June` or `12 June 2026`.",
             parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="ATTD_HOME")]])
         )
         return True
 
-    # Check immediately, the moment the date is entered.
     import re
     from datetime import date as _date
     d = parse_sheet_date(new_str)
     today = datetime.now(sg_tz).date()
 
-    # If the user typed no year (no digit after the month), judge the day/month in
-    # the CURRENT year — so a date that has already passed (e.g. "2 June" when it's
-    # 5 June) is flagged as past right away instead of the parser silently rolling
-    # it forward to next year. (Type the year explicitly to schedule across years.)
     year_typed = bool(re.search(r"[A-Za-z]\s*\d", text))
     if d and not year_typed:
         try:
             d = _date(today.year, d.month, d.day)
             new_str = d.strftime("%d %b %Y")
-        except ValueError:
-            pass
+        except ValueError: pass
 
     if not d or d < today:
-        await update.effective_message.reply_text(
-            f"⚠️ `{new_str}` is in the past. Enter a date that's today or later.",
+        await context.bot.edit_message_text(
+            chat_id=chat_id, message_id=msg_id,
+            text=f"⚠️ `{new_str}` is in the past. Enter a date that's today or later.",
             parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Category", callback_data="ATTD_HOME")]])
         )
         return True
-    new_str = d.strftime("%d %b %Y")
+
+    # SUCCESS: Update the SAME bubble
     context.user_data["attd_moddate_new"] = new_str
     old_label = context.user_data.get("attd_moddate_label", "")
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ CONFIRM", callback_data="ATTD_MODDATE_CONFIRM")],
-        [InlineKeyboardButton("❌ CANCEL", callback_data="ATTD_MODDATE_CANCEL")],
-    ])
-    await update.effective_message.reply_text(
-        f"Change *{old_label}* → *{new_str}*?\n\n"
-        "This clears the column's ticks. A poll is posted now if the new date "
-        "is within 4 days; otherwise it's auto-posted when due.",
-        reply_markup=keyboard,
+    
+    await context.bot.edit_message_text(
+        chat_id=chat_id, message_id=msg_id,
+        text=f"Change *{old_label}* → *{new_str}*?\n\nThis clears the column's ticks.",
         parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Confirm Modification", callback_data="ATTD_MODDATE_CONFIRM")],
+            [InlineKeyboardButton("🔙 Back to Category", callback_data="ATTD_HOME")]
+        ])
     )
     return True
 

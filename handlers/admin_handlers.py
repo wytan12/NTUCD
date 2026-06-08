@@ -1,9 +1,10 @@
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from utils.decorators import admin_only
-from services.google_sheets import get_gspread_sheet, get_attendance_ws, get_cached_records
-from config import sg_tz, CHAT_ID, ADMIN_DM_USER_IDS
+from services.google_sheets import get_gspread_sheet, get_attendance_ws, get_cached_records, invalidate_sheet_cache
+from config import sg_tz, CHAT_ID, ADMIN_DM_USER_IDS, SHEET_COLUMNS
 from datetime import datetime, timedelta
+from handlers.private_handlers import DASHBOARD_TEXT, _dashboard_keyboard
 import re
 
 @admin_only
@@ -24,13 +25,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         print(f"[SECURITY] Unauthorized /start attempt blocked for user ID: {current_uid}")
         return
 
-    # Show the full Admin DM Dashboard (with the 🔄 Refresh control).
-    from handlers.private_handlers import DASHBOARD_TEXT, _dashboard_keyboard
-    await update.message.reply_text(
+    # 🧼 Clear out any stale session context variables first
+    saved_master_id = context.user_data.get("master_dash_id")
+    context.user_data.clear()
+
+    # 🚀 Send the master cockpit layout and save its ID safely
+    msg = await update.message.reply_text(
         DASHBOARD_TEXT,
         reply_markup=_dashboard_keyboard(),
         parse_mode="Markdown",
     )
+    # Lock this ID permanently; older bubbles will deactivate instantly
+    context.user_data["master_dash_id"] = msg.message_id
 
 @admin_only
 async def thread_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -252,15 +258,24 @@ async def manual_test_reminder_trigger(update: Update, context: ContextTypes.DEF
     await execute_manual_test_scan(update, context)
 
 # 🧠 NEW DM PORTAL GENERATOR: Prompts admin to select which event they want to trigger manual reminders for
-async def initiate_remind_portal_via_dm(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Prompts admin to select which event they want to trigger manual reminders for."""
+async def initiate_remind_portal_via_dm(update: Update, context: ContextTypes.DEFAULT_TYPE, success_banner: str = ""):
+    """Prompts admin to select an event to trigger manual reminders cleanly inside a single persistent bubble window."""
     target_chat = update.effective_user
-    status_loading = await context.bot.send_message(chat_id=target_chat.id, text="⏳ Fetching performance log records...")
+    query = update.callback_query
+    active_dash_id = context.user_data.get("master_dash_id")
+    
+    prompt_text = ""
+    if success_banner:
+        prompt_text = f"{success_banner}\n\n"
+    prompt_text += "🔔 *Manual Reminder Dispatch Center*\nSelect which performance topic thread you want to issue checklist reminders into:"
 
     try:
         records = get_cached_records()
         if not records:
-            await status_loading.edit_text("📋 The performance sheet is currently empty.")
+            text_empty = "📋 The performance sheet is currently empty."
+            if query: await query.edit_message_text(text_empty)
+            elif active_dash_id: await context.bot.edit_message_text(chat_id=target_chat.id, message_id=active_dash_id, text=text_empty)
+            else: await context.bot.send_message(chat_id=target_chat.id, text=text_empty)
             return
             
         buttons = []
@@ -270,27 +285,38 @@ async def initiate_remind_portal_via_dm(update: Update, context: ContextTypes.DE
                 event_name = row.get("EVENT NAME", "Unnamed Event")
                 buttons.append([InlineKeyboardButton(f"📢 Remind: {event_name} ({tid})", callback_data=f"MANUAL_REMIND_TID|{tid}")])
                 
-        buttons.append([InlineKeyboardButton("❌ Cancel", callback_data="CANCEL_NEW_PERF")])
-        await status_loading.delete()
+        buttons.append([InlineKeyboardButton("🦅 Exit to Cockpit", callback_data="DASH_VIEW|HOME")])
+        markup = InlineKeyboardMarkup(buttons)
         
-        await context.bot.send_message(
-            chat_id=target_chat.id,
-            text="🔔 *Manual Reminder Dispatch Center*\nSelect which performance topic thread you want to issue checklist reminders into:",
-            reply_markup=InlineKeyboardMarkup(buttons),
-            parse_mode="Markdown"
-        )
+        # 🎯 FORCE IN-PLACE SINGLE BUBBLE ALWAYS
+        if query:
+            await query.edit_message_text(prompt_text, reply_markup=markup, parse_mode="Markdown")
+            return
+
+        if active_dash_id:
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=target_chat.id, message_id=active_dash_id,
+                    text=prompt_text, reply_markup=markup, parse_mode="Markdown"
+                )
+                return
+            except Exception: pass
+
+        msg = await context.bot.send_message(chat_id=target_chat.id, text=prompt_text, reply_markup=markup, parse_mode="Markdown")
+        context.user_data["master_dash_id"] = msg.message_id
+        
     except Exception as e:
-        await status_loading.edit_text(f"❌ Failed to build manual remind matrix: {e}")
+        err_msg = f"❌ Failed to build manual remind matrix: {e}"
+        if query: await query.edit_message_text(err_msg)
+        else: await context.bot.send_message(chat_id=target_chat.id, text=err_msg)
 
 async def execute_manual_remind_dispatch(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Validates approval before triggering checklist broadcast public postings."""
+    """Validates approval, blocks past/REJECTED topics, and routes inline escrow confirmation gates."""
     query = update.callback_query
-    await query.answer() # Acknowledge the click instantly so the button stops spinning
-    await query.edit_message_text("⏳ Verifying sheet entry approval parameters...")
+    await query.answer() 
     
-    # 🧠 EXTRACT THREAD ID: Parse the thread ID string directly from the callback payload
     try:
-        callback_data = query.data # e.g. "MANUAL_REMIND_TID|12345"
+        callback_data = query.data 
         thread_id = int(callback_data.split("|")[1])
     except (IndexError, ValueError) as parse_err:
         await query.edit_message_text(f"❌ Error parsing callback metadata parameters: `{parse_err}`")
@@ -299,26 +325,56 @@ async def execute_manual_remind_dispatch(update: Update, context: ContextTypes.D
     try:
         sheet = get_gspread_sheet()
         records = sheet.get_all_records()
-        row = next((r for r in records if str(r.get("THREAD ID")) == str(thread_id)), None)
         
-        if not row:
+        row_info = next(((idx, r) for idx, r in enumerate(records, start=2) if str(r.get("THREAD ID")) == str(thread_id)), None)
+        if not row_info:
             await query.edit_message_text("❌ Error: Selected performance ID was not found inside the sheet records.")
             return
             
+        row_number, row = row_info
         status = row.get("STATUS", "").strip().upper()
         event_name = row.get("EVENT NAME", "Unnamed Event")
-        
+        perf_cell = row.get("PERF DATE | TIME", "").strip()
+
+        # GUARD 1: Block Expired Shows
+        event_date_obj = _extract_first_date_object(perf_cell)
+        today_date = datetime.now(sg_tz).date()
+        if event_date_obj and event_date_obj.date() < today_date:
+            banner = f"⏳ *Manual Remind Blocked: The performance '{event_name}' is already over! Cannot issue reminders into past dates.*"
+            await initiate_remind_portal_via_dm(update, context, success_banner=banner)
+            return
+
+        # GUARD 2: Block REJECTED Bookings
+        if status == "REJECTED":
+            banner = (
+                f"❌ *Manual Remind Blocked: The performance '{event_name}' is currently marked as REJECTED!*\n\n"
+                f"👉 _Reminders are explicitly disabled. To proceed, please update the status to **ACCEPTED** first via the edit cockpit fields panel view._"
+            )
+            await initiate_remind_portal_via_dm(update, context, success_banner=banner)
+            return
+
+        # STEP 2 MID-FLOW INTERCEPTOR: If status is blank/PENDING, pause and offer inline approval
         if status != "ACCEPTED":
-            display_status = f"`{status}`" if status else "*BLANK / PENDING*"
+            context.user_data["remind_escrow_tid"] = thread_id
+            context.user_data["remind_escrow_row"] = row_number
+            
+            escrow_keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ YES, Approve & Broadcast", callback_data="REMIND_ESCROW_CONFIRM|YES")],
+                [InlineKeyboardButton("❌ NO, Back to Topics", callback_data="REMIND_ESCROW_CONFIRM|NO")]
+            ])
+            
             await query.edit_message_text(
-                f"⚠️ *Manual Remind Blocked* ⚠️\n\n"
-                f"Cannot push reminders out to the public thread channel for *{event_name}* because its sheet status is currently {display_status}.\n\n"
-                f"👉 Please use `modify` inside your dashboard to approve it first!",
+                text=(
+                    f"⚠️ **STATUS NOTICE:** Cannot push reminders out to the public thread channel for *{event_name}* "
+                    f"because its status is currently **{status or 'PENDING'}**.\n\n"
+                    f"❓ Would you like to update its row status to **ACCEPTED** right now inside the database to authorize this public broadcast?"
+                ),
+                reply_markup=escrow_keyboard,
                 parse_mode="Markdown"
             )
             return
 
-        perf_cell = row.get("PERF DATE | TIME", "").strip()
+        # Status is already ACCEPTED -> Run standard broadcast immediately
         date_lines = "\n".join([f"• {d.strip()}" for d in perf_cell.splitlines() if d.strip()])
         notice_text = _compile_checklist_notice_template(event_name, row.get("LOCATION", "TBD"), date_lines)
         
@@ -329,7 +385,8 @@ async def execute_manual_remind_dispatch(update: Update, context: ContextTypes.D
             message_thread_id=thread_id
         )
         
-        await query.edit_message_text(f"✅ *Success!* Manual checklist reminder layout has been successfully broadcasted and posted into topic thread *{event_name}* (`{thread_id}`).", parse_mode="Markdown")
+        banner = f"✨ *Success! Manual checklist reminder layout has been successfully broadcasted and posted into topic thread {event_name} ({thread_id}).*"
+        await initiate_remind_portal_via_dm(update, context, success_banner=banner)
         
     except Exception as e:
         await query.edit_message_text(f"❌ Critical error during dispatch runtime loop: `{e}`", parse_mode="Markdown")
@@ -337,11 +394,9 @@ async def execute_manual_remind_dispatch(update: Update, context: ContextTypes.D
 @admin_only
 async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle standard manual chat trigger command /remind securely."""
-    # 🤐 RULE 1: If typed inside group topics, remain 100% passive and leave text untouched
     if update.effective_chat.type != "private":
         return
 
-    # 🛡️ RULE 2: STRICT PRIVATE GATEWAY - Only listed admins can execute it inside DMs
     is_approved_admin = False
     current_uid = update.effective_user.id
     
@@ -351,13 +406,12 @@ async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif isinstance(ADMIN_DM_USER_IDS, (list, set)) and current_uid in ADMIN_DM_USER_IDS:
         is_approved_admin = True
 
-    # If unverified stranger or non-admin attempts execution, drop thread silently
     if not is_approved_admin:
         print(f"[SECURITY] Unauthorized command trigger blocked for user ID: {current_uid}")
         return
 
-    # 🚀 Valid Admin verified: Fire up the interactive selection buttons panel layout
-    from handlers.admin_handlers import initiate_remind_portal_via_dm
+    # In-place tracking update configuration
+    context.user_data["master_dash_id"] = update.effective_message.message_id
     await initiate_remind_portal_via_dm(update, context)
 
 async def send_reminder(bot, chat_id, thread_id):
@@ -391,3 +445,200 @@ async def send_reminder(bot, chat_id, thread_id):
         )
     except Exception as e:
         print(f"[ERROR] Failed to send reminder: {e}")
+
+async def handle_remind_escrow_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Processes fast-track status override confirmations directly inside the single-bubble matrix."""
+    query = update.callback_query
+    await query.answer()
+    
+    parts = query.data.split("|")
+    selection = parts[1]
+    
+    target_tid = context.user_data.pop("remind_escrow_tid", None)
+    row_number = context.user_data.pop("remind_escrow_row", None)
+    
+    if not target_tid or not row_number:
+        await query.edit_message_text("⚠️ Interrupted tracking context. Please re-open the Reminder panel.")
+        return
+
+    if selection == "NO":
+        await initiate_remind_portal_via_dm(update, context)
+        return
+
+    sheet = get_gspread_sheet()
+    status_col = SHEET_COLUMNS.index("STATUS") + 1
+    sheet.update_cell(row_number, status_col, "ACCEPTED")
+    invalidate_sheet_cache()
+    
+    updated_row = sheet.row_values(row_number)
+    while len(updated_row) < len(SHEET_COLUMNS):
+        updated_row.append("")
+    row_data = dict(zip(SHEET_COLUMNS, updated_row))
+    
+    event_name = row_data.get("EVENT NAME", "Unnamed Event")
+    perf_cell = row_data.get("PERF DATE | TIME", "").strip()
+    date_lines = "\n".join([f"• {d.strip()}" for d in perf_cell.splitlines() if d.strip()])
+    notice_text = _compile_checklist_notice_template(event_name, row_data.get("LOCATION", "TBD"), date_lines)
+    
+    await context.bot.send_message(
+        chat_id=CHAT_ID,
+        text=notice_text,
+        parse_mode="Markdown",
+        message_thread_id=target_tid
+    )
+    
+    banner_alert = (
+        f"🟢 *Success: Updated internal field [STATUS] inside the database registry to ACCEPTED!*\n"
+        f"✨ *Success: Manual checklist reminder layout has been successfully broadcasted and posted into topic thread {event_name} ({target_tid})!*"
+    )
+    await initiate_remind_portal_via_dm(update, context, success_banner=banner_alert)
+
+async def initiate_announce_portal_via_dm(update: Update, context: ContextTypes.DEFAULT_TYPE, success_banner: str = ""):
+    """Renders all available forum threads for announcement target selection inside a single bubble workspace window."""
+    target_chat = update.effective_user
+    query = update.callback_query
+    active_dash_id = context.user_data.get("master_dash_id")
+
+    prompt_text = ""
+    if success_banner:
+        prompt_text = f"{success_banner}\n\n"
+    prompt_text += "📢 *Broadcast Announcement Center*\nSelect which active topic thread channel you want to broadcast an official announcement into:"
+
+    try:
+        sheet = get_gspread_sheet()
+        records = sheet.get_all_records()
+        buttons = []
+        
+        # Inject main landing channel configuration option safely
+        buttons.append([InlineKeyboardButton("💬 Post to: General Chat (Main Channel)", callback_data="ANNOUNCE_TARGET|0")])
+        
+        if records:
+            for row in records:
+                tid = row.get("THREAD ID")
+                if str(tid).isdigit():
+                    event_name = row.get("EVENT NAME", "Unnamed Event")
+                    buttons.append([InlineKeyboardButton(f"📣 Post to: {event_name} ({tid})", callback_data=f"ANNOUNCE_TARGET|{tid}")])
+                    
+        try:
+            from services.google_sheets import get_cached_values
+            others_rows = get_cached_values(tab_name="OTHERS")
+            if others_rows:
+                for o_row in others_rows:
+                    if o_row and str(o_row[0]).isdigit():
+                        o_tid = int(o_row[0])
+                        o_name = o_row[1].strip() if len(o_row) > 1 and o_row[1] else "Bonding/Misc Thread"
+                        buttons.append([InlineKeyboardButton(f"☕ Post to: {o_name} ({o_tid})", callback_data=f"ANNOUNCE_TARGET|{o_tid}")])
+        except Exception as err:
+            print(f"[WARN] Failed to read OTHERS tab inside announcement matrix list template view parameters: {err}")
+
+        buttons.append([InlineKeyboardButton("🦅 Exit to Cockpit", callback_data="DASH_VIEW|HOME")])
+        markup = InlineKeyboardMarkup(buttons)
+
+        if query:
+            await query.edit_message_text(prompt_text, reply_markup=markup, parse_mode="Markdown")
+            return
+
+        if active_dash_id:
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=target_chat.id, message_id=active_dash_id,
+                    text=prompt_text, reply_markup=markup, parse_mode="Markdown"
+                )
+                return
+            except Exception: pass
+
+        msg = await context.bot.send_message(chat_id=target_chat.id, text=prompt_text, reply_markup=markup, parse_mode="Markdown")
+        context.user_data["master_dash_id"] = msg.message_id
+
+    except Exception as e:
+        err_msg = f"❌ Failed to build announcement portal chart matrix: {e}"
+        if query: await query.edit_message_text(err_msg)
+        else: await context.bot.send_message(chat_id=target_chat.id, text=err_msg)
+
+async def execute_manual_announcement_dispatch(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Intercepts target clicks, checks validation gates, and puts dashboard bubble into input prompt text mode."""
+    query = update.callback_query
+    await query.answer()
+
+    try:
+        callback_data = query.data  
+        target_tid = int(callback_data.split("|")[1])
+    except (IndexError, ValueError) as parse_err:
+        await query.edit_message_text(f"❌ Error parsing callback metadata parameters: `{parse_err}`")
+        return
+
+    # Skip validation layer security checks cleanly if targeted to General Chat room directly
+    if target_tid != 0:
+        try:
+            sheet = get_gspread_sheet()
+            records = sheet.get_all_records()
+            perf_row = next((r for r in records if str(r.get("THREAD ID")) == str(target_tid)), None)
+            
+            if perf_row:
+                status = perf_row.get("STATUS", "").strip().upper()
+                event_name = perf_row.get("EVENT NAME", "Unnamed Event")
+                perf_cell = perf_row.get("PERF DATE | TIME", "").strip()
+
+                event_date_obj = _extract_first_date_object(perf_cell)
+                today_date = datetime.now(sg_tz).date()
+                if event_date_obj and event_date_obj.date() < today_date:
+                    banner = f"⏳ *Broadcast Blocked: The performance '{event_name}' is already over! Cannot post text into expired topic timelines.*"
+                    await initiate_announce_portal_via_dm(update, context, success_banner=banner)
+                    return
+
+                if status == "REJECTED":
+                    banner = f"❌ *Broadcast Blocked: '{event_name}' is currently REJECTED! Official announcements are locked for cancelled bookings.*"
+                    await initiate_announce_portal_via_dm(update, context, success_banner=banner)
+                    return
+        except Exception as err:
+            print(f"[WARN] Failed validation scan inside announcement intercept: {err}")
+
+    context.user_data["announcement_target_tid"] = target_tid
+    context.user_data["modify_field"] = "ANNOUNCEMENT_TEXT_CAPTURE" 
+
+    display_target_title = "General Chat (Main Channel)" if target_tid == 0 else f"Topic Thread ID: `{target_tid}`"
+    prompt_text = (
+        f"📢 *Broadcast New Announcement*\n"
+        f"Target Destination: *{display_target_title}*\n\n"
+        f"👉 _Type your announcement message content down below and press send:_ "
+    )
+    
+    escape_keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔙 Back to Topics List", callback_data="DASH_VIEW|LAUNCH_ANNOUNCE")],
+        [InlineKeyboardButton("🦅 Exit to Cockpit", callback_data="DASH_VIEW|HOME")]
+    ])
+    
+    await query.edit_message_text(prompt_text, reply_markup=escape_keyboard, parse_mode="Markdown")
+
+async def apply_announcement_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Processes announcement text, automatically shifts thread IDs, and triggers clean dashboard portal refreshes."""
+    raw_text = update.message.text.strip()
+    
+    try:
+        await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=update.message.message_id)
+    except Exception: pass
+        
+    target_tid = context.user_data.pop("announcement_target_tid", None)
+    active_dash_id = context.user_data.get("master_dash_id")
+    context.user_data.pop("modify_field", None) 
+    
+    if target_tid is None or not active_dash_id:
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="⚠️ Interrupted tracking context session parameters. Restart using cockpit panel view.")
+        return
+
+    # 🎯 FIX: IF TARGET IS 0, OMIT THE THREAD ID SO IT DROPS CLEANLY INTO GENERAL CHAT ROOM CHANNELS!
+    actual_thread_id = None if target_tid == 0 else int(target_tid)
+
+    try:
+        await context.bot.send_message(
+            chat_id=CHAT_ID,
+            message_thread_id=actual_thread_id,
+            text=f"{raw_text}",
+            parse_mode="Markdown"
+        )
+        dest_label = "General Chat" if target_tid == 0 else f"thread ID `{target_tid}`"
+        banner_msg = f"✨ *Success: Announcement broadcast was successfully deployed and published directly into {dest_label}!*"
+    except Exception as exc:
+        banner_msg = f"❌ *Failed to broadcast announcement to topic room thread:* `{exc}`"
+
+    await initiate_announce_portal_via_dm(update, context, success_banner=banner_msg)

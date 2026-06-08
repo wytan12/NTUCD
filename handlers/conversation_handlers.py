@@ -192,9 +192,14 @@ async def final_date_selection(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Cancel the active conversation and clean up any pending prompt messages."""
-    chat = update.effective_chat
+    """Cancel the active conversation, clean up pending prompt messages,
 
+    and return safely to the primary Cockpit window.
+    """
+    chat = update.effective_chat
+    query = update.callback_query
+
+    # --- 1. Keep your original message history cleanup logic completely intact ---
     try:
         if "modify_prompt_msg_ids" in context.chat_data:
             for msg_id in context.chat_data["modify_prompt_msg_ids"]:
@@ -204,9 +209,32 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         print(f"[WARNING] Failed to delete prompt messages on cancel: {e}")
 
     try:
-        await update.message.delete()
+        if update.message:
+            await update.message.delete()
     except Exception:
         pass
+
+    # --- 2. ADD: Re-render the dashboard home layout instead of leaving it dead ---
+    try:
+        from handlers.private_handlers import DASHBOARD_TEXT, _dashboard_keyboard
+        
+        if query:
+            # If they clicked an "Exit to Cockpit" button, edit the message in place
+            await query.answer()
+            await query.edit_message_text(DASHBOARD_TEXT, reply_markup=_dashboard_keyboard(), parse_mode="Markdown")
+        else:
+            # If they typed a cancellation command, update the current active dashboard bubble
+            active_dash_id = context.user_data.get("master_dash_id")
+            if active_dash_id:
+                await context.bot.edit_message_text(
+                    chat_id=chat.id,
+                    message_id=active_dash_id,
+                    text=DASHBOARD_TEXT,
+                    reply_markup=_dashboard_keyboard(),
+                    parse_mode="Markdown"
+                )
+    except Exception as e:
+        print(f"[WARNING] Failed to restore dashboard home view on cancel: {e}")
 
     return ConversationHandler.END
 

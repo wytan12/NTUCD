@@ -9,6 +9,40 @@ from services.google_sheets import (
 from config import WELCOME_TEA_SHEET, WELCOME_TEA_TAB
 
 
+async def birthday_wish_job(context: ContextTypes.DEFAULT_TYPE):
+    """Daily job (00:00 SGT). Wishes every Active member whose Birthday
+    (day+month in the MEMBER INFO tab) is today, in the group's main channel.
+
+    Members with a Tele ID are @-mentioned via a tg://user link so they get
+    pinged; others are named in bold. Multiple birthdays share one message.
+    """
+    from config import CHAT_ID
+    from services.google_sheets import get_todays_birthdays
+
+    try:
+        bdays = get_todays_birthdays()
+    except Exception as e:
+        print(f"[BIRTHDAY][ERROR] Failed to read member info sheet: {e}")
+        return
+    if not bdays:
+        return
+
+    mentions = [
+        f"[{name}](tg://user?id={tid})" if tid else f"*{name}*"
+        for name, tid in bdays
+    ]
+    text = (
+        "🎂🎉 *HAPPY BIRTHDAY* "
+        + " & ".join(mentions)
+        + "! 🥳\n\nNTUCD wishes you a fantastic year ahead — keep drumming! 🥁"
+    )
+    try:
+        await context.bot.send_message(chat_id=CHAT_ID, text=text, parse_mode="Markdown")
+        print(f"[BIRTHDAY] Wished: {', '.join(n for n, _ in bdays)}")
+    except Exception as e:
+        print(f"[BIRTHDAY][ERROR] Failed to send wish: {e}")
+
+
 async def handle_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Fallback handler for NEW_CHAT_MEMBERS status updates.
 

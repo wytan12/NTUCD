@@ -359,6 +359,108 @@ def is_training_poll_id(poll_id) -> bool:
         return False
 
 
+def get_active_members():
+    """Return active members from the MEMBER INFO tab, highest year first.
+
+    Reads the `MEMBER INFO AY26/27` tab (smart-cached), keeps rows whose
+    `Status` is "Active" (case-insensitive), and returns
+    [(year:int, display_name:str), ...] sorted by year descending (4 → 1), then
+    name A-Z within a year. Display name = Nickname, falling back to Full Name.
+    Header lookup is index-based and case-insensitive, so column order can
+    change without breaking it. A non-numeric/blank Year sorts to the bottom
+    (year 0).
+    """
+    from config import MEMBER_INFO_TAB
+    values = get_cached_values(tab_name=MEMBER_INFO_TAB)
+    if not values:
+        return []
+    header = [h.strip().lower() for h in values[0]]
+
+    def col_idx(name):
+        try:
+            return header.index(name)
+        except ValueError:
+            return None
+
+    name_i = col_idx("nickname")
+    full_i = col_idx("full name (as per matric card)")
+    year_i = col_idx("year")
+    status_i = col_idx("status")
+    if status_i is None:
+        print("[WARN] 'Status' column not found in member info tab.")
+        return []
+
+    def cell(row, i):
+        return row[i].strip() if (i is not None and i < len(row)) else ""
+
+    members = []
+    for row in values[1:]:
+        if cell(row, status_i).lower() != "active":
+            continue
+        name = cell(row, name_i) or cell(row, full_i)
+        if not name:
+            continue
+        try:
+            year = int(cell(row, year_i))
+        except ValueError:
+            year = 0
+        members.append((year, name))
+
+    members.sort(key=lambda m: (-m[0], m[1].lower()))
+    return members
+
+
+def get_todays_birthdays():
+    """Return [(display_name, tele_id_or_None), ...] for Active members whose
+    Birthday matches today (SGT).
+
+    Reads the `MEMBER INFO AY26/27` tab; matches the `Birthday` cell by
+    **day + month only** (the year in the cell is ignored, e.g. "5 June 2026"
+    still matches every 5 June). Only `Status == Active` members are wished.
+    Display name = Nickname, falling back to Full Name; tele_id lets the wish
+    tag the member, None if their Tele ID cell is blank/non-numeric.
+    """
+    from config import MEMBER_INFO_TAB
+    from datetime import datetime
+    values = get_cached_values(tab_name=MEMBER_INFO_TAB)
+    if not values:
+        return []
+    header = [h.strip().lower() for h in values[0]]
+
+    def col_idx(name):
+        try:
+            return header.index(name)
+        except ValueError:
+            return None
+
+    name_i = col_idx("nickname")
+    full_i = col_idx("full name (as per matric card)")
+    bday_i = col_idx("birthday")
+    status_i = col_idx("status")
+    tele_i = col_idx("tele id")
+    if bday_i is None:
+        print("[WARN] 'Birthday' column not found in member info tab.")
+        return []
+
+    def cell(row, i):
+        return row[i].strip() if (i is not None and i < len(row)) else ""
+
+    today = datetime.now(sg_tz).date()
+    out = []
+    for row in values[1:]:
+        if status_i is not None and cell(row, status_i).lower() != "active":
+            continue
+        d = parse_sheet_date(cell(row, bday_i))
+        if not d or (d.day, d.month) != (today.day, today.month):
+            continue
+        name = cell(row, name_i) or cell(row, full_i)
+        if not name:
+            continue
+        tid = cell(row, tele_i)
+        out.append((name, int(tid) if tid.isdigit() else None))
+    return out
+
+
 def get_nickname_by_user_id(user_id):
     """Look up a member's nickname in the MEMBER INFO tab by their Telegram id.
 

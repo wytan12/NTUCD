@@ -850,9 +850,50 @@ async def handle_dashboard_navigation(update: Update, context: ContextTypes.DEFA
         await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
         return
 
-    elif target_view == "MEMBERS":
-        text = "👥 **Active Member Roster Listing**\n\n⏳ *Roster framework online!*\nWe are completely ready to plug your Year sorting features right here during the next step."
-        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🦅 Exit to Cockpit", callback_data="DASH_VIEW|HOME")]])
+    elif target_view == "MEMBERS" or target_view.startswith("MEMBERS_Y"):
+        from services.google_sheets import get_active_members
+        try:
+            members = get_active_members()
+        except Exception as e:
+            keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🦅 Exit to Cockpit", callback_data="DASH_VIEW|HOME")]])
+            await query.edit_message_text(f"❌ Failed to read the member info sheet: `{e}`", reply_markup=keyboard, parse_mode="Markdown")
+            return
+
+        # --- Drill-down: one year's members (tap a year button below) ---
+        if target_view.startswith("MEMBERS_Y"):
+            year = int(target_view[len("MEMBERS_Y"):])
+            names = [n for y, n in members if y == year]
+            year_label = f"Year {year}" if year else "Year —"
+            lines = [f"👥 **Active Members — 🎓 {year_label}**\n_{len(names)} members_\n"]
+            lines += [f"• {n}" for n in names] or ["_(none)_"]
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Back to Year Menu", callback_data="DASH_VIEW|MEMBERS")],
+                [InlineKeyboardButton("🦅 Exit to Cockpit", callback_data="DASH_VIEW|HOME")],
+            ])
+            await query.edit_message_text("\n".join(lines), reply_markup=keyboard, parse_mode="Markdown")
+            return
+
+        # --- Year menu: one button per year (highest first) with member counts ---
+        if not members:
+            text = "👥 **Active Member Roster Listing**\n\n📭 No members marked *Active* in the MEMBER INFO sheet yet."
+            keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🦅 Exit to Cockpit", callback_data="DASH_VIEW|HOME")]])
+        else:
+            counts = {}
+            for y, _n in members:  # members are already sorted year desc
+                counts[y] = counts.get(y, 0) + 1
+            text = (
+                "👥 **Active Member Roster Listing**\n"
+                f"_{len(members)} active members — pick a year to view:_"
+            )
+            buttons = [
+                [InlineKeyboardButton(
+                    f"🎓 {'Year ' + str(y) if y else 'Year —'} ({c} members)",
+                    callback_data=f"DASH_VIEW|MEMBERS_Y{y}",
+                )]
+                for y, c in counts.items()
+            ]
+            buttons.append([InlineKeyboardButton("🦅 Exit to Cockpit", callback_data="DASH_VIEW|HOME")])
+            keyboard = InlineKeyboardMarkup(buttons)
         await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
         return
 

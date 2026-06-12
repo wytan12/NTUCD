@@ -21,7 +21,7 @@ from handlers.verification_handlers import start_verification, handle_matric, jo
 from handlers.modify_handlers import start_modify, get_modify_field_callback
 from handlers.modify_handlers import handle_modify_status_selection, handle_modify_date_selection
 from handlers.conversation_handlers import final_date_selection, topic_type_selection, parse_perf_input, cancel
-from handlers.member_handlers import handle_member_status, handle_new_member
+from handlers.member_handlers import handle_member_status, handle_new_member, birthday_wish_job
 from handlers.private_handlers import handle_confirm_new_perf, handle_dashboard_refresh, handle_dashboard_navigation
 from services.google_sheets import get_gspread_sheet
 from handlers.private_handlers import handle_list_modify_callback
@@ -185,6 +185,16 @@ def main():
                   "Install python-telegram-bot[job-queue].")
     except Exception as e:
         print(f"[ERROR] Failed to schedule auto-poll: {e}")
+
+    # --- 3b. Schedule daily birthday wisher (00:00 SGT, the day itself) ---
+    try:
+        if app.job_queue:
+            app.job_queue.run_daily(birthday_wish_job, time=dt_time(0, 0, tzinfo=sg_tz))
+            ## TEST: run 10s after start
+            # app.job_queue.run_once(birthday_wish_job, when=10) 
+            print("[INFO] Birthday wisher scheduled for 00:00 SGT daily.")
+    except Exception as e:
+        print(f"[ERROR] Failed to schedule birthday wisher: {e}")
 
     # --- 4. Start the Bot ---
     app.run_polling(allowed_updates=Update.ALL_TYPES)

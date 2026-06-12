@@ -8,7 +8,8 @@ from telegram.ext import (
     ConversationHandler,
     PollAnswerHandler,
     ChatMemberHandler,
-    ChatJoinRequestHandler
+    ChatJoinRequestHandler,
+    ContextTypes
 )
 import datetime
 import asyncio
@@ -23,6 +24,7 @@ from handlers.modify_handlers import handle_modify_status_selection, handle_modi
 from handlers.conversation_handlers import final_date_selection, topic_type_selection, parse_perf_input, cancel
 from handlers.member_handlers import handle_member_status, handle_new_member, birthday_wish_job
 from handlers.private_handlers import handle_confirm_new_perf, handle_dashboard_refresh, handle_dashboard_navigation
+from handlers.welcome_tea_handlers import handle_welcome_tea_qr
 from services.google_sheets import get_gspread_sheet
 from handlers.private_handlers import handle_list_modify_callback
 from handlers.modify_handlers import handle_modify_type_selection
@@ -95,6 +97,19 @@ async def on_startup(application):
     application.job_queue.run_daily(daily_reminder_cron_job, time=target_time)
     print(f"[AUTOMATION] Background automated checker established for daily execution at: {target_time}")
 
+async def start_command_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Router for /start command that handles different entry points.
+    
+    - /start welcome_tea -> Handle Welcome Tea QR code scan
+    - /start -> Handle admin dashboard (admin only)
+    """
+    # Check if this is a welcome tea QR code scan
+    if context.args and len(context.args) > 0 and context.args[0] == "welcome_tea":
+        await handle_welcome_tea_qr(update, context)
+    else:
+        # Fall back to admin start handler
+        await start(update, context)
+
 def main():
     print("Bot starting...")
     app = ApplicationBuilder().token(BOT_TOKEN).post_init(on_startup).build()
@@ -119,7 +134,7 @@ def main():
     )
 
     # Core engine endpoint configurations
-    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("start", start_command_router))
     app.add_handler(CommandHandler("threadid", thread_id_command))
     app.add_handler(CommandHandler("remind", remind_command))
     app.add_handler(CommandHandler("testremind", manual_test_reminder_trigger))

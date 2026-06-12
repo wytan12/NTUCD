@@ -22,11 +22,12 @@ def _get_client():
     if _client is None:
         scope = ["https://spreadsheets.google.com/feeds",
                  "https://www.googleapis.com/auth/drive"]
-        # for heroku 
-        creds_dict = json.loads(GOOGLE_CREDENTIALS_JSON)
+        # Handle both string (Heroku) and dict (local testing) formats
+        if isinstance(GOOGLE_CREDENTIALS_JSON, str):
+            creds_dict = json.loads(GOOGLE_CREDENTIALS_JSON)
+        else:
+            creds_dict = GOOGLE_CREDENTIALS_JSON
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-        ## for local testing 
-        # creds = ServiceAccountCredentials.from_json_keyfile_dict(GOOGLE_CREDENTIALS_JSON, scope)
         _client = gspread.authorize(creds)
     return _client
 
@@ -718,3 +719,23 @@ def append_standard_topic_to_sheet(tid, name, rules_string):
         print(f"✅ [GSheet] Successfully logged {name} to Rules sheet.")
     except Exception as e:
         print(f"❌ [GSheet ERROR] Failed to append standard topic: {e}")
+
+def append_welcome_tea_id(user_id: int, username: str = ""):
+    """Append a Telegram user ID to the Welcome Tea IDs tab.
+    
+    Args:
+        user_id: Telegram user ID
+        username: Optional Telegram username
+    """
+    try:
+        from config import SHEET_NAME, WELCOME_TEA_ID_TAB
+        from datetime import datetime
+        
+        ws = get_gspread_sheet(sheet_name=SHEET_NAME, tab_name=WELCOME_TEA_ID_TAB)
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ws.append_row([user_id, username or "", timestamp], value_input_option="USER_ENTERED")
+        print(f"[INFO] Welcome Tea ID {user_id} ({username}) logged to {WELCOME_TEA_ID_TAB} tab.")
+        return True
+    except Exception as e:
+        print(f"[ERROR] Failed to append Welcome Tea ID {user_id}: {str(e)}")
+        return False

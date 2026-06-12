@@ -40,6 +40,7 @@ PERF_FIRST_MEMBER_ROW = 3
 
 WELCOME_TEA_SHEET = "NTUCD Welcome Tea Registration 2025 (Responses)"
 WELCOME_TEA_TAB = "Form Responses 1"
+WELCOME_TEA_ID_TAB = "WELCOME TEA ID"
 
 # Chat Configuration
 # CHAT_ID =  # Main group Chat ID

@@ -4,9 +4,9 @@ from services.google_sheets import append_welcome_tea_id
 
 WELCOME_TEA_MESSAGE = (
     "🎉 **Thank you for scanning the Welcome Tea QR code!**\n\n"
-    "We've successfully recorded your Telegram information for the Welcome Tea event.\n\n"
-    "If you have any questions, feel free to reach out to the admins!\n\n"
-    "_Your Telegram ID has been saved and will be used for future event coordination._"
+    "We've successfully recorded your information for the Welcome Tea event.\n\n"
+    "We will disseminate more information nearer to the Welcome Tea event.\n\n"
+    "_If you have any questions, feel free to reach out to the chairpersons!_"
 )
 
 async def handle_welcome_tea_qr(update: Update, context: ContextTypes.DEFAULT_TYPE):

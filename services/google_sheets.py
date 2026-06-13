@@ -909,21 +909,127 @@ def append_standard_topic_to_sheet(tid, name, rules_string):
     except Exception as e:
         print(f"❌ [GSheet ERROR] Failed to append standard topic: {e}")
 
-def append_welcome_tea_id(user_id: int, username: str = ""):
-    """Append a Telegram user ID to the Welcome Tea IDs tab.
-    
-    Args:
-        user_id: Telegram user ID
-        username: Optional Telegram username
+def _welcome_tea_ws():
+    """Worksheet for QR-scan IDs and confirmation status."""
+    from config import SHEET_NAME, WELCOME_TEA_ID_TAB
+    return get_gspread_sheet(sheet_name=SHEET_NAME, tab_name=WELCOME_TEA_ID_TAB)
+
+
+def _normalize_welcome_tea_status(status: str) -> str:
+    """Return the canonical Welcome Tea status, defaulting blanks to Not Confirm."""
+    from config import (
+        WELCOME_TEA_STATUS_ATTEND,
+        WELCOME_TEA_STATUS_NOT_CONFIRM,
+        WELCOME_TEA_STATUS_REJECT,
+    )
+    raw = (status or "").strip()
+    if not raw:
+        return WELCOME_TEA_STATUS_NOT_CONFIRM
+    lowered = raw.lower()
+    status_map = {
+        WELCOME_TEA_STATUS_NOT_CONFIRM.lower(): WELCOME_TEA_STATUS_NOT_CONFIRM,
+        WELCOME_TEA_STATUS_ATTEND.lower(): WELCOME_TEA_STATUS_ATTEND,
+        WELCOME_TEA_STATUS_REJECT.lower(): WELCOME_TEA_STATUS_REJECT,
+    }
+    return status_map.get(lowered, raw)
+
+
+def get_welcome_tea_rows():
+    """Return row dicts from WELCOME TEA ID.
+
+    The tab intentionally has no header row:
+      A = Tele ID, B = username, C = timestamp, D = status.
+    Blank statuses are treated as Not Confirm for backward compatibility.
     """
+    rows = []
     try:
-        from config import SHEET_NAME, WELCOME_TEA_ID_TAB
+        values = _welcome_tea_ws().get_all_values()
+        for row_number, row in enumerate(values, start=1):
+            tele_id = row[0].strip() if len(row) >= 1 else ""
+            if not tele_id:
+                continue
+            status = row[3] if len(row) >= 4 else ""
+            rows.append({
+                "row_number": row_number,
+                "user_id": tele_id,
+                "username": row[1].strip() if len(row) >= 2 else "",
+                "timestamp": row[2].strip() if len(row) >= 3 else "",
+                "status": _normalize_welcome_tea_status(status),
+            })
+    except Exception as e:
+        print(f"[ERROR] Failed to read Welcome Tea IDs: {e}")
+    return rows
+
+
+def get_welcome_tea_recipients(statuses=None):
+    """Return Welcome Tea rows whose status is in `statuses`.
+
+    `statuses` may be None to return every row. Rows with non-numeric Tele IDs
+    are skipped because Telegram chat IDs must be integers.
+    """
+    wanted = {_normalize_welcome_tea_status(s) for s in statuses} if statuses else None
+    recipients = []
+    for row in get_welcome_tea_rows():
+        if wanted is not None and row["status"] not in wanted:
+            continue
+        if not str(row["user_id"]).isdigit():
+            print(f"[WELCOME TEA][WARN] Skipping non-numeric Tele ID: {row['user_id']}")
+            continue
+        row = dict(row)
+        row["user_id"] = int(row["user_id"])
+        recipients.append(row)
+    return recipients
+
+
+def update_welcome_tea_status(user_id: int, status: str) -> bool:
+    """Update column D status for the row matching `user_id`."""
+    try:
+        ws = _welcome_tea_ws()
+        values = ws.get_all_values()
+        target = str(user_id)
+        for row_number, row in enumerate(values, start=1):
+            if row and row[0].strip() == target:
+                ws.update_cell(row_number, 4, _normalize_welcome_tea_status(status))
+                invalidate_sheet_cache()
+                print(f"[WELCOME TEA] Status for {user_id} updated to {status}.")
+                return True
+        print(f"[WELCOME TEA][WARN] Tele ID {user_id} not found for status update.")
+        return False
+    except Exception as e:
+        print(f"[ERROR] Failed to update Welcome Tea status for {user_id}: {e}")
+        return False
+
+
+def append_welcome_tea_id(user_id: int, username: str = ""):
+    """Insert/update a Telegram user in WELCOME TEA ID with status in col D."""
+    try:
+        from config import WELCOME_TEA_STATUS_NOT_CONFIRM
         from datetime import datetime
+        from gspread.utils import rowcol_to_a1
         
-        ws = get_gspread_sheet(sheet_name=SHEET_NAME, tab_name=WELCOME_TEA_ID_TAB)
+        ws = _welcome_tea_ws()
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        ws.append_row([user_id, username or "", timestamp], value_input_option="USER_ENTERED")
-        print(f"[INFO] Welcome Tea ID {user_id} ({username}) logged to {WELCOME_TEA_ID_TAB} tab.")
+        values = ws.get_all_values()
+        target = str(user_id)
+
+        for row_number, row in enumerate(values, start=1):
+            if row and row[0].strip() == target:
+                current_status = row[3].strip() if len(row) >= 4 else ""
+                status = current_status or WELCOME_TEA_STATUS_NOT_CONFIRM
+                ws.batch_update([{
+                    "range": f"{rowcol_to_a1(row_number, 1)}:{rowcol_to_a1(row_number, 4)}",
+                    "values": [[target, username or "", timestamp, status]],
+                }], value_input_option="USER_ENTERED")
+                invalidate_sheet_cache()
+                print(f"[INFO] Welcome Tea ID {user_id} ({username}) refreshed in WELCOME TEA ID.")
+                return True
+
+        ws.append_row(
+            [target, username or "", timestamp, WELCOME_TEA_STATUS_NOT_CONFIRM],
+            value_input_option="USER_ENTERED",
+        )
+        invalidate_sheet_cache()
+        print(f"[INFO] Welcome Tea ID {user_id} ({username}) logged to WELCOME TEA ID tab.")
         return True
     except Exception as e:
         print(f"[ERROR] Failed to append Welcome Tea ID {user_id}: {str(e)}")

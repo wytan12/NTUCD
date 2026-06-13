@@ -1,4 +1,5 @@
 import os
+from datetime import date, time as dt_time
 import pytz
 
 # Bot Configuration
@@ -42,6 +43,20 @@ PERF_FIRST_MEMBER_ROW = 3
 WELCOME_TEA_SHEET = "NTUCD Welcome Tea Registration 2025 (Responses)"
 WELCOME_TEA_TAB = "Form Responses 1"
 WELCOME_TEA_ID_TAB = "WELCOME TEA ID"
+WELCOME_TEA_STATUS_NOT_CONFIRM = "Not Confirm"
+WELCOME_TEA_STATUS_ATTEND = "Attend"
+WELCOME_TEA_STATUS_REJECT = "Reject"
+
+# Welcome Tea confirmation automation. With the current 2025 date, these jobs
+# are skipped on modern deployments until the AY26/27 date is updated here.
+WELCOME_TEA_EVENT_DATE = date(2026, 6, 16)
+WELCOME_TEA_DETAILS_DAYS_BEFORE = 3   # Friday before a Tuesday event (4)
+WELCOME_TEA_REMINDER_DAYS_BEFORE = 3  # Saturday before a Tuesday event (3)
+WELCOME_TEA_INVITE_DAYS_BEFORE = 2    # Sunday before a Tuesday event (2)
+WELCOME_TEA_DETAILS_TIME = dt_time(22, 3)
+WELCOME_TEA_REMINDER_TIME = dt_time(22, 5)
+WELCOME_TEA_INVITE_TIME = dt_time(9, 0)
+WELCOME_TEA_GROUP_INVITE_LINK = os.environ.get("WELCOME_TEA_GROUP_INVITE_LINK", "")
 
 # Chat Configuration
 # CHAT_ID =  # Main group Chat ID

@@ -20,18 +20,14 @@ async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
 
 
 async def check_is_authenticated_admin(user_id: int) -> bool:
-    """Helper to verify if a user ID exists within the admin configuration list/dict."""
-    if isinstance(ADMIN_DM_USER_IDS, dict):
-        if user_id in ADMIN_DM_USER_IDS or str(user_id) in ADMIN_DM_USER_IDS:
-            return True
-        # Check values in case IDs were mapped as dictionary values
-        for k, v in ADMIN_DM_USER_IDS.items():
-            if str(k).isdigit() and int(k) == user_id: return True
-            if str(v).isdigit() and int(v) == user_id: return True
-    elif isinstance(ADMIN_DM_USER_IDS, (list, set)):
-        if user_id in ADMIN_DM_USER_IDS or str(user_id) in ADMIN_DM_USER_IDS:
-            return True
-    return False
+    """True if the user may use the admin DM dashboard.
+
+    Role-driven: MAIN (chairperson / vice chair / secretary / SDE) and
+    SECONDARY (treasurer / logistics / business manager / PNP) admins from the
+    MEMBER INFO tab, plus the config ADMIN_DM_USER_IDS fallback ids.
+    """
+    from services.google_sheets import is_dashboard_admin
+    return is_dashboard_admin(user_id)
 
 def admin_only(func):
     """Decorator to restrict administrative execution to verified admin DMs only.

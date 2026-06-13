@@ -2,52 +2,18 @@ from telegram import Update
 from telegram.ext import ContextTypes
 from services.google_sheets import (
     get_gspread_sheet,
-    copy_user_to_timeline,
-    user_already_in_timeline,
-    mark_user_left_in_sheet
+    update_member_join_in_info,
+    update_member_leave_in_info,
 )
 from config import WELCOME_TEA_SHEET, WELCOME_TEA_TAB
-
-
-async def birthday_wish_job(context: ContextTypes.DEFAULT_TYPE):
-    """Daily job (00:00 SGT). Wishes every Active member whose Birthday
-    (day+month in the MEMBER INFO tab) is today, in the group's main channel.
-
-    Members with a Tele ID are @-mentioned via a tg://user link so they get
-    pinged; others are named in bold. Multiple birthdays share one message.
-    """
-    from config import CHAT_ID
-    from services.google_sheets import get_todays_birthdays
-
-    try:
-        bdays = get_todays_birthdays()
-    except Exception as e:
-        print(f"[BIRTHDAY][ERROR] Failed to read member info sheet: {e}")
-        return
-    if not bdays:
-        return
-
-    mentions = [
-        f"[{name}](tg://user?id={tid})" if tid else f"*{name}*"
-        for name, tid in bdays
-    ]
-    text = (
-        "🎂🎉 *HAPPY BIRTHDAY* "
-        + " & ".join(mentions)
-        + "! 🥳\n\nNTUCD wishes you a fantastic year ahead — keep drumming! 🥁"
-    )
-    try:
-        await context.bot.send_message(chat_id=CHAT_ID, text=text, parse_mode="Markdown")
-        print(f"[BIRTHDAY] Wished: {', '.join(n for n, _ in bdays)}")
-    except Exception as e:
-        print(f"[BIRTHDAY][ERROR] Failed to send wish: {e}")
 
 
 async def handle_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Fallback handler for NEW_CHAT_MEMBERS status updates.
 
-    Inserts a minimal row into the PERFORMER Info sheet if the user is not
-    already present.  Acts as a safety net alongside handle_member_status.
+    Stamps the member's MEMBER INFO row (Status=Join, Join Date) if the
+    chat_member event was missed. Acts as a safety net alongside
+    handle_member_status (idempotent — both write the same values).
     """
     for member in update.message.new_chat_members:
         user_id = member.id
@@ -56,15 +22,12 @@ async def handle_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
         print(f"[INFO] ✅ New member joined: {name} ({user_id})")
         print(f"[DEBUG] Telegram user object: is_bot={member.is_bot}, full_name={member.full_name}")
 
-        if user_already_in_timeline(user_id):
-            print(f"[INFO] User ID {user_id} already exists in timeline — skipping fallback insert.")
-        else:
-            # Fallback row → use name for both name & nickname
-            fallback_row = {
-                "Your Full Name (according to matric card)": name,
-                "What name or nickname do you prefer to be called? ": name
-            }
-            copy_user_to_timeline(fallback_row, user_id)
+        # Safety-net stamp into MEMBER INFO (idempotent — matched by Tele ID,
+        # so it just refreshes the same row if handle_member_status already ran).
+        try:
+            update_member_join_in_info(user_id, name or "")
+        except Exception as e:
+            print(f"[MEMBER INFO][ERROR] fallback join stamp failed: {e}")
 
         # await update.effective_chat.send_message(
         #     f"👋 Welcome, {name}!"
@@ -73,8 +36,9 @@ async def handle_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_member_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Track member join and leave events via ChatMember updates.
 
-    On first join: adds the member to PERFORMER Info if not already present.
-    On leave/kick: stamps the member's row with status "Left" and the timestamp.
+    On join/rejoin: stamps the member's MEMBER INFO row (Status=Join, Join
+    Date=today, Leave Date cleared). On leave/kick: Leave Date=today,
+    Status=Left. Rows are matched by Tele ID.
     """
     status_change = update.chat_member
     old_status = status_change.old_chat_member.status
@@ -83,22 +47,23 @@ async def handle_member_status(update: Update, context: ContextTypes.DEFAULT_TYP
     
     print(f"[DEBUG] Status change for {user.full_name} ({user.id}): {old_status} ➝ {new_status}")
 
-    # ✅ Detect first join
-    if old_status == "left" and new_status == "member":
-        print(f"[INFO] 🎉 User {user.full_name} ({user.id}) has joined the group for the first time.")
-        
-        if not user_already_in_timeline(user.id):
-            fallback_row = {
-                "Your Full Name (according to matric card)": user.full_name,
-                "What name or nickname do you prefer to be called? ": user.full_name
-            }
-            copy_user_to_timeline(fallback_row, user.id)
-        else:
-            print(f"[INFO] User {user.id} already exists in sheet — skip adding.")
-    
+    # ✅ Detect join (first time OR rejoin)
+    if old_status in ("left", "kicked") and new_status == "member":
+        print(f"[INFO] 🎉 User {user.full_name} ({user.id}) has joined the group.")
+
+        # MEMBER INFO AY26/27 (config MEMBER_INFO_TAB) is the single tracker:
+        # stamp Join Date, clear any old Leave Date, set Status = Join — a
+        # rejoin reuses the member's row, a new member gets a minimal row.
+        try:
+            update_member_join_in_info(user.id, user.full_name)
+        except Exception as e:
+            print(f"[MEMBER INFO][ERROR] join stamp failed: {e}")
+
     # ✅ Detect leave (either voluntarily or kicked)
     elif old_status in ("member", "administrator") and new_status in ("left", "kicked"):
         print(f"[INFO] 🚪 User {user.full_name} ({user.id}) has left the group.")
-        success = mark_user_left_in_sheet(user.id)
-        print(f"[INFO] Marked as 'Left' in sheet: {success}")
+        try:
+            update_member_leave_in_info(user.id)
+        except Exception as e:
+            print(f"[MEMBER INFO][ERROR] leave stamp failed: {e}")
  

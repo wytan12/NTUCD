@@ -22,7 +22,7 @@ from handlers.verification_handlers import start_verification, handle_matric, jo
 from handlers.modify_handlers import start_modify, get_modify_field_callback
 from handlers.modify_handlers import handle_modify_status_selection, handle_modify_date_selection
 from handlers.conversation_handlers import final_date_selection, topic_type_selection, parse_perf_input, cancel
-from handlers.member_handlers import handle_member_status, handle_new_member, birthday_wish_job
+from handlers.member_handlers import handle_member_status, handle_new_member
 from handlers.private_handlers import handle_confirm_new_perf, handle_dashboard_refresh, handle_dashboard_navigation
 from handlers.welcome_tea_handlers import handle_welcome_tea_qr
 from services.google_sheets import get_gspread_sheet
@@ -57,14 +57,21 @@ async def register_private_admin_menus(application):
 
     strictly to valid numerical IDs without causing network timeout script lockups.
     """
-    admin_targets = set()
-    if isinstance(ADMIN_DM_USER_IDS, dict):
-        for k, v in ADMIN_DM_USER_IDS.items():
-            if str(k).isdigit(): admin_targets.add(int(k))
-            if str(v).isdigit(): admin_targets.add(int(v))
-    elif isinstance(ADMIN_DM_USER_IDS, (list, set)):
-        for item in ADMIN_DM_USER_IDS:
-            if str(item).isdigit(): admin_targets.add(int(item))
+    # Bind the /start menu for BOTH admin tiers (main + secondary roles from
+    # MEMBER INFO) plus the config fallback ids.
+    try:
+        from services.google_sheets import get_dashboard_admin_ids
+        admin_targets = set(get_dashboard_admin_ids())
+    except Exception as e:
+        print(f"[WARN] Role lookup failed during menu bind, using config ids: {e}")
+        admin_targets = set()
+        if isinstance(ADMIN_DM_USER_IDS, dict):
+            for k, v in ADMIN_DM_USER_IDS.items():
+                if str(k).isdigit(): admin_targets.add(int(k))
+                if str(v).isdigit(): admin_targets.add(int(v))
+        elif isinstance(ADMIN_DM_USER_IDS, (list, set)):
+            for item in ADMIN_DM_USER_IDS:
+                if str(item).isdigit(): admin_targets.add(int(item))
 
     for uid in admin_targets:
         try:
@@ -200,16 +207,6 @@ def main():
                   "Install python-telegram-bot[job-queue].")
     except Exception as e:
         print(f"[ERROR] Failed to schedule auto-poll: {e}")
-
-    # --- 3b. Schedule daily birthday wisher (00:00 SGT, the day itself) ---
-    try:
-        if app.job_queue:
-            app.job_queue.run_daily(birthday_wish_job, time=dt_time(0, 0, tzinfo=sg_tz))
-            ## TEST: run 10s after start
-            # app.job_queue.run_once(birthday_wish_job, when=10) 
-            print("[INFO] Birthday wisher scheduled for 00:00 SGT daily.")
-    except Exception as e:
-        print(f"[ERROR] Failed to schedule birthday wisher: {e}")
 
     # --- 4. Start the Bot ---
     app.run_polling(allowed_updates=Update.ALL_TYPES)

@@ -7,20 +7,19 @@ from services.google_sheets import (
     update_user_id_in_sheet
 )   
 from utils.constants import ASK_MATRIC, pending_users
+from config import JOIN_CONTACT_ADMIN_ID, WELCOME_TEA_LINK_KEYWORD
 
-async def join_request_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Send Welcome Tea details to every new join-request applicant via DM.
 
-    Stores the raw ChatJoinRequest in pending_users so start_verification can
-    approve it once the user passes the matric check.
-    """
-    user = update.chat_join_request.from_user
-    #FORM_LINK = "https://docs.google.com/forms/d/e/1FAIpQLSdZkIn2NC3TkLCLJpgB-jynKSlAKZg_vqw0bu3vywu4tqTzIg/viewform?usp=header"
+def _contact_admin_id() -> int:
+    """Role-driven contact admin (chairperson → secretary → sde), with the
+    config JOIN_CONTACT_ADMIN_ID as last resort."""
+    from services.google_sheets import get_join_contact_admin_id
+    return get_join_contact_admin_id() or JOIN_CONTACT_ADMIN_ID
 
-    print(f"Join request received from {user.first_name}")
 
-    # Always send the form
-    # First message
+async def _send_welcome_tea_flow(user, context):
+    """Welcome Tea recruitment flow: DM the event details + registration form
+    and leave the request pending until the user passes /verify (matric check)."""
     try:
         await context.bot.send_message(
             chat_id=user.id,
@@ -42,27 +41,118 @@ async def join_request_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 "<a href='https://drive.google.com/file/d/1pO1GoNn4MReqFXqBUowyZPL7EJqKpmHb/view?usp=drive_link'>View PDF</a>\n\n"
             ),
             parse_mode=ParseMode.HTML
-        )  
-
-        # Send registration form link
+        )
         await context.bot.send_message(
             chat_id=user.id,
             text=(
                 f"🌸 To make our Welcome Tea run smoothly, we’d love it if you could fill in the sign-up form below 📝💛\n"
                 f"<a href='https://docs.google.com/forms/d/e/1FAIpQLSdZkIn2NC3TkLCLJpgB-jynKSlAKZg_vqw0bu3vywu4tqTzIg/viewform?usp=header'>Registration Form</a>\n"
                 f"(you can ignore this if you’ve already done so ✔️)\n\n"
-                f"💬 If you have any queries, feel free to contact:\n"
-                f"👉 Chairperson Brandon: @Brandonkjj\n"
-                f"👉 Vice-chairperson Pip Hui: @pip_1218\n\n"
-                f"👋 See you next Tuesday! 🎉"
+                f"✅ After attending, send /verify here with your matric number to get approved.\n\n"
+                f"💬 If you have any queries, feel free to contact "
+                f"<a href='tg://user?id={_contact_admin_id()}'>our admin</a>.\n\n"
+                f"👋 See you there! 🎉"
             ),
             parse_mode=ParseMode.HTML
         )
     except Exception as e:
         print("Could not message user:", e)
 
-    # ✅ Store their pending join request
+
+async def join_request_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Route group join requests to one of two onboarding flows, by invite link:
+
+    • Invite link named with "tea" (WELCOME_TEA_LINK_KEYWORD) → **Welcome Tea
+      recruitment flow**: DM the event details + form; request stays pending
+      until the user passes /verify (matric check).
+    • Any other link (the unique returning-member link) → **Tele-ID gate**
+      against MEMBER INFO AY25/26: found → auto-approve (+ MEMBER INFO AY26/27
+      stamped); not found → waiting room + contact-admin DM + admin alert.
+    """
+    from services.google_sheets import is_member_in_ay2526
+
+    user = update.chat_join_request.from_user
+    link = update.chat_join_request.invite_link
+    link_name = (link.name or "") if link else ""
+    print(f"Join request received from {user.first_name} ({user.id}) via link '{link_name}'")
+
+    # --- Flow 1: Welcome Tea recruitment link ---
+    if WELCOME_TEA_LINK_KEYWORD in link_name.lower():
+        pending_users[user.id] = update.chat_join_request
+        await _send_welcome_tea_flow(user, context)
+        return
+
+    # --- Flow 2: returning-member link (Tele-ID gate) ---
+
+    if is_member_in_ay2526(user.id):
+        # DM BEFORE approving: the join-request window (which lets the bot
+        # message a user who never started it) closes the moment the request
+        # is processed — so a welcome sent after approve() could never arrive.
+        try:
+            await context.bot.send_message(
+                chat_id=user.id,
+                text=(
+                    f"🎉 *Welcome back, {user.first_name}!* 🎉\n\n"
+                    f"✅ You're recognised from last year's roster — straight through the door, "
+                    f"no queue for you! 😎\n\n"
+                    f"🥁 The drums missed you. See you at training! 🔥"
+                ),
+                parse_mode="Markdown",
+            )
+        except Exception as e:
+            print(f"[JOIN][WARN] Welcome DM failed for {user.id}: {e}")
+        try:
+            await update.chat_join_request.approve()
+            print(f"[JOIN] Auto-approved {user.full_name} ({user.id}) — found in MEMBER INFO AY25/26.")
+        except Exception as e:
+            print(f"[JOIN][ERROR] Auto-approve failed for {user.id}: {e}")
+            return
+        # Stamp MEMBER INFO AY26/27 right away (Status=Join, Join Date=today,
+        # Leave Date cleared). The subsequent chat_member join event re-stamps
+        # the same values, so this is a safe belt-and-braces double-write.
+        try:
+            from services.google_sheets import update_member_join_in_info
+            update_member_join_in_info(user.id, user.full_name)
+        except Exception as e:
+            print(f"[JOIN][WARN] Join stamp failed for {user.id}: {e}")
+        return
+
+    # Unknown Tele ID → keep the request pending (Telegram's "waiting room")
+    # and point them to the admin. NOTE: a join request opens a ~5-minute
+    # window in which the bot may DM the requester even if they never started
+    # it — we send immediately, so this reaches them.
     pending_users[user.id] = update.chat_join_request
+    try:
+        await context.bot.send_message(
+            chat_id=user.id,
+            text=(
+                f"Hey {user.first_name}! 🥁👋\n\n"
+                "🎫 You're in the <b>waiting room</b> — your join request is pending! ⏳\n\n"
+                f"👉 Give <a href='tg://user?id={_contact_admin_id()}'>our admin</a> a shout "
+                "and we'll wave you through. 😄✨"
+            ),
+            parse_mode=ParseMode.HTML,
+        )
+    except Exception as e:
+        print("Could not message user:", e)
+
+    # Proactively alert the MAIN admins (chairperson / vice chair / secretary /
+    # SDE) that someone is in the waiting room, so approval doesn't depend on
+    # the user reaching out first. Secondary admins are not alerted.
+    from services.google_sheets import get_alert_admin_ids
+    handle = f"@{user.username}" if user.username else "no username"
+    alert_text = (
+        "🔔 <b>Ding dong! Someone's at the door</b> 🚪👀\n\n"
+        f"👤 <a href='tg://user?id={user.id}'>{user.full_name}</a> ({handle})\n"
+        f"🆔 Tele ID: <code>{user.id}</code>\n\n"
+        "🔍 Not found in MEMBER INFO AY25/26 — they're chilling in the waiting "
+        "room. ⏳\n👉 Approve or decline from the group's <b>Join Requests</b> panel."
+    )
+    for admin_id in (get_alert_admin_ids() or {_contact_admin_id()}):
+        try:
+            await context.bot.send_message(chat_id=admin_id, text=alert_text, parse_mode=ParseMode.HTML)
+        except Exception as e:
+            print(f"[JOIN][WARN] Could not alert admin {admin_id}: {e}")
 
 async def start_verification(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Entry point for the /verify conversation — only works in DM.
@@ -74,12 +164,18 @@ async def start_verification(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     if user_id not in pending_users:
         await update.message.reply_text(
-            "❌ You don't have a pending join request or it has already been approved. Please request to join the group first\n\n"
-            "Any issues feel free to contact chairperson Brandon @Brandonkjj or vice-chairperson Pip Hui @pip_1218 on telegram!"
+            "🤔 Hmm, I don't see a pending join request for you — either it's already "
+            "approved 🎉 or you haven't requested to join yet.\n\n"
+            "👉 Tap the group invite link first, then come back here!\n\n"
+            f"💬 Stuck? <a href='tg://user?id={_contact_admin_id()}'>Our admin</a> is happy to help! 😄",
+            parse_mode=ParseMode.HTML,
         )
         return ConversationHandler.END
 
-    await update.message.reply_text("Please enter your NTU matriculation number (case sensitive) to verify. e.g U2512345F")
+    await update.message.reply_text(
+        "🪪 Almost there! Please enter your NTU matriculation number "
+        "(case sensitive) to verify — e.g. U2512345F 👇"
+    )
     return ASK_MATRIC
 
 async def handle_matric(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -93,8 +189,10 @@ async def handle_matric(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if user_id not in pending_users:
         await update.message.reply_text(
-            "❌ You don't have a pending join request or it has already been approved. Please request to join the group first.\n\n"
-            "Any issues feel free to contact chairperson Brandon @Brandonkjj or vice-chairperson Pip Hui @pip_1218 on telegram!"
+            "🤔 No pending join request found for you — maybe it's already approved 🎉 "
+            "or you haven't tapped the invite link yet.\n\n"
+            f"💬 Need a hand? <a href='tg://user?id={_contact_admin_id()}'>Our admin</a> has your back! 😄",
+            parse_mode=ParseMode.HTML,
         )
         return ConversationHandler.END
 
@@ -104,16 +202,20 @@ async def handle_matric(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await join_request.approve()
         update_user_id_in_sheet(matric, user_id)
         await update.message.reply_text(
-            "✅ Matric number and attendance verified. You have been approved. Welcome!"
+            "🎉🥳 *YOU'RE IN!* 🥳🎉\n\n"
+            "✅ Matric & attendance verified — welcome to the NTUCD family! 🥁❤️\n"
+            "Get ready to make some noise! 🔥",
+            parse_mode="Markdown",
         )
         pending_users.pop(user_id, None)
         return ConversationHandler.END
 
     else:
         await update.message.reply_text(
-            "❌ We couldn't verify your matric number or attendance. Please check your entry and try again.\n\n"
-            "🔁 Please enter your NTU matriculation number (case sensitive) again e.g U2512345F:\n\n"
-            "Any issues feel free to contact chairperson Brandon @Brandonkjj or vice-chairperson Pip Hui @pip_1218 on telegram!"
+            "😅 Oops! I couldn't match that matric number / attendance record.\n\n"
+            "🔁 Double-check and try again (case sensitive!) — e.g. U2512345F 👇\n\n"
+            f"💬 Still stuck? <a href='tg://user?id={_contact_admin_id()}'>Our admin</a> can sort it out! 🙌",
+            parse_mode=ParseMode.HTML,
         )
         # Stay in ASK_MATRIC state
         return ASK_MATRIC

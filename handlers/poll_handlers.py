@@ -162,8 +162,8 @@ async def auto_poll_check(context: ContextTypes.DEFAULT_TYPE):
         try:
             msg = await context.bot.send_poll(
                 chat_id=CHAT_ID,
-                question=f"Are you joining the training on {date_str}?",
-                options=["Yes", "No"],
+                question=f"🥁 Training on {date_str} — you in? 🔥",
+                options=["✅ Count me in!", "❌ Can't make it"],  # option 0 must stay = "yes"
                 is_anonymous=False,
                 message_thread_id=TOPIC_VOTING_ID,
             )

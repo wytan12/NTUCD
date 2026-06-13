@@ -23,38 +23,35 @@ _DASHBOARD_CACHE_KEYS = (
 )
 
 DASHBOARD_TEXT = (
-    "🦅 **NTUFD Master Administration Cockpit**\n\n"
-    "Welcome to the central gateway. Click any option below to manage your data pipelines:\n\n"
-    "• **Create New Topic:** Establish fresh public forum channels.\n"
-    "• **Edit Perf Fields:** Modify cell columns of registered sheet rows.\n"
-    "• **Attendance Portal:** Log regular-training or performance session marks.\n"
-    "• **Performance Ledger:** Review high-level booking verification statuses.\n"
-    "• **Broadcast Message:** Send custom formatted text to any forum thread.\n"
-    "• **Reminder:** Trigger manual checklist announcements into active topics.\n"
-    "• **Forum Thread Index:** View and copy numerical chat topic IDs.\n"
-    "• **Active Member Roster:** Inspect drummer profile seniority logs."
+    "🥁 **NTUFD Command Centre** 🥁\n"
+    "Welcome back, maestro! 🎶 The whole show runs from here:\n\n"
+    "🎭 **Performances** — create topics, edit details, track statuses\n"
+    "✅ **Attendance** — training & performance rosters, one tap to mark\n"
+    "📣 **Comms** — broadcast to any topic or fire off reminders\n"
+    "👥 **People** — thread directory & active member roster\n\n"
+    "👇 *Pick your move:*"
 )
 
 def _dashboard_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("📝 Create New Topic", callback_data="DASH_VIEW|LAUNCH_NEW"),
-            InlineKeyboardButton("⚙️ Edit Perf Fields", callback_data="DASH_VIEW|LAUNCH_MODIFY")
+            InlineKeyboardButton("🎪 New Topic", callback_data="DASH_VIEW|LAUNCH_NEW"),
+            InlineKeyboardButton("🛠️ Edit Performance", callback_data="DASH_VIEW|LAUNCH_MODIFY")
         ],
         [
-            InlineKeyboardButton("✅ Attendance Portal", callback_data="DASH_VIEW|LAUNCH_ATTD"),
-            InlineKeyboardButton("📊 Performance Ledger", callback_data="DASH_VIEW|LEDGER")
+            InlineKeyboardButton("✅ Take Attendance", callback_data="DASH_VIEW|LAUNCH_ATTD"),
+            InlineKeyboardButton("📊 Status Ledger", callback_data="DASH_VIEW|LEDGER")
         ],
         [
-            InlineKeyboardButton("📢 Broadcast Message", callback_data="DASH_VIEW|LAUNCH_ANNOUNCE"),
-            InlineKeyboardButton("🔔 Reminder", callback_data="DASH_VIEW|LAUNCH_REMIND")
+            InlineKeyboardButton("📣 Broadcast", callback_data="DASH_VIEW|LAUNCH_ANNOUNCE"),
+            InlineKeyboardButton("⏰ Reminders", callback_data="DASH_VIEW|LAUNCH_REMIND")
         ],
         [
-            InlineKeyboardButton("🧵 Forum Thread Index", callback_data="DASH_VIEW|THREADS"),
-            InlineKeyboardButton("👥 Active Member Roster", callback_data="DASH_VIEW|MEMBERS")
+            InlineKeyboardButton("🧵 Thread Index", callback_data="DASH_VIEW|THREADS"),
+            InlineKeyboardButton("👥 Member Roster", callback_data="DASH_VIEW|MEMBERS")
         ],
         [
-            InlineKeyboardButton("🔄 Refresh Master Cache", callback_data="DASH_REFRESH")
+            InlineKeyboardButton("♻️ Refresh Data", callback_data="DASH_REFRESH")
         ]
     ])
 
@@ -251,16 +248,13 @@ async def handle_private_command(update: Update, context: ContextTypes.DEFAULT_T
     if not message or not message.text or update.effective_chat.type != "private":
         return
 
-    is_approved_admin = False
+    # Role-driven gate: MAIN + SECONDARY admins (from MEMBER INFO Role/Position)
+    # plus the config fallback ids. Non-admins get total silence — but a user
+    # mid-/verify (pending join request) must NOT be swallowed here; that flow
+    # is handled by the ConversationHandler before this dispatcher runs.
+    from services.google_sheets import is_dashboard_admin
     current_uid = update.effective_user.id
-    if isinstance(ADMIN_DM_USER_IDS, dict):
-        for k, v in ADMIN_DM_USER_IDS.items():
-            if str(k).isdigit() and int(k) == current_uid: is_approved_admin = True
-            if str(v).isdigit() and int(v) == current_uid: is_approved_admin = True
-    elif isinstance(ADMIN_DM_USER_IDS, (list, set)) and current_uid in ADMIN_DM_USER_IDS:
-        is_approved_admin = True
-        
-    if not is_approved_admin:
+    if not is_dashboard_admin(current_uid):
         return
 
     text = message.text.strip()
@@ -547,13 +541,8 @@ async def handle_private_command(update: Update, context: ContextTypes.DEFAULT_T
 
 async def handle_dashboard_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    uid = update.effective_user.id
-    is_admin = False
-    if isinstance(ADMIN_DM_USER_IDS, dict):
-        is_admin = any(str(v).isdigit() and int(v) == uid for v in ADMIN_DM_USER_IDS.values()) or any(str(k).isdigit() and int(k) == uid for k in ADMIN_DM_USER_IDS)
-    elif isinstance(ADMIN_DM_USER_IDS, (list, set)):
-        is_admin = uid in ADMIN_DM_USER_IDS
-    if not is_admin:
+    from services.google_sheets import is_dashboard_admin
+    if not is_dashboard_admin(update.effective_user.id):
         await query.answer()
         return
 
@@ -851,7 +840,7 @@ async def handle_dashboard_navigation(update: Update, context: ContextTypes.DEFA
         return
 
     elif target_view == "MEMBERS" or target_view.startswith("MEMBERS_Y"):
-        from services.google_sheets import get_active_members
+        from services.google_sheets import get_active_members, GRADUATE_YEAR
         try:
             members = get_active_members()
         except Exception as e:
@@ -859,12 +848,16 @@ async def handle_dashboard_navigation(update: Update, context: ContextTypes.DEFA
             await query.edit_message_text(f"❌ Failed to read the member info sheet: `{e}`", reply_markup=keyboard, parse_mode="Markdown")
             return
 
-        # --- Drill-down: one year's members (tap a year button below) ---
+        def group_label(y):
+            if y == GRADUATE_YEAR:
+                return "🎩 Graduates"
+            return f"🎓 Year {y}" if y else "🎓 Year —"
+
+        # --- Drill-down: one group's members (tap a button below) ---
         if target_view.startswith("MEMBERS_Y"):
             year = int(target_view[len("MEMBERS_Y"):])
             names = [n for y, n in members if y == year]
-            year_label = f"Year {year}" if year else "Year —"
-            lines = [f"👥 **Active Members — 🎓 {year_label}**\n_{len(names)} members_\n"]
+            lines = [f"👥 **Active Members — {group_label(year)}**\n_{len(names)} members_\n"]
             lines += [f"• {n}" for n in names] or ["_(none)_"]
             keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("🔙 Back to Year Menu", callback_data="DASH_VIEW|MEMBERS")],
@@ -873,21 +866,21 @@ async def handle_dashboard_navigation(update: Update, context: ContextTypes.DEFA
             await query.edit_message_text("\n".join(lines), reply_markup=keyboard, parse_mode="Markdown")
             return
 
-        # --- Year menu: one button per year (highest first) with member counts ---
+        # --- Group menu: Graduates first, then years (highest first), with counts ---
         if not members:
             text = "👥 **Active Member Roster Listing**\n\n📭 No members marked *Active* in the MEMBER INFO sheet yet."
             keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🦅 Exit to Cockpit", callback_data="DASH_VIEW|HOME")]])
         else:
             counts = {}
-            for y, _n in members:  # members are already sorted year desc
+            for y, _n in members:  # members are already sorted: Graduates, then year desc
                 counts[y] = counts.get(y, 0) + 1
             text = (
                 "👥 **Active Member Roster Listing**\n"
-                f"_{len(members)} active members — pick a year to view:_"
+                f"_{len(members)} active members — pick a group to view:_"
             )
             buttons = [
                 [InlineKeyboardButton(
-                    f"🎓 {'Year ' + str(y) if y else 'Year —'} ({c} members)",
+                    f"{group_label(y)} ({c} members)",
                     callback_data=f"DASH_VIEW|MEMBERS_Y{y}",
                 )]
                 for y, c in counts.items()

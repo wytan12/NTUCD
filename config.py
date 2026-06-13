@@ -5,6 +5,7 @@ import pytz
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 GOOGLE_CREDENTIALS_JSON = os.environ.get("GOOGLE_CREDENTIALS_JSON")
 
+
 # Google Sheets Configuration
 SHEET_NAME = "NTUFD AY26/27 Timeline (Tele Bot Debug)"
 SHEET_TAB_NAME = "PERF"
@@ -61,5 +62,23 @@ EXEMPTED_THREAD_IDS = [GENERAL_TOPIC_ID, TOPIC_VOTING_ID]
 SHEET_COLUMNS = ["THREAD ID", "EVENT TYPE", "EVENT NAME", "REHEARSAL DATE | TIME", "PERF DATE | TIME", "LOCATION",
                  "OTHER INFO", "REMUNATION", "STATUS", "SUMMARY MSG ID"]
 
-# Telegram user IDs allowed to control the bot via private DM (WY, WF, PH, MN, JURI)
+# --- Admin tiers (role-driven from MEMBER INFO Role/Position + Tele ID) ---
+# MAIN admins: dashboard access + receive every admin alert/reminder DM.
+# SECONDARY admins: dashboard access only (no alert/reminder DMs).
+# Matching is case-insensitive "contains" — "vice chairperson" matches via
+# "chairperson", "Logistics Head" via "logistic", etc.
+MAIN_ADMIN_ROLE_KEYWORDS = ("chairperson", "vice chairperson", "secretary", "sde")
+SECONDARY_ADMIN_ROLE_KEYWORDS = ("treasurer", "logistic", "business", "pnp")
+
+# EMERGENCY fallback only: grants dashboard access / receives alerts ONLY when
+# the role lookup yields nothing at all (sheet unreachable / Role column wiped).
 ADMIN_DM_USER_IDS = {1505249420, 903855240, 362804048}
+
+# Last-resort "contact our admin" Tele ID for the join flow — used only when no
+# MAIN admin is resolvable from the sheet (get_join_contact_admin_id).
+JOIN_CONTACT_ADMIN_ID = 1505249420
+
+# Join requests via an invite link whose NAME contains this keyword
+# (case-insensitive) get the Welcome Tea recruitment flow; any other link runs
+# the returning-member Tele-ID gate.
+WELCOME_TEA_LINK_KEYWORD = "tea"

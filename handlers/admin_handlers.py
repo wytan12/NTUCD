@@ -14,14 +14,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return # 🤐 TOTAL PASSIVITY: Leaves the message completely untouched inside group channels
 
     # 🛡️ Only verified dashboard admins get a response — stay silent otherwise.
-    is_approved_admin = False
+    # Role-driven: MAIN + SECONDARY admin roles from MEMBER INFO (+ config fallback).
+    from services.google_sheets import is_dashboard_admin
     current_uid = update.effective_user.id
-    if isinstance(ADMIN_DM_USER_IDS, dict):
-        if current_uid in ADMIN_DM_USER_IDS or str(current_uid) in ADMIN_DM_USER_IDS: is_approved_admin = True
-    elif isinstance(ADMIN_DM_USER_IDS, (list, set)) and current_uid in ADMIN_DM_USER_IDS:
-        is_approved_admin = True
-
-    if not is_approved_admin:
+    if not is_dashboard_admin(current_uid):
         print(f"[SECURITY] Unauthorized /start attempt blocked for user ID: {current_uid}")
         return
 
@@ -140,28 +136,30 @@ def _extract_first_date_object(date_cell_text: str) -> datetime | None:
 def _compile_checklist_notice_template(event_name: str, location: str, formatted_dates: str) -> str:
     """Standardized checklist layout template block for public announcements."""
     return (
-        f"📢 *Performance Reminder*\n\n"
-        f"📍 *Event*\n• {event_name}\n\n"
+        f"🎉✨ *SHOWTIME IS COMING!* ✨🎉\n"
+        f"Only *7 days* to go — time for the final prep ritual! 🥁🔥\n\n"
+        f"🎭 *Event*\n• {event_name}\n\n"
         f"📅 *Performance Date | Time*\n{formatted_dates}\n\n"
-        f"📌 *Location*\n• {location}\n\n"
-        f"*📝 Final Preparation Notes*\n\n"
+        f"📍 *Location*\n• {location}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"📝 *FINAL PREP CHECKLIST* 📝\n\n"
         f"*👀 Glasses & Contact Lens*\n"
         f"If you wear glasses, try your best to perform without them (e.g. wear contact lens). "
-        f"Default is *no glasses* on stage. Make sure you're comfortable before show day.\n\n"
-        f"*⬇️💪 Shave Your Armpits*\n"
-        f"We want the audience to focus on our performance, not our underarms 🪒😌 \n"
-        f"So please make sure to shave before the show!\n\n"
+        f"Default is *no glasses* on stage — make sure you're comfortable before show day! 🤓➡️😎\n\n"
+        f"*🪒 Shave Your Armpits*\n"
+        f"We want the audience hypnotised by our performance, not our underarms 😌💨 "
+        f"Please shave before the show!\n\n"
         f"*🎽 Costume Tips*\n"
-        f"Our costumes are sleeveless and v-neck. Avoid wearing bright-colored bras "
-        f"(neon pink/yellow/rainbow 🌈). A black sports bra is best.\n\n"
+        f"Our costumes are sleeveless and v-neck. Skip the bright-colored bras "
+        f"(neon pink/yellow/rainbow 🌈🙅) — a black sports bra is the MVP. 🖤\n\n"
         f"*🦶 Barefoot Reminder*\n"
-        f"Everyone will be performing *barefoot*. Don't forget!\n\n"
+        f"Everyone performs *barefoot* — leave the socks backstage! 🧦❌\n\n"
         f"*💇 Hair Tying*\n"
-        f"If you have long hair, please tie it up neatly. "
-        f"You can also ask someone to help if needed.\n\n"
+        f"Long hair? Tie it up neat & tight — grab a buddy to help if needed! 🤝\n\n"
         f"*📺 Recap the Drum Score*\n"
-        f"Make sure to go through the performance videos again and recap the score "
-        f"before the show. Stay sharp!"
+        f"Rewatch the performance videos and drill that score one more time. Stay sharp! 🧠⚡\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"💥 Let's make some NOISE — see you on stage! 🥁🔥"
     )
 
 async def process_reminder_scan_cycle(bot, fallback_user_id: int = None) -> str:
@@ -210,25 +208,20 @@ async def process_reminder_scan_cycle(bot, fallback_user_id: int = None) -> str:
             # Action B: Send private admin alerts if STATUS column is completely empty/blank
             elif status == "":
                 nudge_text = (
-                    f"⚠️ *Admin Escrow Alert Nudge* ⚠️\n\n"
-                    f"The performance *{event_name}* (Thread ID: `{tid}`) is exactly *7 days away*, "
-                    f"but its approval status is still completely **PENDING/BLANK** inside your sheet logs!\n\n"
-                    f"👉 Please use `modify` in your DMs or open your desktop browser to update its status to "
-                    f"`ACCEPTED` or `REJECTED` so the bot can handle reminders and rosters correctly."
+                    f"⏰🚨 *Knock knock, boss!* 🚨⏰\n\n"
+                    f"🎭 *{event_name}* (ID: `{tid}`) is exactly *7 days away*…\n"
+                    f"but its status is still ⏳ *PENDING* in the sheet! 😱\n\n"
+                    f"👉 Hop into the Command Centre → 🛠️ *Edit Performance* and flip it to "
+                    f"✅ `ACCEPTED` or ❌ `REJECTED`, so I can fire the prep checklist on time! 🥁💨"
                 )
                 
-                # 🧠 CRASH-PROOF ID RESOLVER: Extract numerical IDs safely from config keys OR values
-                admin_targets = set()
+                # 🧠 ROLE-DRIVEN ALERT TARGETS: only MAIN admins (chairperson /
+                # vice chair / secretary / SDE) receive these nudges; secondary
+                # admins (treasurer, logistics, business manager, PNP) do not.
+                from services.google_sheets import get_alert_admin_ids
+                admin_targets = set(get_alert_admin_ids())
                 if fallback_user_id:
                     admin_targets.add(int(fallback_user_id))
-                    
-                if isinstance(ADMIN_DM_USER_IDS, dict):
-                    for k, v in ADMIN_DM_USER_IDS.items():
-                        if str(k).isdigit(): admin_targets.add(int(k))
-                        if str(v).isdigit(): admin_targets.add(int(v))
-                elif isinstance(ADMIN_DM_USER_IDS, (list, set)):
-                    for item in ADMIN_DM_USER_IDS:
-                        if str(item).isdigit(): admin_targets.add(int(item))
 
                 for target_chat_id in admin_targets:
                     try:
@@ -261,14 +254,9 @@ async def manual_test_reminder_trigger(update: Update, context: ContextTypes.DEF
         return # 🤐 TOTAL PASSIVITY: Leaves the message completely untouched inside group channels
 
     # 🛡️ Only verified dashboard admins may fire the reminder scan — stay silent otherwise.
-    is_approved_admin = False
+    from services.google_sheets import is_dashboard_admin
     current_uid = update.effective_user.id
-    if isinstance(ADMIN_DM_USER_IDS, dict):
-        if current_uid in ADMIN_DM_USER_IDS or str(current_uid) in ADMIN_DM_USER_IDS: is_approved_admin = True
-    elif isinstance(ADMIN_DM_USER_IDS, (list, set)) and current_uid in ADMIN_DM_USER_IDS:
-        is_approved_admin = True
-
-    if not is_approved_admin:
+    if not is_dashboard_admin(current_uid):
         print(f"[SECURITY] Unauthorized /testremind attempt blocked for user ID: {current_uid}")
         return
 
@@ -414,16 +402,9 @@ async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         return
 
-    is_approved_admin = False
+    from services.google_sheets import is_dashboard_admin
     current_uid = update.effective_user.id
-    
-    if isinstance(ADMIN_DM_USER_IDS, dict):
-        if current_uid in ADMIN_DM_USER_IDS or str(current_uid) in ADMIN_DM_USER_IDS: 
-            is_approved_admin = True
-    elif isinstance(ADMIN_DM_USER_IDS, (list, set)) and current_uid in ADMIN_DM_USER_IDS:
-        is_approved_admin = True
-
-    if not is_approved_admin:
+    if not is_dashboard_admin(current_uid):
         print(f"[SECURITY] Unauthorized command trigger blocked for user ID: {current_uid}")
         return
 
@@ -458,7 +439,13 @@ async def send_reminder(bot, chat_id, thread_id):
         await bot.send_message(
             chat_id=chat_id,
             message_thread_id=thread_id,
-            text=f"Reminder: There's training tomorrow {pretty_date}."
+            text=(
+                f"🥁 *DRUM ROLL, PLEASE…* 🥁\n\n"
+                f"Training is *TOMORROW* — {pretty_date}! 🔥\n"
+                f"💧 Bring water · 💪 bring energy · 🎶 bring the vibes\n\n"
+                f"See you there, drummers! 👋😄"
+            ),
+            parse_mode="Markdown",
         )
     except Exception as e:
         print(f"[ERROR] Failed to send reminder: {e}")

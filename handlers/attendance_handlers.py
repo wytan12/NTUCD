@@ -16,12 +16,13 @@ from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
-from config import ADMIN_DM_USER_IDS, TOPIC_VOTING_ID, CHAT_ID, sg_tz
+from config import TOPIC_VOTING_ID, CHAT_ID, sg_tz
 from utils.constants import active_polls, yes_voters
 from services.google_sheets import (
     get_training_date_columns, get_attendees_for_date, commit_attendance_column,
     parse_sheet_date, replace_training_date_column,
     get_perf_event_list, get_perf_event_column, get_perf_attendees, commit_perf_column,
+    is_dashboard_admin,
 )
 from services.date_parser import parse_date_line
 
@@ -194,7 +195,7 @@ async def _show_perf_events(query, context: ContextTypes.DEFAULT_TYPE, success_b
 
 
 async def start_attendance_modify(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in ADMIN_DM_USER_IDS:
+    if not is_dashboard_admin(update.effective_user.id):
         return
     old_master = context.user_data.get("master_dash_id")
     _clear(context)
@@ -233,7 +234,7 @@ async def attendance_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     print(f"[DEBUG] Callback: {data}")
     await query.answer()
 
-    if update.effective_user.id not in ADMIN_DM_USER_IDS:
+    if not is_dashboard_admin(update.effective_user.id):
         return
 
     # 🔒 Only the LATEST dashboard / attendance bubble is live. After a fresh
@@ -454,8 +455,8 @@ async def attendance_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             if send_now:
                 msg = await context.bot.send_poll(
                     chat_id=CHAT_ID,
-                    question=f"Are you joining the training on {new_str}?",
-                    options=["Yes", "No"],
+                    question=f"🥁 Training on {new_str} — you in? 🔥",
+                    options=["✅ Count me in!", "❌ Can't make it"],  # option 0 must stay = "yes"
                     is_anonymous=False,
                     message_thread_id=TOPIC_VOTING_ID,
                 )

@@ -161,53 +161,41 @@ def update_user_id_in_sheet(matric_number: str, telegram_user_id: int):
     print("[WARN] Matric number not found when trying to update User ID.")
 
 def copy_user_to_timeline(welcome_row: dict, telegram_user_id: int):
-    """Append a new member row to the PERFORMER Info sheet.
+    """Record a new member in the MEMBER INFO tab (legacy-named wrapper).
 
-    welcome_row should be a dict from the Welcome Tea responses (or a minimal
+    Previously appended to the separate "PERFORMER Info" spreadsheet; now
+    delegates to `update_member_join_in_info` on `MEMBER_INFO_TAB` (Status =
+    Join, Join Date = today, row matched/created by Tele ID).
+    welcome_row is a dict from the Welcome Tea responses (or a minimal
     fallback dict with just name/nickname keys).
     """
-    others_sheet = get_gspread_sheet("PERFORMER Info")
     name = welcome_row.get("Your Full Name (according to matric card)", "").strip()
     nickname = welcome_row.get("What name or nickname do you prefer to be called? ", "").strip()
-
-    new_row = [name, nickname, str(telegram_user_id), "Join", ""]
-    others_sheet.append_row(new_row, value_input_option="USER_ENTERED")
-    print(f"[INFO] Copied to PERFORMER Info List: {new_row}")
+    update_member_join_in_info(telegram_user_id, full_name=name, nickname=nickname)
 
 def user_already_in_timeline(user_id: int) -> bool:
-    """Check if user already exists in timeline"""
-    others_sheet = get_gspread_sheet("PERFORMER Info")
-    all_rows = others_sheet.get_all_records()
-    for row in all_rows:
-        if str(row.get("User ID", "")).strip() == str(user_id):
-            return True
-    return False
+    """True if the user's Tele ID already has a row in the MEMBER INFO tab."""
+    from config import MEMBER_INFO_TAB
+    values = get_cached_values(tab_name=MEMBER_INFO_TAB)
+    if not values:
+        return False
+    header = [h.strip().lower() for h in values[0]]
+    try:
+        tele_i = header.index("tele id")
+    except ValueError:
+        print("[WARN] 'Tele ID' column not found in member info tab.")
+        return False
+    return any(tele_i < len(r) and r[tele_i].strip() == str(user_id)
+               for r in values[1:])
 
 def mark_user_left_in_sheet(user_id: int) -> bool:
-    """Mark user as left in the sheet"""
-    from datetime import datetime
-    
-    sheet = get_gspread_sheet("PERFORMER Info")
-    records = sheet.get_all_records()
-    header = sheet.row_values(1)
+    """Mark the user as Left in the MEMBER INFO tab (legacy-named wrapper).
 
-    user_id_col = header.index("User ID") + 1
-    status_col = header.index("Status") + 1 if "Status" in header else None
-    leave_date_col = header.index("Leave Date") + 1 if "Leave Date" in header else None
-
-    if not (user_id_col and status_col and leave_date_col):
-        print("[ERROR] Missing required columns")
-        return False
-
-    for idx, row in enumerate(records, start=2):
-        if str(row.get("User ID", "")).strip() == str(user_id):
-            sheet.update_cell(idx, status_col, "Left")
-            leave_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            sheet.update_cell(idx, leave_date_col, leave_time)
-            return True
-
-    print(f"[WARN] User ID {user_id} not found in sheet.")
-    return False
+    Previously wrote to the separate "PERFORMER Info" spreadsheet; now
+    delegates to `update_member_leave_in_info` (Leave Date = today,
+    Status = Left, row matched by Tele ID).
+    """
+    return update_member_leave_in_info(user_id)
 
 # ===================== ATTENDANCE [REG] =====================
 # Layout (see config.py):
@@ -360,16 +348,21 @@ def is_training_poll_id(poll_id) -> bool:
         return False
 
 
+# Sentinel "year" for the Graduates group (Year cell == "-") — sorts above Year 4.
+GRADUATE_YEAR = 99
+
+
 def get_active_members():
-    """Return active members from the MEMBER INFO tab, highest year first.
+    """Return active members from the MEMBER INFO tab, most senior first.
 
     Reads the `MEMBER INFO AY26/27` tab (smart-cached), keeps rows whose
     `Status` is "Active" (case-insensitive), and returns
-    [(year:int, display_name:str), ...] sorted by year descending (4 → 1), then
-    name A-Z within a year. Display name = Nickname, falling back to Full Name.
-    Header lookup is index-based and case-insensitive, so column order can
-    change without breaking it. A non-numeric/blank Year sorts to the bottom
-    (year 0).
+    [(year:int, display_name:str), ...] sorted by year descending, then name
+    A-Z within a group. Members whose `Year` cell is **"-"** are grouped as
+    **Graduates** (`year == GRADUATE_YEAR`, listed first). Display name =
+    Nickname, falling back to Full Name. Header lookup is index-based and
+    case-insensitive, so column order can change without breaking it. A
+    blank/other non-numeric Year sorts to the bottom (year 0).
     """
     from config import MEMBER_INFO_TAB
     values = get_cached_values(tab_name=MEMBER_INFO_TAB)
@@ -396,70 +389,266 @@ def get_active_members():
 
     members = []
     for row in values[1:]:
-        if cell(row, status_i).lower() != "active":
+        # "Active" (manual) and "Join" (bot-stamped on join/auto-approve) both
+        # count as active members; "Left" / blank are excluded.
+        if cell(row, status_i).lower() not in ("active", "join"):
             continue
         name = cell(row, name_i) or cell(row, full_i)
         if not name:
             continue
-        try:
-            year = int(cell(row, year_i))
-        except ValueError:
-            year = 0
+        year_raw = cell(row, year_i)
+        if year_raw == "-":
+            year = GRADUATE_YEAR
+        else:
+            try:
+                year = int(year_raw)
+            except ValueError:
+                year = 0
         members.append((year, name))
 
     members.sort(key=lambda m: (-m[0], m[1].lower()))
     return members
 
 
-def get_todays_birthdays():
-    """Return [(display_name, tele_id_or_None), ...] for Active members whose
-    Birthday matches today (SGT).
+# ---- Role-based admin tiers (from MEMBER INFO Role/Position + Tele ID) ------
+# MAIN admins get dashboard access AND every admin alert/reminder DM.
+# SECONDARY admins get dashboard access only — no alert/reminder DMs (they
+# still see anything broadcast to the whole group, like everyone else).
+# Keyword lists live in config.py.
+from config import MAIN_ADMIN_ROLE_KEYWORDS, SECONDARY_ADMIN_ROLE_KEYWORDS
 
-    Reads the `MEMBER INFO AY26/27` tab; matches the `Birthday` cell by
-    **day + month only** (the year in the cell is ignored, e.g. "5 June 2026"
-    still matches every 5 June). Only `Status == Active` members are wished.
-    Display name = Nickname, falling back to Full Name; tele_id lets the wish
-    tag the member, None if their Tele ID cell is blank/non-numeric.
+
+def _config_admin_ids():
+    """Hardcoded fallback ids from config.ADMIN_DM_USER_IDS (never lock out)."""
+    from config import ADMIN_DM_USER_IDS
+    ids = set()
+    if isinstance(ADMIN_DM_USER_IDS, dict):
+        for k, v in ADMIN_DM_USER_IDS.items():
+            if str(k).isdigit():
+                ids.add(int(k))
+            if str(v).isdigit():
+                ids.add(int(v))
+    elif isinstance(ADMIN_DM_USER_IDS, (list, set, tuple)):
+        for x in ADMIN_DM_USER_IDS:
+            if str(x).isdigit():
+                ids.add(int(x))
+    return ids
+
+
+def get_admin_role_ids():
+    """Return (main_ids, secondary_ids) — Tele IDs from the MEMBER INFO tab
+    whose Role/Position contains a tier keyword (case-insensitive).
+
+    Reads through the smart cache, so it's a tiny check per call. Returns two
+    empty sets on any sheet failure (callers fall back to config ids).
+    """
+    from config import MEMBER_INFO_TAB
+    main, secondary = set(), set()
+    try:
+        values = get_cached_values(tab_name=MEMBER_INFO_TAB)
+        if not values:
+            return main, secondary
+        header = [h.strip().lower() for h in values[0]]
+        try:
+            role_i = header.index("role/position")
+            tele_i = header.index("tele id")
+        except ValueError:
+            print("[ADMIN][WARN] Role/Position or Tele ID column missing in member info tab.")
+            return main, secondary
+        for row in values[1:]:
+            role = row[role_i].strip().lower() if role_i < len(row) else ""
+            tid = row[tele_i].strip() if tele_i < len(row) else ""
+            if not role or not tid.isdigit():
+                continue
+            if any(k in role for k in MAIN_ADMIN_ROLE_KEYWORDS):
+                main.add(int(tid))
+            elif any(k in role for k in SECONDARY_ADMIN_ROLE_KEYWORDS):
+                secondary.add(int(tid))
+    except Exception as e:
+        print(f"[ADMIN][WARN] Role lookup failed: {e}")
+    return main, secondary
+
+
+def get_alert_admin_ids():
+    """Tele IDs that receive admin alert/reminder DMs: MAIN admins only.
+    Falls back to config.ADMIN_DM_USER_IDS if no main admin is resolvable."""
+    main, _ = get_admin_role_ids()
+    return main or _config_admin_ids()
+
+
+def get_dashboard_admin_ids():
+    """Tele IDs allowed to use the DM dashboard: MAIN + SECONDARY admins only.
+
+    The config ADMIN_DM_USER_IDS ids are used **only as an emergency fallback**
+    when the role lookup yields nothing at all (sheet unreachable / Role column
+    wiped) — they are NOT granted access alongside the role-holders, so a plain
+    member listed in the old config set cannot reach the dashboard."""
+    main, secondary = get_admin_role_ids()
+    role_ids = main | secondary
+    return role_ids if role_ids else _config_admin_ids()
+
+
+def is_dashboard_admin(user_id) -> bool:
+    """True if `user_id` may use the admin DM dashboard (either tier)."""
+    try:
+        return int(user_id) in get_dashboard_admin_ids()
+    except (TypeError, ValueError):
+        return False
+
+
+def get_join_contact_admin_id():
+    """Tele ID of the preferred "contact our admin" person for join issues.
+
+    Picks the first MAIN admin found in role-priority order (chairperson →
+    secretary → sde) from the MEMBER INFO tab. Returns None if none is
+    resolvable (callers fall back to their hardcoded constant)."""
+    from config import MEMBER_INFO_TAB
+    try:
+        values = get_cached_values(tab_name=MEMBER_INFO_TAB)
+        if not values:
+            return None
+        header = [h.strip().lower() for h in values[0]]
+        role_i = header.index("role/position")
+        tele_i = header.index("tele id")
+        for kw in MAIN_ADMIN_ROLE_KEYWORDS:  # priority order
+            for row in values[1:]:
+                role = row[role_i].strip().lower() if role_i < len(row) else ""
+                tid = row[tele_i].strip() if tele_i < len(row) else ""
+                if kw in role and tid.isdigit():
+                    return int(tid)
+    except Exception as e:
+        print(f"[ADMIN][WARN] Contact-admin lookup failed: {e}")
+    return None
+
+
+def is_member_in_ay2526(user_id) -> bool:
+    """True if `user_id` appears in the `Tele ID` column of MEMBER INFO AY25/26.
+
+    Used by the join-request gate: existing AY25/26 members are auto-approved
+    into the new group; unknown ids are told to contact the admin instead.
+    """
+    try:
+        values = get_cached_values(tab_name="MEMBER INFO AY25/26")
+        if not values:
+            return False
+        header = [h.strip().lower() for h in values[0]]
+        try:
+            tele_i = header.index("tele id")
+        except ValueError:
+            print("[WARN] 'Tele ID' column not found in MEMBER INFO AY25/26.")
+            return False
+        return any(tele_i < len(r) and r[tele_i].strip() == str(user_id)
+                   for r in values[1:])
+    except Exception as e:
+        print(f"[ERROR] is_member_in_ay2526 failed: {e}")
+        return False
+
+
+def _member_info_cols(ws):
+    """Return (header_row, {lower_header: col_index_1based}) for the MEMBER INFO tab."""
+    header = ws.row_values(1)
+    return header, {h.strip().lower(): i for i, h in enumerate(header, start=1)}
+
+
+def update_member_join_in_info(user_id, full_name: str = "", nickname: str = ""):
+    """Stamp a (re)join in MEMBER INFO AY26/27: Join Date = today, Leave Date
+    cleared, Status = Join.
+
+    The member's row is matched by `Tele ID`. A rejoin therefore reuses their
+    old row — the previous Leave Date is wiped and the Join Date refreshed. If
+    no row matches, a minimal new row (Full Name + Nickname + Tele ID +
+    Status/Join Date) is written into the first row whose Name and Tele ID
+    cells are both empty, so it lands inside the formula region and the C:K
+    lookups can auto-fill.
     """
     from config import MEMBER_INFO_TAB
     from datetime import datetime
-    values = get_cached_values(tab_name=MEMBER_INFO_TAB)
-    if not values:
-        return []
-    header = [h.strip().lower() for h in values[0]]
+    from gspread.utils import rowcol_to_a1
 
-    def col_idx(name):
-        try:
-            return header.index(name)
-        except ValueError:
-            return None
+    ws = get_gspread_sheet(tab_name=MEMBER_INFO_TAB)
+    values = ws.get_all_values()
+    _, cols = _member_info_cols(ws)
+    tele_c = cols.get("tele id")
+    join_c = cols.get("join date")
+    leave_c = cols.get("leave date")
+    status_c = cols.get("status")
+    name_c = cols.get("full name (as per matric card)", 1)
+    nick_c = cols.get("nickname")
+    if not (tele_c and join_c and leave_c and status_c):
+        print("[MEMBER INFO][WARN] Missing Tele ID/Join Date/Leave Date/Status column.")
+        return False
 
-    name_i = col_idx("nickname")
-    full_i = col_idx("full name (as per matric card)")
-    bday_i = col_idx("birthday")
-    status_i = col_idx("status")
-    tele_i = col_idx("tele id")
-    if bday_i is None:
-        print("[WARN] 'Birthday' column not found in member info tab.")
-        return []
+    today = datetime.now(sg_tz).strftime("%d %b %Y %H:%M")
 
-    def cell(row, i):
-        return row[i].strip() if (i is not None and i < len(row)) else ""
+    def cell(r, c):
+        row = values[r - 1] if r - 1 < len(values) else []
+        return row[c - 1].strip() if c - 1 < len(row) else ""
 
-    today = datetime.now(sg_tz).date()
-    out = []
-    for row in values[1:]:
-        if status_i is not None and cell(row, status_i).lower() != "active":
-            continue
-        d = parse_sheet_date(cell(row, bday_i))
-        if not d or (d.day, d.month) != (today.day, today.month):
-            continue
-        name = cell(row, name_i) or cell(row, full_i)
-        if not name:
-            continue
-        tid = cell(row, tele_i)
-        out.append((name, int(tid) if tid.isdigit() else None))
-    return out
+    # Find the member's existing row by Tele ID
+    target = next((r for r in range(2, len(values) + 1)
+                   if cell(r, tele_c) == str(user_id)), None)
+
+    updates = []
+    if target is None:
+        # New member: first row with both Name and Tele ID empty (works inside
+        # the pre-filled formula region; never appends past unrelated rows).
+        target = next((r for r in range(2, max(len(values) + 1, 101))
+                       if not cell(r, name_c) and not cell(r, tele_c)), None)
+        if target is None:
+            print("[MEMBER INFO][WARN] No empty row found for new member.")
+            return False
+        if full_name:
+            updates.append({"range": rowcol_to_a1(target, name_c), "values": [[full_name]]})
+        if nickname and nick_c:
+            updates.append({"range": rowcol_to_a1(target, nick_c), "values": [[nickname]]})
+        updates.append({"range": rowcol_to_a1(target, tele_c), "values": [[str(user_id)]]})
+
+    updates += [
+        {"range": rowcol_to_a1(target, join_c), "values": [[today]]},
+        {"range": rowcol_to_a1(target, leave_c), "values": [[""]]},   # clear old leave date
+        {"range": rowcol_to_a1(target, status_c), "values": [["Join"]]},
+    ]
+    ws.batch_update(updates, value_input_option="USER_ENTERED")
+    invalidate_sheet_cache()
+    print(f"[MEMBER INFO] Join stamped for {user_id} (row {target}): {today}, leave cleared, Join.")
+    return True
+
+
+def update_member_leave_in_info(user_id):
+    """Stamp a leave in MEMBER INFO AY26/27: Leave Date = today, Status = Left.
+    The row is matched by `Tele ID`; Join Date is left as-is (history)."""
+    from config import MEMBER_INFO_TAB
+    from datetime import datetime
+    from gspread.utils import rowcol_to_a1
+
+    ws = get_gspread_sheet(tab_name=MEMBER_INFO_TAB)
+    values = ws.get_all_values()
+    _, cols = _member_info_cols(ws)
+    tele_c = cols.get("tele id")
+    leave_c = cols.get("leave date")
+    status_c = cols.get("status")
+    if not (tele_c and leave_c and status_c):
+        print("[MEMBER INFO][WARN] Missing Tele ID/Leave Date/Status column.")
+        return False
+
+    def cell(r, c):
+        row = values[r - 1] if r - 1 < len(values) else []
+        return row[c - 1].strip() if c - 1 < len(row) else ""
+
+    target = next((r for r in range(2, len(values) + 1)
+                   if cell(r, tele_c) == str(user_id)), None)
+    if target is None:
+        print(f"[MEMBER INFO][WARN] Leave: Tele ID {user_id} not found.")
+        return False
+
+    today = datetime.now(sg_tz).strftime("%d %b %Y %H:%M")
+    ws.batch_update([
+        {"range": rowcol_to_a1(target, leave_c), "values": [[today]]},
+        {"range": rowcol_to_a1(target, status_c), "values": [["Left"]]},
+    ], value_input_option="USER_ENTERED")
+    invalidate_sheet_cache()
+    print(f"[MEMBER INFO] Leave stamped for {user_id} (row {target}): {today}, Left.")
+    return True
 
 
 def get_nickname_by_user_id(user_id):
@@ -514,14 +703,14 @@ def _find_member_row(ws, nickname):
 def set_attendance(poll_id, user_id, present: bool):
     """Mark/clear attendance for a poll voter.
 
-    Maps user_id → nickname (PERFORMER Info), finds the date column whose row-1
+    Maps user_id → nickname (MEMBER INFO tab), finds the date column whose row-1
     poll id matches, locates (or creates) the member's row, and writes "1"/"".
     Column B (the count) is left entirely to the sheet's own formula — the bot
     never writes it. Returns (ok: bool, info: str).
     """
     nickname = get_nickname_by_user_id(user_id)
     if not nickname:
-        return False, f"user {user_id} not in PERFORMER Info"
+        return False, f"user {user_id} not in MEMBER INFO tab"
 
     ws = get_attendance_ws()
     row1 = ws.row_values(ATT_POLL_ROW)

@@ -141,7 +141,7 @@ def _compile_checklist_notice_template(event_name: str, location: str, formatted
         f"🎭 *Event*\n• {event_name}\n\n"
         f"📅 *Performance Date | Time*\n{formatted_dates}\n\n"
         f"📍 *Location*\n• {location}\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"\n"
         f"📝 *FINAL PREP CHECKLIST* 📝\n\n"
         f"*👀 Glasses & Contact Lens*\n"
         f"If you wear glasses, try your best to perform without them (e.g. wear contact lens). "
@@ -158,7 +158,7 @@ def _compile_checklist_notice_template(event_name: str, location: str, formatted
         f"Long hair? Tie it up neat & tight — grab a buddy to help if needed! 🤝\n\n"
         f"*📺 Recap the Drum Score*\n"
         f"Rewatch the performance videos and drill that score one more time. Stay sharp! 🧠⚡\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"\n"
         f"💥 Let's make some NOISE — see you on stage! 🥁🔥"
     )
 

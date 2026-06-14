@@ -23,12 +23,12 @@ _DASHBOARD_CACHE_KEYS = (
 )
 
 DASHBOARD_TEXT = (
-    "🥁 **NTUFD Command Centre** 🥁\n"
+    "🥁 ***NTUFD Command Centre*** 🥁\n"
     "Welcome back, maestro! 🎶 The whole show runs from here:\n\n"
-    "🎭 **Performances** — create topics, edit details, track statuses\n"
-    "✅ **Attendance** — training & performance rosters, one tap to mark\n"
-    "📣 **Comms** — broadcast to any topic or fire off reminders\n"
-    "👥 **People** — thread directory & active member roster\n\n"
+    "🎭 ***Performances*** — create topics, edit details, track statuses\n"
+    "✅ ***Attendance*** — training & performance rosters, one tap to mark\n"
+    "📣 ***Comms*** — broadcast to any topic or fire off reminders\n"
+    "👥 ***People*** — thread directory & active member roster\n\n"
     "👇 *Pick your move:*"
 )
 
@@ -40,11 +40,11 @@ def _dashboard_keyboard() -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton("✅ Take Attendance", callback_data="DASH_VIEW|LAUNCH_ATTD"),
-            InlineKeyboardButton("📊 Status Ledger", callback_data="DASH_VIEW|LEDGER")
+            InlineKeyboardButton("⏰ Reminders", callback_data="DASH_VIEW|LAUNCH_REMIND")
         ],
         [
             InlineKeyboardButton("📣 Broadcast", callback_data="DASH_VIEW|LAUNCH_ANNOUNCE"),
-            InlineKeyboardButton("⏰ Reminders", callback_data="DASH_VIEW|LAUNCH_REMIND")
+            InlineKeyboardButton("📊 Performance Ledger", callback_data="DASH_VIEW|LEDGER")
         ],
         [
             InlineKeyboardButton("🧵 Thread Index", callback_data="DASH_VIEW|THREADS"),
@@ -224,15 +224,35 @@ async def render_modify_list(update: Update, context: ContextTypes.DEFAULT_TYPE,
             elif status_loading: await status_loading.edit_text(text)
             return
 
+        from datetime import datetime
+        import re
+        
+        # Helper to parse the date for sorting
+        def get_sort_date(row):
+            date_str = str(row.get("PERF DATE | TIME", "")).strip()
+            if not date_str or date_str == "-": 
+                return datetime.min
+            first_line = date_str.splitlines()[0].strip()
+            match = re.match(r'^(\d{1,2}\s+[a-zA-Z]{3,9}\s+\d{4})', first_line)
+            if match:
+                try:
+                    return datetime.strptime(match.group(1), "%d %b %Y")
+                except ValueError:
+                    pass
+            return datetime.min
+
+        # Sort descending (Latest date at the top)[cite: 23]
+        sorted_records = sorted(records, key=get_sort_date, reverse=True)
+
         buttons = []
-        for row in records:
+        for row in sorted_records:
             tid = row.get("THREAD ID")
             if str(tid).isdigit():
                 event_name = row.get("EVENT NAME", "Unnamed Event")
                 buttons.append([InlineKeyboardButton(f"⚙️ {event_name} ({tid})", callback_data=f"LIST_MODIFY|{tid}")])
         
         buttons.append([InlineKeyboardButton("🦅 Exit to Cockpit", callback_data="DASH_VIEW|HOME")])
-        prompt_text = "🛠️ **Performance Modification Portal**\n\nWhich PERFORMANCE topic would you like to modify:"
+        prompt_text = "🛠️ ***Performance Modification Portal***\nWhich PERFORMANCE topic would you like to modify:"
         markup = InlineKeyboardMarkup(buttons)
         
         if incoming_query:
@@ -810,15 +830,52 @@ async def handle_dashboard_navigation(update: Update, context: ContextTypes.DEFA
 
     elif target_view == "LEDGER":
         records = get_cached_records()
-        if not records: text = "📋 The performance sheet is currently empty."
+        if not records: 
+            text = "📋 The performance sheet is currently empty."
         else:
-            lines = ["📊 **Performance Status Ledger**\n_Quick overview of all registered bookings (IDs stripped)_\n"]
-            for row in records:
+            from datetime import datetime
+            import re
+            
+            # Helper to parse the date for sorting
+            def get_sort_date(row):
+                date_str = str(row.get("PERF DATE | TIME", "")).strip()
+                if not date_str or date_str == "-": 
+                    return datetime.min
+                # Grab the first line and extract the date part (e.g., "1 Sep 2026")
+                first_line = date_str.splitlines()[0].strip()
+                match = re.match(r'^(\d{1,2}\s+[a-zA-Z]{3,9}\s+\d{4})', first_line)
+                if match:
+                    try:
+                        return datetime.strptime(match.group(1), "%d %b %Y")
+                    except ValueError:
+                        pass
+                return datetime.min
+
+            # Sort records descending (Latest date first, TBD/Blank at the bottom)
+            sorted_records = sorted(records, key=get_sort_date, reverse=True)
+
+            lines = ["📊 ***Performance Status Ledger***\nQuick overview of all registered bookings\n"]
+            for row in sorted_records:
                 event_name = row.get("EVENT NAME", "Unnamed Event")
                 status = row.get("STATUS", "").strip().upper() or "PENDING"
                 emoji = "⏳" if status == "PENDING" else "✅" if status == "ACCEPTED" else "❌"
-                lines.append(f"{emoji} **{event_name}**")
+                
+                # Format the date display cleanly
+                perf_cell = str(row.get("PERF DATE | TIME", "")).strip()
+                if not perf_cell or perf_cell == "-":
+                    date_display = "TBD"
+                else:
+                    date_lines = [d.strip() for d in perf_cell.splitlines() if d.strip()]
+                    first_date = date_lines[0]
+                    # If multiple dates exist, show the first one and indicate how many are hidden
+                    if len(date_lines) > 1:
+                        date_display = f"{first_date} (+{len(date_lines) - 1} more)"
+                    else:
+                        date_display = first_date
+
+                lines.append(f"{emoji} **{event_name}** | {date_display}")
             text = "\n".join(lines)
+            
         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🦅 Exit to Cockpit", callback_data="DASH_VIEW|HOME")]])
         await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
         return

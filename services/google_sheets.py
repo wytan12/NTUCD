@@ -810,13 +810,35 @@ def get_perf_event_list():
                   if col - 1 < len(values[r - 1]) and (values[r - 1][col - 1] or "").strip() == "1")
         present_by_tid[tid] = cnt
 
+    import re
+    from datetime import datetime
+
+    # Helper to parse the date for sorting
+    def get_sort_date(row):
+        date_str = str(row.get("PERF DATE | TIME", "")).strip()
+        if not date_str or date_str == "-": 
+            return datetime.min
+        # Grab the first line and extract the date part
+        first_line = date_str.splitlines()[0].strip()
+        match = re.match(r'^(\d{1,2}\s+[a-zA-Z]{3,9}\s+\d{4})', first_line)
+        if match:
+            try:
+                return datetime.strptime(match.group(1), "%d %b %Y")
+            except ValueError:
+                pass
+        return datetime.min
+
+    records = get_cached_records()
+    # Sort descending (Latest date at the top)
+    sorted_records = sorted(records, key=get_sort_date, reverse=True)
+
     events = []
-    for rec in get_cached_records():
+    for rec in sorted_records:
         tid = str(rec.get("THREAD ID", "")).strip()
         if tid.isdigit():
             events.append((int(tid), rec.get("EVENT NAME", "Unnamed Event"),
                            present_by_tid.get(tid, 0)))
-    events.reverse()  # newest performances first
+                           
     return events
 
 

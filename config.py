@@ -6,7 +6,6 @@ import pytz
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 GOOGLE_CREDENTIALS_JSON = os.environ.get("GOOGLE_CREDENTIALS_JSON")
 
-
 # Google Sheets Configuration
 SHEET_NAME = "NTUFD AY26/27 Timeline (Tele Bot Debug)"
 SHEET_TAB_NAME = "PERF"
@@ -83,7 +82,7 @@ SHEET_COLUMNS = ["THREAD ID", "EVENT TYPE", "EVENT NAME", "REHEARSAL DATE | TIME
 # Matching is case-insensitive "contains" — "vice chairperson" matches via
 # "chairperson", "Logistics Head" via "logistic", etc.
 MAIN_ADMIN_ROLE_KEYWORDS = ("chairperson", "vice chairperson", "secretary", "sde")
-SECONDARY_ADMIN_ROLE_KEYWORDS = ("treasurer", "logistic", "business", "pnp")
+SECONDARY_ADMIN_ROLE_KEYWORDS = ("treasurer", "logistic", "business", "pnp", "coach")
 
 # EMERGENCY fallback only: grants dashboard access / receives alerts ONLY when
 # the role lookup yields nothing at all (sheet unreachable / Role column wiped).

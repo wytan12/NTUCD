@@ -6,6 +6,7 @@ import pytz
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 GOOGLE_CREDENTIALS_JSON = os.environ.get("GOOGLE_CREDENTIALS_JSON")
 
+
 # Google Sheets Configuration
 SHEET_NAME = "NTUFD AY26/27 Timeline (Tele Bot Debug)"
 SHEET_TAB_NAME = "PERF"
@@ -52,9 +53,9 @@ WELCOME_TEA_EVENT_DATE = date(2026, 6, 16)
 WELCOME_TEA_DETAILS_DAYS_BEFORE = 4   # Friday before a Tuesday event (4)
 WELCOME_TEA_REMINDER_DAYS_BEFORE = 3  # Saturday before a Tuesday event (3)
 WELCOME_TEA_APPROVAL_DAYS_BEFORE = 2  # Sunday before a Tuesday event (2)
-WELCOME_TEA_DETAILS_TIME = dt_time(22, 15)
-WELCOME_TEA_REMINDER_TIME = dt_time(22, 16)
-WELCOME_TEA_APPROVAL_TIME = dt_time(22, 17)
+WELCOME_TEA_DETAILS_TIME = dt_time(23, 26)
+WELCOME_TEA_REMINDER_TIME = dt_time(23, 27)
+WELCOME_TEA_APPROVAL_TIME = dt_time(23, 28)
 WELCOME_TEA_JOIN_REQUEST_LINK = "https://t.me/+1JT5ho8rjcVhZmI9"
 
 # Chat Configuration

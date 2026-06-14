@@ -26,7 +26,6 @@ from handlers.member_handlers import handle_member_status, handle_new_member
 from handlers.private_handlers import handle_confirm_new_perf, handle_dashboard_refresh, handle_dashboard_navigation
 from handlers.welcome_tea_handlers import (
     handle_welcome_tea_confirmation,
-    handle_welcome_tea_qr,
     schedule_welcome_tea_jobs,
 )
 from services.google_sheets import get_gspread_sheet
@@ -110,17 +109,8 @@ async def on_startup(application):
     schedule_welcome_tea_jobs(application)
 
 async def start_command_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Router for /start command that handles different entry points.
-    
-    - /start welcome_tea -> Handle Welcome Tea QR code scan
-    - /start -> Handle admin dashboard (admin only)
-    """
-    # Check if this is a welcome tea QR code scan
-    if context.args and len(context.args) > 0 and context.args[0] == "welcome_tea":
-        await handle_welcome_tea_qr(update, context)
-    else:
-        # Fall back to admin start handler
-        await start(update, context)
+    """Route /start to the admin dashboard."""
+    await start(update, context)
 
 def main():
     print("Bot starting...")

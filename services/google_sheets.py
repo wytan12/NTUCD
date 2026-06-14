@@ -1014,11 +1014,9 @@ def append_welcome_tea_id(user_id: int, username: str = ""):
 
         for row_number, row in enumerate(values, start=1):
             if row and row[0].strip() == target:
-                current_status = row[3].strip() if len(row) >= 4 else ""
-                status = current_status or WELCOME_TEA_STATUS_NOT_CONFIRM
                 ws.batch_update([{
                     "range": f"{rowcol_to_a1(row_number, 1)}:{rowcol_to_a1(row_number, 4)}",
-                    "values": [[target, username or "", timestamp, status]],
+                    "values": [[target, username or "", timestamp, WELCOME_TEA_STATUS_NOT_CONFIRM]],
                 }], value_input_option="USER_ENTERED")
                 invalidate_sheet_cache()
                 print(f"[INFO] Welcome Tea ID {user_id} ({username}) refreshed in WELCOME TEA ID.")

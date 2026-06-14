@@ -47,20 +47,21 @@ WELCOME_TEA_STATUS_NOT_CONFIRM = "Not Confirm"
 WELCOME_TEA_STATUS_ATTEND = "Attend"
 WELCOME_TEA_STATUS_REJECT = "Reject"
 
-# Welcome Tea confirmation automation. With the current 2025 date, these jobs
-# are skipped on modern deployments until the AY26/27 date is updated here.
+# Welcome Tea confirmation automation. Update the event date and send times
+# here before each Welcome Tea run.
 WELCOME_TEA_EVENT_DATE = date(2026, 6, 16)
-WELCOME_TEA_DETAILS_DAYS_BEFORE = 3   # Friday before a Tuesday event (4)
+WELCOME_TEA_DETAILS_DAYS_BEFORE = 4   # Friday before a Tuesday event (4)
 WELCOME_TEA_REMINDER_DAYS_BEFORE = 3  # Saturday before a Tuesday event (3)
-WELCOME_TEA_INVITE_DAYS_BEFORE = 2    # Sunday before a Tuesday event (2)
-WELCOME_TEA_DETAILS_TIME = dt_time(22, 3)
-WELCOME_TEA_REMINDER_TIME = dt_time(22, 5)
-WELCOME_TEA_INVITE_TIME = dt_time(9, 0)
-WELCOME_TEA_GROUP_INVITE_LINK = os.environ.get("WELCOME_TEA_GROUP_INVITE_LINK", "")
+WELCOME_TEA_APPROVAL_DAYS_BEFORE = 2  # Sunday before a Tuesday event (2)
+WELCOME_TEA_DETAILS_TIME = dt_time(22, 15)
+WELCOME_TEA_REMINDER_TIME = dt_time(22, 16)
+WELCOME_TEA_APPROVAL_TIME = dt_time(22, 17)
+WELCOME_TEA_JOIN_REQUEST_LINK = "https://t.me/+1JT5ho8rjcVhZmI9"
 
 # Chat Configuration
 # CHAT_ID =  # Main group Chat ID
 CHAT_ID = -1002614985856  # Debug group Chat ID
+WELCOME_TEA_GROUP_CHAT_ID = -5027731042
 
 # Timezone
 sg_tz = pytz.timezone("Asia/Singapore")

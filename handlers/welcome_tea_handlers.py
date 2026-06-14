@@ -8,9 +8,9 @@ from config import (
     WELCOME_TEA_DETAILS_DAYS_BEFORE,
     WELCOME_TEA_DETAILS_TIME,
     WELCOME_TEA_EVENT_DATE,
-    WELCOME_TEA_GROUP_INVITE_LINK,
-    WELCOME_TEA_INVITE_DAYS_BEFORE,
-    WELCOME_TEA_INVITE_TIME,
+    WELCOME_TEA_GROUP_CHAT_ID,
+    WELCOME_TEA_APPROVAL_DAYS_BEFORE,
+    WELCOME_TEA_APPROVAL_TIME,
     WELCOME_TEA_REMINDER_DAYS_BEFORE,
     WELCOME_TEA_REMINDER_TIME,
     WELCOME_TEA_STATUS_ATTEND,
@@ -23,6 +23,7 @@ from services.google_sheets import (
     get_welcome_tea_recipients,
     update_welcome_tea_status,
 )
+from utils.constants import welcome_tea_join_chats, welcome_tea_pending_requests
 
 WELCOME_TEA_MESSAGE = (
     "🎉 **Thank you for scanning the Welcome Tea QR code!**\n\n"
@@ -33,8 +34,8 @@ WELCOME_TEA_MESSAGE = (
 
 WELCOME_TEA_DETAILS_TEXT = (
     "Hi! Welcome!!🥁\n\n"
-    "<b>NTU Chinese Drums' Welcome Tea Session</b>\n"
-    "<b>Date:</b> 19th August 2025 (Tuesday)\n"
+    "<b>NTU Festive Drums' Welcome Tea Session</b>\n"
+    "<b>Date:</b> 18th August 2026 (Tuesday)\n"
     "<b>Time:</b> 1830 - 2130 (GMT+8)\n"
     "<b>Venue:</b> <a href='https://goo.gl/maps/7yqc3EfYNE92'>Nanyang House Foyer</a>\n"
     "<b>Dress Code:</b> Comfortable & Casual (we generally go barefoot for our practices/performances, "
@@ -53,10 +54,10 @@ WELCOME_TEA_DETAILS_TEXT = (
 
 WELCOME_TEA_REMINDER_TEXT = (
     "🥁 Gentle reminder for Welcome Tea!\n\n"
-    "Please confirm whether you will be attending so we can prepare food and group access properly."
+    "Please let us know if you'll be attending. We look forward to hearing from you!"
 )
 
-CONFIRMED_REPLY = "Thank you for confirming your attendance. We will add you to the group on Sunday"
+CONFIRMED_REPLY = "Thank you for confirming your attendance. We will add you to the group on Sunday!"
 REJECTED_REPLY = "Thank you so much for your interest, we hope to see you again!! ❤️"
 
 
@@ -89,10 +90,32 @@ async def handle_welcome_tea_qr(update: Update, context: ContextTypes.DEFAULT_TY
         print(f"[ERROR] Failed to register Welcome Tea user {user_id}")
 
 
+async def handle_welcome_tea_join_request(join_request, context: ContextTypes.DEFAULT_TYPE):
+    """Capture a Welcome Tea join request and leave it pending for Sunday."""
+    user = join_request.from_user
+    username = user.username or ""
+
+    welcome_tea_pending_requests[user.id] = join_request
+    welcome_tea_join_chats[user.id] = join_request.chat.id
+    context.application.bot_data["welcome_tea_group_chat_id"] = join_request.chat.id
+
+    success = append_welcome_tea_id(user.id, username)
+    if not success:
+        print(f"[WELCOME TEA][ERROR] Failed to register join request for {user.id}.")
+
+    try:
+        await context.bot.send_message(
+            chat_id=getattr(join_request, "user_chat_id", None) or user.id,
+            text=WELCOME_TEA_MESSAGE,
+            parse_mode="Markdown",
+        )
+    except Exception as e:
+        print(f"[WELCOME TEA][WARN] Could not DM QR confirmation to {user.id}: {e}")
+
+
 async def handle_welcome_tea_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Persist a user's Confirm/Reject button response."""
     query = update.callback_query
-    await query.answer()
 
     if query.data == "WELCOME_TEA_CONFIRM":
         status = WELCOME_TEA_STATUS_ATTEND
@@ -101,21 +124,37 @@ async def handle_welcome_tea_confirmation(update: Update, context: ContextTypes.
         status = WELCOME_TEA_STATUS_REJECT
         reply = REJECTED_REPLY
     else:
-        await query.message.reply_text("Unknown Welcome Tea response. Please try again.")
+        await query.answer("Unknown Welcome Tea response. Please try again.", show_alert=True)
         return
 
     user_id = query.from_user.id
     if not update_welcome_tea_status(user_id, status):
-        await query.message.reply_text(
-            "I could not find your Welcome Tea registration. Please scan the QR code again."
+        await query.answer(
+            "I could not find your Welcome Tea registration. Please submit the join request again.",
+            show_alert=True,
         )
         return
 
+    if status == WELCOME_TEA_STATUS_REJECT:
+        await _decline_welcome_tea_join_request(context.bot, user_id, context)
+
+    try:
+        await context.bot.send_message(
+            chat_id=query.message.chat.id,
+            text=reply,
+        )
+        await query.answer("Response recorded.")
+        print(f"[WELCOME TEA] Sent {status} confirmation reply to {user_id}.")
+    except Exception as e:
+        # Join requests only grant temporary DM access. If it has expired, the
+        # callback alert still confirms the response without raising an error.
+        await query.answer(reply, show_alert=True)
+        print(f"[WELCOME TEA][WARN] Could not DM response to {user_id}; showed callback alert instead: {e}")
+
     try:
         await query.edit_message_reply_markup(reply_markup=None)
-    except Exception:
-        pass
-    await query.message.reply_text(reply)
+    except Exception as e:
+        print(f"[WELCOME TEA][WARN] Could not remove response buttons for {user_id}: {e}")
 
 
 async def _send_welcome_tea_details(bot, user_id: int):
@@ -161,31 +200,63 @@ async def send_welcome_tea_reminder_job(context: ContextTypes.DEFAULT_TYPE):
     print(f"[WELCOME TEA] Reminder broadcast complete. Sent: {sent}")
 
 
-async def send_welcome_tea_invite_job(context: ContextTypes.DEFAULT_TYPE):
-    """Sunday automation: send invite link to Attend and Not Confirm users."""
-    if not WELCOME_TEA_GROUP_INVITE_LINK:
-        print("[WELCOME TEA][WARN] Invite job skipped: WELCOME_TEA_GROUP_INVITE_LINK is empty.")
-        return
-
-    recipients = get_welcome_tea_recipients({
+async def process_welcome_tea_join_requests_job(context: ContextTypes.DEFAULT_TYPE):
+    """Sunday automation: approve Attend/Not Confirm and reject Reject users."""
+    approve_targets = get_welcome_tea_recipients({
         WELCOME_TEA_STATUS_ATTEND,
         WELCOME_TEA_STATUS_NOT_CONFIRM,
     })
-    sent = 0
-    for row in recipients:
-        try:
-            await context.bot.send_message(
-                chat_id=row["user_id"],
-                text=(
-                    "Welcome Tea is coming up! Please join the Telegram group here:\n\n"
-                    f"{WELCOME_TEA_GROUP_INVITE_LINK}"
-                ),
-                disable_web_page_preview=True,
-            )
-            sent += 1
-        except Exception as e:
-            print(f"[WELCOME TEA][WARN] Invite DM failed for {row['user_id']}: {e}")
-    print(f"[WELCOME TEA] Invite broadcast complete. Sent: {sent}")
+    reject_targets = get_welcome_tea_recipients({WELCOME_TEA_STATUS_REJECT})
+
+    approved = 0
+    declined = 0
+    for row in approve_targets:
+        if await _approve_welcome_tea_join_request(context.bot, row["user_id"], context):
+            approved += 1
+    for row in reject_targets:
+        if await _decline_welcome_tea_join_request(context.bot, row["user_id"], context):
+            declined += 1
+
+    print(f"[WELCOME TEA] Join-request processing complete. Approved: {approved}, declined: {declined}")
+
+
+def _welcome_tea_chat_id(user_id: int, context: ContextTypes.DEFAULT_TYPE):
+    if user_id in welcome_tea_join_chats:
+        return welcome_tea_join_chats[user_id]
+    request = welcome_tea_pending_requests.get(user_id)
+    if request:
+        return request.chat.id
+    return context.application.bot_data.get("welcome_tea_group_chat_id") or WELCOME_TEA_GROUP_CHAT_ID
+
+
+async def _approve_welcome_tea_join_request(bot, user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    request = welcome_tea_pending_requests.get(user_id)
+    try:
+        if request:
+            await request.approve()
+        else:
+            await bot.approve_chat_join_request(chat_id=_welcome_tea_chat_id(user_id, context), user_id=user_id)
+        welcome_tea_pending_requests.pop(user_id, None)
+        welcome_tea_join_chats.pop(user_id, None)
+        return True
+    except Exception as e:
+        print(f"[WELCOME TEA][WARN] Could not approve join request for {user_id}: {e}")
+        return False
+
+
+async def _decline_welcome_tea_join_request(bot, user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    request = welcome_tea_pending_requests.get(user_id)
+    try:
+        if request:
+            await request.decline()
+        else:
+            await bot.decline_chat_join_request(chat_id=_welcome_tea_chat_id(user_id, context), user_id=user_id)
+        welcome_tea_pending_requests.pop(user_id, None)
+        welcome_tea_join_chats.pop(user_id, None)
+        return True
+    except Exception as e:
+        print(f"[WELCOME TEA][WARN] Could not decline join request for {user_id}: {e}")
+        return False
 
 
 def _scheduled_datetime(days_before: int, target_time):
@@ -215,9 +286,9 @@ def schedule_welcome_tea_jobs(application):
             send_welcome_tea_reminder_job,
         ),
         (
-            "welcome_tea_invite",
-            _scheduled_datetime(WELCOME_TEA_INVITE_DAYS_BEFORE, WELCOME_TEA_INVITE_TIME),
-            send_welcome_tea_invite_job,
+            "welcome_tea_approval",
+            _scheduled_datetime(WELCOME_TEA_APPROVAL_DAYS_BEFORE, WELCOME_TEA_APPROVAL_TIME),
+            process_welcome_tea_join_requests_job,
         ),
     ]
 

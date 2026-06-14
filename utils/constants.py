@@ -20,3 +20,5 @@ active_polls = {}
 yes_voters = set()
 interest_votes = {}
 pending_users = {}
+welcome_tea_pending_requests = {}
+welcome_tea_join_chats = {}

@@ -105,6 +105,7 @@ async def on_startup(application):
     # Background automation clock setup (09:00 AM SGT)
     target_time = datetime.time(hour=9, minute=0, second=0, tzinfo=sg_tz)
     application.job_queue.run_daily(daily_reminder_cron_job, time=target_time)
+    # application.job_queue.run_once(daily_reminder_cron_job, when=10)  
     print(f"[AUTOMATION] Background automated checker established for daily execution at: {target_time}")
     schedule_welcome_tea_jobs(application)
 

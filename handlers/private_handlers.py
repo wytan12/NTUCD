@@ -896,51 +896,50 @@ async def handle_dashboard_navigation(update: Update, context: ContextTypes.DEFA
         await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
         return
 
-    elif target_view == "MEMBERS" or target_view.startswith("MEMBERS_Y"):
-        from services.google_sheets import get_active_members, GRADUATE_YEAR
+    elif target_view == "MEMBERS" or target_view.startswith("MEMBERS_"):
+        from services.google_sheets import get_active_members
         try:
-            members = get_active_members()
+            members = get_active_members()  # [(sort_key, token, label, name), ...] sorted
         except Exception as e:
             keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🦅 Exit to Cockpit", callback_data="DASH_VIEW|HOME")]])
             await query.edit_message_text(f"❌ Failed to read the member info sheet: `{e}`", reply_markup=keyboard, parse_mode="Markdown")
             return
 
-        def group_label(y):
-            if y == GRADUATE_YEAR:
-                return "🎩 Graduates"
-            return f"🎓 Year {y}" if y else "🎓 Year —"
-
         # --- Drill-down: one group's members (tap a button below) ---
-        if target_view.startswith("MEMBERS_Y"):
-            year = int(target_view[len("MEMBERS_Y"):])
-            names = [n for y, n in members if y == year]
-            lines = [f"👥 **Active Members — {group_label(year)}**\n_{len(names)} members_\n"]
+        if target_view != "MEMBERS":
+            token = target_view[len("MEMBERS_"):]
+            group = [(lbl, nm) for _sk, tok, lbl, nm in members if tok == token]
+            label = group[0][0] if group else "Group"
+            names = [nm for _lbl, nm in group]
+            lines = [f"👥 **Active Members — {label}**\n_{len(names)} members_\n"]
             lines += [f"• {n}" for n in names] or ["_(none)_"]
             keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔙 Back to Year Menu", callback_data="DASH_VIEW|MEMBERS")],
-                [InlineKeyboardButton("🦅 Exit to Cockpit", callback_data="DASH_VIEW|HOME")],
+                [InlineKeyboardButton("🔙 Back to Group Menu", callback_data="DASH_VIEW|MEMBERS")],
             ])
             await query.edit_message_text("\n".join(lines), reply_markup=keyboard, parse_mode="Markdown")
             return
 
-        # --- Group menu: Graduates first, then years (highest first), with counts ---
+        # --- Group menu: groups in seniority order (Graduates → years → named → —) ---
         if not members:
             text = "👥 **Active Member Roster Listing**\n\n📭 No members marked *Active* in the MEMBER INFO sheet yet."
             keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🦅 Exit to Cockpit", callback_data="DASH_VIEW|HOME")]])
         else:
-            counts = {}
-            for y, _n in members:  # members are already sorted: Graduates, then year desc
-                counts[y] = counts.get(y, 0) + 1
+            order, meta = [], {}
+            for _sk, tok, lbl, _nm in members:  # already sorted
+                if tok not in meta:
+                    meta[tok] = {"label": lbl, "count": 0}
+                    order.append(tok)
+                meta[tok]["count"] += 1
             text = (
                 "👥 **Active Member Roster Listing**\n"
                 f"_{len(members)} active members — pick a group to view:_"
             )
             buttons = [
                 [InlineKeyboardButton(
-                    f"{group_label(y)} ({c} members)",
-                    callback_data=f"DASH_VIEW|MEMBERS_Y{y}",
+                    f"{meta[tok]['label']} ({meta[tok]['count']} members)",
+                    callback_data=f"DASH_VIEW|MEMBERS_{tok}",
                 )]
-                for y, c in counts.items()
+                for tok in order
             ]
             buttons.append([InlineKeyboardButton("🦅 Exit to Cockpit", callback_data="DASH_VIEW|HOME")])
             keyboard = InlineKeyboardMarkup(buttons)

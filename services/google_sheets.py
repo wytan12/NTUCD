@@ -352,18 +352,47 @@ def is_training_poll_id(poll_id) -> bool:
 # Sentinel "year" for the Graduates group (Year cell == "-") — sorts above Year 4.
 GRADUATE_YEAR = 99
 
+def _classify_member_group(year_raw: str):
+    """Map a `Year` cell to (sort_key:int, token:str, label:str).
+
+    - "-"               → 🎩 Graduates (top)
+    - contains a number → 🎓 Year N (first number extracted, e.g. "postgraduate/1" → 1)
+    - other text        → its own named group, e.g. "exchange" → 🌏 Exchange (below years)
+    - blank             → 🎓 Year — (bottom)
+    `token` is a short, pipe-free id used in the drill-down callback. Sort order
+    (desc): Graduates (99) > Year N > named groups (0) > blank (-1).
+    """
+    raw = (year_raw or "").strip()
+    raw_lower = raw.lower()
+
+    if raw == "-":
+        return (99, "Y99", "🎩 Graduates")
+
+    if raw_lower == "exchange":
+        return (98, "Gexchange", "🌏 Exchange")
+
+    m = re.search(r"\d+", raw)
+    if m:
+        y = int(m.group())
+        return (y, f"Y{y}", f"🎓 Year {y}")
+
+    if raw:
+        slug = re.sub(r"[^a-z0-9]+", "", raw_lower)[:24] or "grp"
+        return (0, f"G{slug}", f"🌏 {raw.title()}")
+
+    return (-1, "Ynone", "❓ Unassigned")
+
 
 def get_active_members():
     """Return active members from the MEMBER INFO tab, most senior first.
 
     Reads the `MEMBER INFO AY26/27` tab (smart-cached), keeps rows whose
-    `Status` is "Active" (case-insensitive), and returns
-    [(year:int, display_name:str), ...] sorted by year descending, then name
-    A-Z within a group. Members whose `Year` cell is **"-"** are grouped as
-    **Graduates** (`year == GRADUATE_YEAR`, listed first). Display name =
-    Nickname, falling back to Full Name. Header lookup is index-based and
-    case-insensitive, so column order can change without breaking it. A
-    blank/other non-numeric Year sorts to the bottom (year 0).
+    `Status` is `Active`/`Join`, and returns
+    `[(sort_key:int, group_token:str, group_label:str, display_name:str), ...]`
+    sorted by group seniority descending, then label, then name. Grouping is by
+    `_classify_member_group` (Graduates / Year N / named text group like
+    "Exchange" / blank "Year —"). Display name = Nickname, falling back to Full
+    Name. Header lookup is index-based and case-insensitive.
     """
     from config import MEMBER_INFO_TAB
     values = get_cached_values(tab_name=MEMBER_INFO_TAB)
@@ -392,22 +421,17 @@ def get_active_members():
     for row in values[1:]:
         # "Active" (manual) and "Join" (bot-stamped on join/auto-approve) both
         # count as active members; "Left" / blank are excluded.
-        if cell(row, status_i).lower() not in ("active", "join"):
+        status = cell(row, status_i).lower().strip()
+
+        if status not in ("active", "join"):
             continue
         name = cell(row, name_i) or cell(row, full_i)
         if not name:
             continue
-        year_raw = cell(row, year_i)
-        if year_raw == "-":
-            year = GRADUATE_YEAR
-        else:
-            # Extract the first number anywhere in the cell, so values like
-            # "postgraduate/1", "Year 2" or "Y3" still group under that year.
-            m = re.search(r"\d+", year_raw)
-            year = int(m.group()) if m else 0
-        members.append((year, name))
+        sort_key, token, label = _classify_member_group(cell(row, year_i))
+        members.append((sort_key, token, label, name))
 
-    members.sort(key=lambda m: (-m[0], m[1].lower()))
+    members.sort(key=lambda m: (-m[0], m[2].lower(), m[3].lower()))
     return members
 
 

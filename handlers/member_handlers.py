@@ -1,11 +1,7 @@
 from telegram import Update
 from telegram.ext import ContextTypes
-from services.google_sheets import (
-    get_gspread_sheet,
-    update_member_join_in_info,
-    update_member_leave_in_info,
-)
-from config import WELCOME_TEA_SHEET, WELCOME_TEA_TAB
+from services.google_sheets import update_member_join_in_info, update_member_leave_in_info
+from config import WELCOME_TEA_GROUP_CHAT_ID
 
 
 async def handle_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -15,7 +11,15 @@ async def handle_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_member event was missed. Acts as a safety net alongside
     handle_member_status (idempotent — both write the same values).
     """
+    if update.effective_chat.id == WELCOME_TEA_GROUP_CHAT_ID:
+        print("[INFO] Skipping MEMBER INFO join tracking for the Welcome Tea group.")
+        return
+
     for member in update.message.new_chat_members:
+        if member.is_bot:
+            print(f"[INFO] Skipping MEMBER INFO join stamp for bot {member.full_name} ({member.id}).")
+            continue
+
         user_id = member.id
         name = member.first_name or member.last_name
 
@@ -41,9 +45,17 @@ async def handle_member_status(update: Update, context: ContextTypes.DEFAULT_TYP
     Status=Left. Rows are matched by Tele ID.
     """
     status_change = update.chat_member
+    if status_change.chat.id == WELCOME_TEA_GROUP_CHAT_ID:
+        print("[INFO] Skipping MEMBER INFO status tracking for the Welcome Tea group.")
+        return
+
     old_status = status_change.old_chat_member.status
     new_status = status_change.new_chat_member.status
     user = status_change.new_chat_member.user
+
+    if user.is_bot:
+        print(f"[INFO] Skipping MEMBER INFO status tracking for bot {user.full_name} ({user.id}).")
+        return
     
     print(f"[DEBUG] Status change for {user.full_name} ({user.id}): {old_status} ➝ {new_status}")
 
@@ -66,4 +78,3 @@ async def handle_member_status(update: Update, context: ContextTypes.DEFAULT_TYP
             update_member_leave_in_info(user.id)
         except Exception as e:
             print(f"[MEMBER INFO][ERROR] leave stamp failed: {e}")
- 

@@ -1,3 +1,4 @@
+import re
 import json
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
@@ -400,10 +401,10 @@ def get_active_members():
         if year_raw == "-":
             year = GRADUATE_YEAR
         else:
-            try:
-                year = int(year_raw)
-            except ValueError:
-                year = 0
+            # Extract the first number anywhere in the cell, so values like
+            # "postgraduate/1", "Year 2" or "Y3" still group under that year.
+            m = re.search(r"\d+", year_raw)
+            year = int(m.group()) if m else 0
         members.append((year, name))
 
     members.sort(key=lambda m: (-m[0], m[1].lower()))

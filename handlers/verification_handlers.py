@@ -7,7 +7,13 @@ from services.google_sheets import (
     update_user_id_in_sheet
 )   
 from utils.constants import ASK_MATRIC, pending_users
-from config import JOIN_CONTACT_ADMIN_ID, WELCOME_TEA_LINK_KEYWORD
+from config import (
+    JOIN_CONTACT_ADMIN_ID,
+    WELCOME_TEA_GROUP_CHAT_ID,
+    WELCOME_TEA_JOIN_REQUEST_LINK,
+    WELCOME_TEA_LINK_KEYWORD,
+)
+from handlers.welcome_tea_handlers import handle_welcome_tea_join_request
 
 
 def _contact_admin_id() -> int:
@@ -74,12 +80,18 @@ async def join_request_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     user = update.chat_join_request.from_user
     link = update.chat_join_request.invite_link
     link_name = (link.name or "") if link else ""
+    link_url = (link.invite_link or "") if link else ""
+    request_chat_id = update.chat_join_request.chat.id
     print(f"Join request received from {user.first_name} ({user.id}) via link '{link_name}'")
 
     # --- Flow 1: Welcome Tea recruitment link ---
-    if WELCOME_TEA_LINK_KEYWORD in link_name.lower():
-        pending_users[user.id] = update.chat_join_request
-        await _send_welcome_tea_flow(user, context)
+    is_welcome_tea_request = (
+        request_chat_id == WELCOME_TEA_GROUP_CHAT_ID
+        or link_url == WELCOME_TEA_JOIN_REQUEST_LINK
+        or WELCOME_TEA_LINK_KEYWORD in link_name.lower()
+    )
+    if is_welcome_tea_request:
+        await handle_welcome_tea_join_request(update.chat_join_request, context)
         return
 
     # --- Flow 2: returning-member link (Tele-ID gate) ---

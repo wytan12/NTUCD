@@ -24,6 +24,33 @@ FIELD_ALIAS_MAP = {
 ALIAS_TO_FIELD = {alias: field for field, alias in FIELD_ALIAS_MAP.items()}
 DATE_FIELDS = {"REHEARSAL DATE | TIME", "PERF DATE | TIME"}
 
+def _pending_key(thread_id: int) -> str:
+    return str(thread_id)
+
+def _get_pending_edits(context: ContextTypes.DEFAULT_TYPE, thread_id: int) -> dict:
+    return context.user_data.setdefault("modify_pending_edits", {}).get(_pending_key(thread_id), {})
+
+def _set_pending_edit(context: ContextTypes.DEFAULT_TYPE, thread_id: int, field: str, value: str, original_value: str) -> bool:
+    pending_by_thread = context.user_data.setdefault("modify_pending_edits", {})
+    thread_edits = pending_by_thread.setdefault(_pending_key(thread_id), {})
+    if str(value or "") == str(original_value or ""):
+        thread_edits.pop(field, None)
+    else:
+        thread_edits[field] = value
+    if not thread_edits:
+        pending_by_thread.pop(_pending_key(thread_id), None)
+        return False
+    return True
+
+def _clear_pending_edits(context: ContextTypes.DEFAULT_TYPE, thread_id: int) -> None:
+    pending_by_thread = context.user_data.get("modify_pending_edits", {})
+    pending_by_thread.pop(_pending_key(thread_id), None)
+
+def _with_pending_edits(row: dict, context: ContextTypes.DEFAULT_TYPE, thread_id: int) -> dict:
+    merged = dict(row)
+    merged.update(_get_pending_edits(context, thread_id))
+    return merged
+
 async def start_modify(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         return ConversationHandler.END
@@ -48,6 +75,8 @@ async def initiate_modify_via_dm(
     if not row:
         await target_chat.send_message("❌ This thread is not registered in the sheet.")
         return
+    pending_edits = _get_pending_edits(context, thread_id)
+    row = _with_pending_edits(row, context, thread_id)
 
     modify_options = ["EVENT TYPE", "EVENT NAME", "REHEARSAL DATE | TIME", "PERF DATE | TIME", "LOCATION", "OTHER INFO", "REMUNATION", "STATUS"]
 
@@ -63,21 +92,48 @@ async def initiate_modify_via_dm(
     }
 
     keyboard = []
-    for opt in modify_options:
-        alias = FIELD_ALIAS_MAP.get(opt, opt.replace(" ", "_").upper())
-        emoji = emoji_map.get(opt, "")
-        keyboard.append([InlineKeyboardButton(f"{emoji} {opt.title()}", callback_data=f"MODIFY|{alias}|{thread_id}")])
+    for left_opt, right_opt in zip(modify_options[0::2], modify_options[1::2]):
+        left_alias = FIELD_ALIAS_MAP.get(left_opt, left_opt.replace(" ", "_").upper())
+        right_alias = FIELD_ALIAS_MAP.get(right_opt, right_opt.replace(" ", "_").upper())
+        keyboard.append([
+            InlineKeyboardButton(
+                f"{emoji_map.get(left_opt, '')} Edit {left_opt.title()}",
+                callback_data=f"MODIFY|{left_alias}|{thread_id}",
+            ),
+            InlineKeyboardButton(
+                f"{emoji_map.get(right_opt, '')} Edit {right_opt.title()}",
+                callback_data=f"MODIFY|{right_alias}|{thread_id}",
+            ),
+        ])
     
+    if pending_edits:
+        keyboard.append([InlineKeyboardButton("✅ Confirm & Publish Summary to Topic", callback_data=f"MODIFY|PUBLISH_SUMMARY|{thread_id}")])
     keyboard.append([InlineKeyboardButton("🔙 Back to Topic Selection List", callback_data=f"MODIFY|BACK_TO_LIST|{thread_id}")])
     keyboard.append([InlineKeyboardButton("🦅 Exit to Cockpit", callback_data="DASH_VIEW|HOME")])
 
     current_event_name = row.get("EVENT NAME", "Unnamed Event")
-    
-    # Prepend success banners natively if looping back from a completed update
-    prompt_text = ""
-    if success_banner:
-        prompt_text = f"{success_banner}\n\n"
-    prompt_text += f"✏️ What would you like to update for *{current_event_name}* (ID: `{thread_id}`)? "
+    summary_card = build_performance_summary(
+        event_name=current_event_name,
+        rehearsal_date=row.get("REHEARSAL DATE | TIME", "-"),
+        perf_date=row.get("PERF DATE | TIME", ""),
+        location=row.get("LOCATION", ""),
+        other_info=row.get("OTHER INFO", ""),
+    )
+    status = row.get("STATUS") or "PENDING"
+    event_type = row.get("EVENT TYPE") or "-"
+    remuneration = row.get("REMUNATION") or "-"
+    banner_text = f"{success_banner}\n\n" if success_banner else ""
+    prompt_text = (
+        f"{banner_text}"
+        f"\U0001F4CB **Performance Topic Preview**\n"
+        f"Current details for ID `{thread_id}`. Choose a section below to edit.\n\n"
+        f"{summary_card}\n\n"
+        f"\U0001F3AD *Event Type*: {event_type}\n"
+        f"\U0001F4B0 *Remuneration*: {remuneration}\n"
+        f"\U0001F4CA *Status*: {status}"
+    )
+    if pending_edits:
+        prompt_text += "\n\n⚠️ *Unsaved edits are shown in this preview. Tap Confirm & Publish to update Google Sheets and the topic summary.*"
 
     query = update.callback_query
     active_dash_id = context.user_data.get("master_dash_id")
@@ -123,8 +179,11 @@ async def get_modify_field_callback(update: Update, context: ContextTypes.DEFAUL
     thread_id = int(thread_token)
     context.user_data["modify_thread_id"] = thread_id
 
-    current_event_name = context.user_data.get("modify_event_name", "Selected Event")
     field = ALIAS_TO_FIELD.get(field_alias, field_alias)
+    records = context.user_data.get("cached_records") or get_cached_records()
+    row_record = next((r for r in records if str(r.get("THREAD ID")) == str(thread_id)), None)
+    preview_row = _with_pending_edits(row_record, context, thread_id) if row_record else {}
+    current_event_name = preview_row.get("EVENT NAME") or context.user_data.get("modify_event_name", "Selected Event")
 
     if field == "BACK_TO_LIST":
         context.user_data.pop("modify_field", None)
@@ -144,6 +203,89 @@ async def get_modify_field_callback(update: Update, context: ContextTypes.DEFAUL
     if field == "BACK_TO_MENU":
         context.user_data.pop("modify_field", None)
         await initiate_modify_via_dm(update=update, context=context, thread_id=thread_id, initiated_via_dm=True)
+        return ConversationHandler.END
+
+    if field == "PUBLISH_SUMMARY":
+        pending_edits = _get_pending_edits(context, thread_id)
+        if not pending_edits:
+            await initiate_modify_via_dm(
+                update=update,
+                context=context,
+                thread_id=thread_id,
+                initiated_via_dm=True,
+                success_banner="ℹ️ *No edits to publish yet. Choose a section to edit first.*",
+            )
+            return ConversationHandler.END
+
+        sheet = get_gspread_sheet()
+        records = sheet.get_all_records()
+        row_info = next(((idx, r) for idx, r in enumerate(records, start=2) if str(r.get("THREAD ID")) == str(thread_id)), None)
+        if not row_info:
+            await query.edit_message_text("❌ Entry not found in sheet. Please go back and select the topic again.")
+            return ConversationHandler.END
+        row_number, row = row_info
+        updated_row = dict(row)
+        updated_row.update(pending_edits)
+
+        try:
+            for edit_field, edit_value in pending_edits.items():
+                col_index = SHEET_COLUMNS.index(edit_field) + 1
+                sheet.update_cell(row_number, col_index, edit_value)
+            invalidate_sheet_cache()
+        except Exception as exc:
+            await initiate_modify_via_dm(
+                update=update,
+                context=context,
+                thread_id=thread_id,
+                initiated_via_dm=True,
+                success_banner=f"❌ *Failed to update Google Sheets:* `{exc}`",
+            )
+            return ConversationHandler.END
+
+        rename_warning = ""
+        if "EVENT NAME" in pending_edits:
+            new_topic_name = f"PERF - {updated_row.get('EVENT NAME', '')}".strip()
+            try:
+                await context.bot.edit_forum_topic(
+                    chat_id=CHAT_ID,
+                    message_thread_id=thread_id,
+                    name=new_topic_name,
+                )
+            except Exception as exc:
+                rename_warning = f"\n\n⚠️ *Sheet and summary updated, but topic rename failed:* `{exc}`"
+
+        group_chat_data = context.application.bot_data.setdefault("group_chat_data", {}).setdefault(CHAT_ID, {})
+        try:
+            await publish_performance_summary(
+                bot=context.bot,
+                chat_data_store=group_chat_data,
+                sheet=sheet,
+                chat_id=CHAT_ID,
+                thread_id=thread_id,
+                event_name=updated_row.get("EVENT NAME", ""),
+                rehearsal_date=updated_row.get("REHEARSAL DATE | TIME", ""),
+                perf_date=updated_row.get("PERF DATE | TIME", ""),
+                location=updated_row.get("LOCATION", ""),
+                other_info=updated_row.get("OTHER INFO", ""),
+            )
+        except Exception as exc:
+            await initiate_modify_via_dm(
+                update=update,
+                context=context,
+                thread_id=thread_id,
+                initiated_via_dm=True,
+                success_banner=f"❌ *Failed to publish summary:* `{exc}`",
+            )
+            return ConversationHandler.END
+        context.user_data.pop("modify_field", None)
+        _clear_pending_edits(context, thread_id)
+        await initiate_modify_via_dm(
+            update=update,
+            context=context,
+            thread_id=thread_id,
+            initiated_via_dm=True,
+            success_banner=f"✅ *Published and pinned the updated summary in the topic!*{rename_warning}",
+        )
         return ConversationHandler.END
 
     context.user_data["modify_field"] = field
@@ -219,6 +361,7 @@ async def get_modify_field_callback(update: Update, context: ContextTypes.DEFAUL
     records = context.user_data.get("cached_records", [])
     row_record = next((r for r in records if str(r.get("THREAD ID")) == str(thread_id)), None)
     if row_record:
+        row_record = _with_pending_edits(row_record, context, thread_id)
         old_val = row_record.get(field, "")
         if old_val and old_val != "-":
             prompt_text += f"\n\n📋 *Previous Value (Tap box below to copy instantly):*\n```\n{old_val}```\n"
@@ -251,11 +394,12 @@ async def apply_modify_value(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     sheet = get_gspread_sheet()
     records = sheet.get_all_records()
-    row_number = next((idx for idx, r in enumerate(records, start=2) if str(r.get("THREAD ID")) == str(thread_id)), None)
+    row_info = next(((idx, r) for idx, r in enumerate(records, start=2) if str(r.get("THREAD ID")) == str(thread_id)), None)
 
-    if row_number is None:
+    if row_info is None:
         await context.bot.send_message(chat_id=update.effective_chat.id, text="❌ Thread row not found.")
         return ConversationHandler.END
+    _row_number, row_record = row_info
 
     normalized_value = raw_value
     try:
@@ -291,38 +435,14 @@ async def apply_modify_value(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.chat_data["modify_error_msg_id"] = error_msg.message_id
         return MODIFY_VALUE
 
-    try:
-        col_index = SHEET_COLUMNS.index(field) + 1
-        sheet.update_cell(row_number, col_index, normalized_value)
-        invalidate_sheet_cache()
-    except Exception as exc:
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"❌ Failed to update sheet: `{exc}`", parse_mode="Markdown")
-        return ConversationHandler.END
+    has_pending = _set_pending_edit(context, thread_id, field, normalized_value, row_record.get(field, ""))
 
-    updated_row = sheet.row_values(row_number)
-    while len(updated_row) < len(SHEET_COLUMNS):
-        updated_row.append("")
-    updated_record = dict(zip(SHEET_COLUMNS, updated_row))
-    
-    if context.user_data.get("cached_records"):
-        idx_match = row_number - 2
-        if idx_match < len(context.user_data["cached_records"]):
-            context.user_data["cached_records"][idx_match] = updated_record
-
-    is_public_broadcast_field = field not in ["REMUNATION", "STATUS"]
-    if is_public_broadcast_field:
-        banner_msg = f"✨ *Success: Modified {field} n published a fresh Summary Opportunity directly to the topic!*"
-        group_chat_data = context.application.bot_data.setdefault("group_chat_data", {}).setdefault(CHAT_ID, {})
-        try:
-            await publish_performance_summary(
-                bot=context.bot, chat_data_store=group_chat_data, sheet=sheet, chat_id=CHAT_ID, thread_id=thread_id,
-                event_name=updated_record.get("EVENT NAME", ""), rehearsal_date=updated_record.get("REHEARSAL DATE | TIME", ""),
-                perf_date=updated_record.get("PERF DATE | TIME", ""), location=updated_record.get("LOCATION", ""),
-                other_info=updated_record.get("OTHER INFO", ""),
-            )
-        except Exception: pass
+    if not has_pending:
+        banner_msg = f"ℹ️ *No unsaved edits for [{field}]. The preview matches Google Sheets.*"
+    elif field in ["REMUNATION", "STATUS", "EVENT TYPE"]:
+        banner_msg = f"🟢 *Staged internal field [{field}]. Tap Confirm & Publish to update Google Sheets.*"
     else:
-        banner_msg = f"🟢 *Success: Updated internal field [{field}] inside the database registry!*"
+        banner_msg = f"🟢 *Staged [{field}]. Review the preview, then tap Confirm & Publish when ready.*"
 
     # Clear field sub-state context
     context.user_data.pop("modify_field", None)
@@ -350,20 +470,17 @@ async def handle_modify_type_selection(update: Update, context: ContextTypes.DEF
 
     sheet = get_gspread_sheet()
     records = sheet.get_all_records()
-    row_number = next((idx for idx, r in enumerate(records, start=2) if str(r.get("THREAD ID")) == str(thread_id)), None)
+    row_record = next((r for r in records if str(r.get("THREAD ID")) == str(thread_id)), None)
 
-    if row_number is None:
+    if row_record is None:
         await context.bot.send_message(chat_id=query.from_user.id, text="❌ Entry row not found.")
         return
 
-    try:
-        col_index = SHEET_COLUMNS.index("EVENT TYPE") + 1
-        sheet.update_cell(row_number, col_index, selection)
-        invalidate_sheet_cache()
-    except Exception: 
-        pass
-
-    banner_msg = f"🟢 *Success: Updated internal field [EVENT TYPE] inside the database registry!*"
+    has_pending = _set_pending_edit(context, thread_id, "EVENT TYPE", selection, row_record.get("EVENT TYPE", ""))
+    if has_pending:
+        banner_msg = "🟢 *Staged internal field [EVENT TYPE]. Tap Confirm & Publish to update Google Sheets.*"
+    else:
+        banner_msg = "ℹ️ *No unsaved edits for [EVENT TYPE]. The preview matches Google Sheets.*"
 
     context.user_data.pop("modify_field", None)
     await initiate_modify_via_dm(update=update, context=context, thread_id=thread_id, initiated_via_dm=True, success_banner=banner_msg)
@@ -386,23 +503,18 @@ async def handle_modify_status_selection(update: Update, context: ContextTypes.D
 
     sheet = get_gspread_sheet()
     records = sheet.get_all_records()
-    row_info = next(((idx, r) for idx, r in enumerate(records, start=2) if str(r.get("THREAD ID")) == str(thread_id)), None)
+    record = next((r for r in records if str(r.get("THREAD ID")) == str(thread_id)), None)
 
-    if row_info is None:
+    if record is None:
         await context.bot.send_message(chat_id=query.from_user.id, text="❌ Entry not found in sheet.")
         return
 
-    row_number, record = row_info
     db_value = "" if selection == "PENDING" else selection
-
-    try:
-        sheet.update_cell(row_number, SHEET_COLUMNS.index("STATUS") + 1, db_value)
-        invalidate_sheet_cache()
-    except Exception as exc:
-        print(f"[ERROR] Failed to update status cell: {exc}")
-        return
-
-    banner_msg = f"🟢 *Success: Updated internal field [STATUS] inside the database registry!*"
+    has_pending = _set_pending_edit(context, thread_id, "STATUS", db_value, record.get("STATUS", ""))
+    if has_pending:
+        banner_msg = "🟢 *Staged internal field [STATUS]. Tap Confirm & Publish to update Google Sheets.*"
+    else:
+        banner_msg = "ℹ️ *No unsaved edits for [STATUS]. The preview matches Google Sheets.*"
 
     context.user_data.pop("modify_field", None)
     await initiate_modify_via_dm(update=update, context=context, thread_id=thread_id, initiated_via_dm=True, success_banner=banner_msg)

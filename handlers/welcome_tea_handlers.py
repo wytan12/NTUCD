@@ -5,14 +5,18 @@ from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
 from config import (
+    MAIN_GROUP_WELCOME_TEA_INVITE_LINK,
     WELCOME_TEA_DETAILS_DAYS_BEFORE,
     WELCOME_TEA_DETAILS_TIME,
     WELCOME_TEA_EVENT_DATE,
+    WELCOME_TEA_FOLLOWUP_DAYS_AFTER,
+    WELCOME_TEA_FOLLOWUP_TIME,
     WELCOME_TEA_GROUP_CHAT_ID,
     WELCOME_TEA_APPROVAL_DAYS_BEFORE,
     WELCOME_TEA_APPROVAL_TIME,
     WELCOME_TEA_REMINDER_DAYS_BEFORE,
     WELCOME_TEA_REMINDER_TIME,
+    WELCOME_TEA_SIGNUP_FORM_LINK,
     WELCOME_TEA_STATUS_ATTEND,
     WELCOME_TEA_STATUS_NOT_CONFIRM,
     WELCOME_TEA_STATUS_REJECT,
@@ -29,6 +33,9 @@ WELCOME_TEA_MESSAGE = (
     "🎉 **Thank you for scanning the Welcome Tea QR code!**\n\n"
     "We've successfully recorded your information for the Welcome Tea event.\n\n"
     "We will disseminate more information nearer to the Welcome Tea event.\n\n"
+    "Please fill in this Welcome Tea Registration form if you have not done so:\n"
+    f"{WELCOME_TEA_SIGNUP_FORM_LINK}\n"
+    "_(Please ignore this if you have already filled in the form.)_\n\n"
     "_If you have any questions, feel free to reach out to the chairpersons!_"
 )
 
@@ -68,6 +75,15 @@ def _confirmation_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("Reject", callback_data="WELCOME_TEA_REJECT"),
         ]
     ])
+
+
+WELCOME_TEA_FOLLOWUP_TEXT = (
+    "Thank you for coming to NTUFD Welcome Tea! We hope you had a great time.\n\n"
+    "Ready to join us? Request to join the NTUFD main Telegram group here:\n"
+    f"{MAIN_GROUP_WELCOME_TEA_INVITE_LINK}\n\n"
+    "After requesting to join, check your private messages from the bot and "
+    "complete /verification with your matriculation number."
+)
 
 
 async def handle_welcome_tea_qr(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -220,6 +236,19 @@ async def process_welcome_tea_join_requests_job(context: ContextTypes.DEFAULT_TY
     print(f"[WELCOME TEA] Join-request processing complete. Approved: {approved}, declined: {declined}")
 
 
+async def send_post_welcome_tea_followup_job(context: ContextTypes.DEFAULT_TYPE):
+    """Send the thank-you message and main-group link in the Welcome Tea group."""
+    try:
+        await context.bot.send_message(
+            chat_id=WELCOME_TEA_GROUP_CHAT_ID,
+            text=WELCOME_TEA_FOLLOWUP_TEXT,
+            disable_web_page_preview=True,
+        )
+        print("[WELCOME TEA] Post-event main-group invitation sent.")
+    except Exception as e:
+        print(f"[WELCOME TEA][ERROR] Post-event invitation failed: {e}")
+
+
 def _welcome_tea_chat_id(user_id: int, context: ContextTypes.DEFAULT_TYPE):
     if user_id in welcome_tea_join_chats:
         return welcome_tea_join_chats[user_id]
@@ -289,6 +318,14 @@ def schedule_welcome_tea_jobs(application):
             "welcome_tea_approval",
             _scheduled_datetime(WELCOME_TEA_APPROVAL_DAYS_BEFORE, WELCOME_TEA_APPROVAL_TIME),
             process_welcome_tea_join_requests_job,
+        ),
+        (
+            "welcome_tea_followup",
+            sg_tz.localize(datetime.combine(
+                WELCOME_TEA_EVENT_DATE + timedelta(days=WELCOME_TEA_FOLLOWUP_DAYS_AFTER),
+                WELCOME_TEA_FOLLOWUP_TIME,
+            )),
+            send_post_welcome_tea_followup_job,
         ),
     ]
 

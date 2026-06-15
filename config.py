@@ -40,7 +40,7 @@ PERF_THREAD_ROW = 1        # row 1: thread id per event column
 PERF_EVENT_ROW = 2         # row 2: event name per event column
 PERF_FIRST_MEMBER_ROW = 3
 
-WELCOME_TEA_SHEET = "NTUCD Welcome Tea Registration 2025 (Responses)"
+WELCOME_TEA_SHEET = "NTUFD Welcome Tea Registration 2026 (Responses)"
 WELCOME_TEA_TAB = "Form Responses 1"
 WELCOME_TEA_ID_TAB = "WELCOME TEA ID"
 WELCOME_TEA_STATUS_NOT_CONFIRM = "Not Confirm"
@@ -49,14 +49,21 @@ WELCOME_TEA_STATUS_REJECT = "Reject"
 
 # Welcome Tea confirmation automation. Update the event date and send times
 # here before each Welcome Tea run.
-WELCOME_TEA_EVENT_DATE = date(2026, 6, 16)
-WELCOME_TEA_DETAILS_DAYS_BEFORE = 4   # Friday before a Tuesday event (4)
-WELCOME_TEA_REMINDER_DAYS_BEFORE = 3  # Saturday before a Tuesday event (3)
-WELCOME_TEA_APPROVAL_DAYS_BEFORE = 2  # Sunday before a Tuesday event (2)
-WELCOME_TEA_DETAILS_TIME = dt_time(23, 26)
-WELCOME_TEA_REMINDER_TIME = dt_time(23, 27)
-WELCOME_TEA_APPROVAL_TIME = dt_time(23, 28)
+WELCOME_TEA_EVENT_DATE = date(2026, 6, 16) # Tuesday
+WELCOME_TEA_DETAILS_DAYS_BEFORE = 1   # Friday before a Tuesday event (4)
+WELCOME_TEA_REMINDER_DAYS_BEFORE = 1  # Saturday before a Tuesday event (3)
+WELCOME_TEA_APPROVAL_DAYS_BEFORE = 1  # Sunday before a Tuesday event (2)
+WELCOME_TEA_DETAILS_TIME = dt_time(23, 2)
+WELCOME_TEA_REMINDER_TIME = dt_time(23, 3)
+WELCOME_TEA_APPROVAL_TIME = dt_time(23, 4)
 WELCOME_TEA_JOIN_REQUEST_LINK = "https://t.me/+1JT5ho8rjcVhZmI9"
+
+# Post-Welcome-Tea recruitment into the main NTUFD group.
+# The main-group invite must require admin approval so the bot receives a join request.
+MAIN_GROUP_WELCOME_TEA_INVITE_LINK = "https://t.me/+zOdnrvzq-5AxNmE1"
+WELCOME_TEA_SIGNUP_FORM_LINK = "https://docs.google.com/forms/d/e/1FAIpQLSeq96aCvJGcsbUYNDitHR1KQ13fzITSWiKn3gWDBk5GZ349cw/viewform?usp=header"
+WELCOME_TEA_FOLLOWUP_DAYS_AFTER = -1
+WELCOME_TEA_FOLLOWUP_TIME = dt_time(23, 5)
 
 # Chat Configuration
 # CHAT_ID =  # Main group Chat ID

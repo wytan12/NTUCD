@@ -128,7 +128,10 @@ def main():
     )
     
     verify_conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("verify", start_verification)],
+        entry_points=[
+            CommandHandler("verify", start_verification),
+            CommandHandler("verification", start_verification),
+        ],
         states={
             ASK_MATRIC: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_matric)],
         },

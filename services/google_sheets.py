@@ -122,57 +122,154 @@ def append_to_others_list(thread_id, event_name: str = ""):
     except Exception as e:
         print(f"[ERROR] Failed to write Thread ID {thread_id} to OTHERS tab: {str(e)}")
 
+WELCOME_TEA_MEMBER_FIELDS = (
+    "Full Name (as per Matric Card)",
+    "Nickname",
+    "Gender",
+    "Nationality",
+    "Matric No",
+    "School",
+    "Course",
+    "Year",
+    "Contact",
+    "NTU Email",
+    "Date of Birth",
+)
+
+
+def _normalized_record(record):
+    """Return a case-insensitive header map while preserving cell values."""
+    return {str(key).strip().lower(): value for key, value in record.items()}
+
+
+def get_welcome_tea_registration(matric_number: str):
+    """Return the latest 2026 Welcome Tea response matching `Matric No`."""
+    target = (matric_number or "").strip().upper()
+    if not target:
+        return None
+
+    rows = get_gspread_sheet(WELCOME_TEA_SHEET, WELCOME_TEA_TAB).get_all_records()
+    for row in reversed(rows):
+        normalized = _normalized_record(row)
+        if str(normalized.get("matric no", "")).strip().upper() == target:
+            return row
+    return None
+
+
 def matric_valid(matric_number: str) -> bool:
-    """Return True if the matric number exists in the Welcome Tea sheet AND
-    has Attendance == "1" (i.e. the person physically attended Welcome Tea).
+    """True when `Matric No` exists in the 2026 Welcome Tea response sheet."""
+    return get_welcome_tea_registration(matric_number) is not None
+
+
+def sync_welcome_tea_member(matric_number: str, telegram_user_id: int):
+    """Upsert the latest Welcome Tea response into MEMBER INFO by Tele ID.
+
+    All named fields are matched by header, so column order may differ between
+    the two sheets. If multiple MEMBER INFO rows contain the same Tele ID, the
+    first is refreshed and duplicate rows are cleared of the copied data and
+    Tele ID so verification leaves one authoritative member row.
+    Returns (ok, info).
     """
-    sheet = get_gspread_sheet(WELCOME_TEA_SHEET, WELCOME_TEA_TAB)
-    rows = sheet.get_all_records()
+    from config import MEMBER_INFO_TAB
+    from datetime import datetime
+    from gspread.utils import rowcol_to_a1
 
-    for row in rows:
-        matric_in_row = str(row.get("Matriculation Number", "")).strip().upper()
-        attendance = str(row.get("Attendance", "")).strip()
+    source = get_welcome_tea_registration(matric_number)
+    if source is None:
+        return False, "matric_not_found"
 
-        if matric_in_row == matric_number.strip().upper():
-            return attendance == "1"
-    return False
+    source_by_header = _normalized_record(source)
+    ws = get_gspread_sheet(tab_name=MEMBER_INFO_TAB)
+    values = ws.get_all_values()
+    _, cols = _member_info_cols(ws)
+
+    tele_c = cols.get("tele id")
+    name_c = cols.get("full name (as per matric card)")
+    matric_c = cols.get("matric no")
+    if not tele_c or not name_c or not matric_c:
+        return False, "member_info_missing_required_columns"
+
+    missing_fields = [field for field in WELCOME_TEA_MEMBER_FIELDS
+                      if field.lower() not in source_by_header or field.lower() not in cols]
+    if missing_fields:
+        print(f"[VERIFY][WARN] Header mismatch for fields: {missing_fields}")
+        return False, "header_mismatch"
+
+    def cell(row_number, col_number):
+        row = values[row_number - 1] if row_number - 1 < len(values) else []
+        return row[col_number - 1].strip() if col_number - 1 < len(row) else ""
+
+    matching_rows = [
+        row_number for row_number in range(2, len(values) + 1)
+        if cell(row_number, tele_c) == str(telegram_user_id)
+    ]
+    matric_rows = [
+        row_number for row_number in range(2, len(values) + 1)
+        if cell(row_number, matric_c).upper() == (matric_number or "").strip().upper()
+    ]
+    if matching_rows:
+        target_row = matching_rows[0]
+    elif matric_rows:
+        target_row = matric_rows[0]
+    else:
+        target_row = next(
+            (row_number for row_number in range(2, max(len(values) + 1, 101))
+             if not cell(row_number, name_c) and not cell(row_number, tele_c)),
+            None,
+        )
+    if target_row is None:
+        return False, "no_empty_member_row"
+
+    updates = []
+    for field in WELCOME_TEA_MEMBER_FIELDS:
+        updates.append({
+            "range": rowcol_to_a1(target_row, cols[field.lower()]),
+            "values": [[source_by_header[field.lower()]]],
+        })
+    updates.append({"range": rowcol_to_a1(target_row, tele_c), "values": [[str(telegram_user_id)]]})
+
+    status_c = cols.get("status")
+    join_c = cols.get("join date")
+    leave_c = cols.get("leave date")
+    if status_c:
+        updates.append({"range": rowcol_to_a1(target_row, status_c), "values": [["Join"]]})
+    if join_c:
+        today = datetime.now(sg_tz).strftime("%d %b %Y %H:%M")
+        updates.append({"range": rowcol_to_a1(target_row, join_c), "values": [[today]]})
+    if leave_c:
+        updates.append({"range": rowcol_to_a1(target_row, leave_c), "values": [[""]]})
+
+    # Consolidate duplicate Tele ID rows without touching formulas or unrelated columns.
+    duplicate_rows = sorted(set(matching_rows + matric_rows) - {target_row})
+    for duplicate_row in duplicate_rows:
+        for field in WELCOME_TEA_MEMBER_FIELDS:
+            updates.append({
+                "range": rowcol_to_a1(duplicate_row, cols[field.lower()]),
+                "values": [[""]],
+            })
+        updates.append({"range": rowcol_to_a1(duplicate_row, tele_c), "values": [[""]]})
+        if status_c:
+            updates.append({"range": rowcol_to_a1(duplicate_row, status_c), "values": [[""]]})
+        if join_c:
+            updates.append({"range": rowcol_to_a1(duplicate_row, join_c), "values": [[""]]})
+        if leave_c:
+            updates.append({"range": rowcol_to_a1(duplicate_row, leave_c), "values": [[""]]})
+
+    ws.batch_update(updates, value_input_option="USER_ENTERED")
+    invalidate_sheet_cache()
+    print(f"[VERIFY] Synced {matric_number} / Tele ID {telegram_user_id} into MEMBER INFO row {target_row}.")
+    return True, "updated_existing" if (matching_rows or matric_rows) else "created"
+
 
 def update_user_id_in_sheet(matric_number: str, telegram_user_id: int):
-    """Update user ID in the welcome tea sheet"""
-    sheet = get_gspread_sheet(WELCOME_TEA_SHEET, WELCOME_TEA_TAB)
-    rows = sheet.get_all_records()
+    """Legacy wrapper for the new header-matched MEMBER INFO synchronization."""
+    return sync_welcome_tea_member(matric_number, telegram_user_id)
 
-    for idx, row in enumerate(rows, start=2):
-        matric_in_row = str(row.get("Matriculation Number", "")).strip().upper()
-        if matric_in_row == matric_number.strip().upper():
-            user_id_col = None
-            header = sheet.row_values(1)
-            for i, col_name in enumerate(header, start=1):
-                if col_name.strip().lower() == "user id":
-                    user_id_col = i
-                    break
-
-            if user_id_col:
-                sheet.update_cell(idx, user_id_col, str(telegram_user_id))
-                print(f"[INFO] User ID {telegram_user_id} saved for {matric_number} in row {idx}.")
-                copy_user_to_timeline(row, telegram_user_id)
-            else:
-                print("[ERROR] 'User ID' column not found in sheet.")
-            return
-    print("[WARN] Matric number not found when trying to update User ID.")
 
 def copy_user_to_timeline(welcome_row: dict, telegram_user_id: int):
-    """Record a new member in the MEMBER INFO tab (legacy-named wrapper).
-
-    Previously appended to the separate "PERFORMER Info" spreadsheet; now
-    delegates to `update_member_join_in_info` on `MEMBER_INFO_TAB` (Status =
-    Join, Join Date = today, row matched/created by Tele ID).
-    welcome_row is a dict from the Welcome Tea responses (or a minimal
-    fallback dict with just name/nickname keys).
-    """
-    name = welcome_row.get("Your Full Name (according to matric card)", "").strip()
-    nickname = welcome_row.get("What name or nickname do you prefer to be called? ", "").strip()
-    update_member_join_in_info(telegram_user_id, full_name=name, nickname=nickname)
+    """Legacy compatibility wrapper using the response row's Matric No."""
+    matric = _normalized_record(welcome_row).get("matric no", "")
+    return sync_welcome_tea_member(str(matric), telegram_user_id)
 
 def user_already_in_timeline(user_id: int) -> bool:
     """True if the user's Tele ID already has a row in the MEMBER INFO tab."""

@@ -36,7 +36,7 @@ WELCOME_TEA_MESSAGE = (
     "Please fill in this Welcome Tea Registration form if you have not done so:\n"
     f"{WELCOME_TEA_SIGNUP_FORM_LINK}\n"
     "_(Please ignore this if you have already filled in the form.)_\n\n"
-    "_If you have any questions, feel free to reach out to the chairpersons!_"
+    "_If you have any questions, feel free to reach out to NTUFD chairperson @ma_ning (Ma Ning) or vice-chairperson @jurikawazu (Juri) on Telegram!_"
 )
 
 WELCOME_TEA_DETAILS_TEXT = (

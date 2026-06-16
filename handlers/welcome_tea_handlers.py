@@ -35,8 +35,8 @@ WELCOME_TEA_MESSAGE = (
     "We will disseminate more information nearer to the Welcome Tea event.\n\n"
     "Please fill in this Welcome Tea Registration form if you have not done so:\n"
     f"{WELCOME_TEA_SIGNUP_FORM_LINK}\n"
-    "_(Please ignore this if you have already filled in the form.)_\n\n"
-    "_If you have any questions, feel free to reach out to NTUFD chairperson @ma_ning (Ma Ning) or vice-chairperson @jurikawazu (Juri) on Telegram!_"
+    "<i>(Please ignore this if you have already filled in the form.)</i>\n\n"
+    "<i>If you have any questions, feel free to reach out to NTUFD chairperson @ma_ning (Ma Ning) or vice-chairperson @jurikawazu (Juri) on Telegram!</i>"
 )
 
 WELCOME_TEA_DETAILS_TEXT = (
@@ -95,7 +95,7 @@ async def handle_welcome_tea_qr(update: Update, context: ContextTypes.DEFAULT_TY
     success = append_welcome_tea_id(user_id, username)
 
     if success:
-        await update.message.reply_text(WELCOME_TEA_MESSAGE, parse_mode="Markdown")
+        await update.message.reply_text(WELCOME_TEA_MESSAGE, parse_mode=ParseMode.HTML)
         print(f"[INFO] Welcome Tea registration successful for user {user_id} (@{username})")
     else:
         error_msg = (
@@ -123,7 +123,7 @@ async def handle_welcome_tea_join_request(join_request, context: ContextTypes.DE
         await context.bot.send_message(
             chat_id=getattr(join_request, "user_chat_id", None) or user.id,
             text=WELCOME_TEA_MESSAGE,
-            parse_mode="Markdown",
+            parse_mode=ParseMode.HTML,
         )
     except Exception as e:
         print(f"[WELCOME TEA][WARN] Could not DM QR confirmation to {user.id}: {e}")

@@ -153,9 +153,11 @@ async def handle_matric(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if result == "matric_not_found":
         await update.effective_message.reply_text(
             "We could not find that matriculation number in the Welcome Tea registration form.\n\n"
-            f"Please fill in the form first if you have not done so:\n{WELCOME_TEA_SIGNUP_FORM_LINK}\n\n"
+            "Please fill in the form first if you have not done so:\n"
+            f"<a href='{WELCOME_TEA_SIGNUP_FORM_LINK}'>Welcome Tea Registration form</a>\n\n"
             "After submitting it, enter /verification again to retry.\n\n"
             "If you have already filled in the form, please check that you entered the correct matriculation number, or contact NTUFD chairperson @ma_ning (Ma Ning) or vice-chairperson @jurikawazu (Juri) on Telegram for assistance.",
+            parse_mode=ParseMode.HTML,
             disable_web_page_preview=True,
         )
         return ConversationHandler.END

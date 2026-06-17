@@ -31,9 +31,12 @@ async def _send_main_group_verification_prompt(join_request, context):
             chat_id=getattr(join_request, "user_chat_id", None) or user.id,
             text=(
                 "Thank you for requesting to join NTUFD!\n\n"
+                "If you have not filled in the Welcome Tea Registration Form, please submit it first:\n"
+                f"{WELCOME_TEA_SIGNUP_FORM_LINK}\n\n"
                 "Please type /verification here as a message to the bot. The bot will then prompt you to enter your matriculation "
                 "number to verify your Welcome Tea registration."
             ),
+            disable_web_page_preview=True,
         )
     except Exception as e:
         print(f"[VERIFY][WARN] Could not send verification DM to {user.id}: {e}")

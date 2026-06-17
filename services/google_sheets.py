@@ -1078,26 +1078,64 @@ def _normalize_welcome_tea_status(status: str) -> str:
     return status_map.get(lowered, raw)
 
 
+def _welcome_tea_layout(values=None):
+    """Return column indexes for WELCOME TEA ID, supporting the new header row."""
+    values = values or []
+    default_cols = {
+        "tele_id": 1,
+        "tele_handle": 2,
+        "timestamp": 3,
+        "status": 4,
+    }
+    if not values:
+        return 1, default_cols
+
+    header = [str(cell).strip().lower() for cell in values[0]]
+    aliases = {
+        "tele_id": ("tele id", "telegram id", "user id"),
+        "tele_handle": ("tele handle", "username", "tele username", "telegram handle"),
+        "timestamp": ("timestamp", "time stamp"),
+        "status": ("status",),
+    }
+    has_header = any(name in header for names in aliases.values() for name in names)
+    if not has_header:
+        return 1, default_cols
+
+    cols = {}
+    for key, names in aliases.items():
+        cols[key] = next(
+            (header.index(name) + 1 for name in names if name in header),
+            default_cols[key],
+        )
+    return 2, cols
+
+
+def _row_cell(row, one_based_col):
+    return row[one_based_col - 1].strip() if one_based_col - 1 < len(row) else ""
+
+
 def get_welcome_tea_rows():
     """Return row dicts from WELCOME TEA ID.
 
-    The tab intentionally has no header row:
-      A = Tele ID, B = username, C = timestamp, D = status.
-    Blank statuses are treated as Not Confirm for backward compatibility.
+    The tab now has a header row:
+      Tele ID, Tele Handle, Timestamp, Status.
+    The old no-header A-D layout is still supported for backward compatibility.
+    Blank statuses are treated as Not Confirm.
     """
     rows = []
     try:
         values = _welcome_tea_ws().get_all_values()
-        for row_number, row in enumerate(values, start=1):
-            tele_id = row[0].strip() if len(row) >= 1 else ""
+        first_data_row, cols = _welcome_tea_layout(values)
+        for row_number, row in enumerate(values[first_data_row - 1:], start=first_data_row):
+            tele_id = _row_cell(row, cols["tele_id"])
             if not tele_id:
                 continue
-            status = row[3] if len(row) >= 4 else ""
+            status = _row_cell(row, cols["status"])
             rows.append({
                 "row_number": row_number,
                 "user_id": tele_id,
-                "username": row[1].strip() if len(row) >= 2 else "",
-                "timestamp": row[2].strip() if len(row) >= 3 else "",
+                "username": _row_cell(row, cols["tele_handle"]),
+                "timestamp": _row_cell(row, cols["timestamp"]),
                 "status": _normalize_welcome_tea_status(status),
             })
     except Exception as e:
@@ -1126,14 +1164,15 @@ def get_welcome_tea_recipients(statuses=None):
 
 
 def update_welcome_tea_status(user_id: int, status: str) -> bool:
-    """Update column D status for the row matching `user_id`."""
+    """Update Status for the row matching `user_id`."""
     try:
         ws = _welcome_tea_ws()
         values = ws.get_all_values()
+        first_data_row, cols = _welcome_tea_layout(values)
         target = str(user_id)
-        for row_number, row in enumerate(values, start=1):
-            if row and row[0].strip() == target:
-                ws.update_cell(row_number, 4, _normalize_welcome_tea_status(status))
+        for row_number, row in enumerate(values[first_data_row - 1:], start=first_data_row):
+            if _row_cell(row, cols["tele_id"]) == target:
+                ws.update_cell(row_number, cols["status"], _normalize_welcome_tea_status(status))
                 invalidate_sheet_cache()
                 print(f"[WELCOME TEA] Status for {user_id} updated to {status}.")
                 return True
@@ -1145,7 +1184,7 @@ def update_welcome_tea_status(user_id: int, status: str) -> bool:
 
 
 def append_welcome_tea_id(user_id: int, username: str = ""):
-    """Insert/update a Telegram user in WELCOME TEA ID with status in col D."""
+    """Insert/update a Telegram user in WELCOME TEA ID with header-aware columns."""
     try:
         from config import WELCOME_TEA_STATUS_NOT_CONFIRM
         from datetime import datetime
@@ -1154,13 +1193,24 @@ def append_welcome_tea_id(user_id: int, username: str = ""):
         ws = _welcome_tea_ws()
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         values = ws.get_all_values()
+        first_data_row, cols = _welcome_tea_layout(values)
         target = str(user_id)
 
-        for row_number, row in enumerate(values, start=1):
-            if row and row[0].strip() == target:
+        for row_number, row in enumerate(values[first_data_row - 1:], start=first_data_row):
+            if _row_cell(row, cols["tele_id"]) == target:
+                existing_status = _normalize_welcome_tea_status(_row_cell(row, cols["status"]))
                 ws.batch_update([{
-                    "range": f"{rowcol_to_a1(row_number, 1)}:{rowcol_to_a1(row_number, 4)}",
-                    "values": [[target, username or "", timestamp, WELCOME_TEA_STATUS_NOT_CONFIRM]],
+                    "range": rowcol_to_a1(row_number, cols["tele_id"]),
+                    "values": [[target]],
+                }, {
+                    "range": rowcol_to_a1(row_number, cols["tele_handle"]),
+                    "values": [[username or ""]],
+                }, {
+                    "range": rowcol_to_a1(row_number, cols["timestamp"]),
+                    "values": [[timestamp]],
+                }, {
+                    "range": rowcol_to_a1(row_number, cols["status"]),
+                    "values": [[existing_status or WELCOME_TEA_STATUS_NOT_CONFIRM]],
                 }], value_input_option="USER_ENTERED")
                 invalidate_sheet_cache()
                 print(f"[INFO] Welcome Tea ID {user_id} ({username}) refreshed in WELCOME TEA ID.")

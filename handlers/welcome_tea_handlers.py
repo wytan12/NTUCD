@@ -67,6 +67,8 @@ WELCOME_TEA_REMINDER_TEXT = (
 CONFIRMED_REPLY = "Thank you for confirming your attendance. We will add you to the group on Sunday!"
 REJECTED_REPLY = "Thank you so much for your interest, we hope to see you again!! ❤️"
 
+WELCOME_TEA_DETAILS_MESSAGE_KEY = "welcome_tea_details_messages"
+
 
 def _confirmation_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
@@ -82,7 +84,7 @@ WELCOME_TEA_FOLLOWUP_TEXT = (
     "Ready to join us? Request to join the NTUFD main Telegram group here:\n"
     f"{MAIN_GROUP_WELCOME_TEA_INVITE_LINK}\n\n"
     "After requesting to join, check your private messages from the bot and "
-    "complete /verification with your matriculation number."
+    "complete the verification process."
 )
 
 
@@ -133,6 +135,17 @@ async def handle_welcome_tea_confirmation(update: Update, context: ContextTypes.
     """Persist a user's Confirm/Reject button response."""
     query = update.callback_query
 
+    if _welcome_tea_approval_closed():
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception as e:
+            print(f"[WELCOME TEA][WARN] Could not remove expired response buttons: {e}")
+        await query.answer(
+            "Welcome Tea group admission has already been processed, so this response is closed.",
+            show_alert=True,
+        )
+        return
+
     if query.data == "WELCOME_TEA_CONFIRM":
         status = WELCOME_TEA_STATUS_ATTEND
         reply = CONFIRMED_REPLY
@@ -174,7 +187,7 @@ async def handle_welcome_tea_confirmation(update: Update, context: ContextTypes.
 
 
 async def _send_welcome_tea_details(bot, user_id: int):
-    await bot.send_message(
+    return await bot.send_message(
         chat_id=user_id,
         text=WELCOME_TEA_DETAILS_TEXT,
         parse_mode=ParseMode.HTML,
@@ -196,7 +209,8 @@ async def send_welcome_tea_details_job(context: ContextTypes.DEFAULT_TYPE):
     sent = 0
     for row in recipients:
         try:
-            await _send_welcome_tea_details(context.bot, row["user_id"])
+            message = await _send_welcome_tea_details(context.bot, row["user_id"])
+            _remember_welcome_tea_details_message(context, row["user_id"], message.message_id)
             sent += 1
         except Exception as e:
             print(f"[WELCOME TEA][WARN] Details DM failed for {row['user_id']}: {e}")
@@ -218,6 +232,8 @@ async def send_welcome_tea_reminder_job(context: ContextTypes.DEFAULT_TYPE):
 
 async def process_welcome_tea_join_requests_job(context: ContextTypes.DEFAULT_TYPE):
     """Sunday automation: approve Attend/Not Confirm and reject Reject users."""
+    await _remove_pending_confirmation_buttons(context)
+
     approve_targets = get_welcome_tea_recipients({
         WELCOME_TEA_STATUS_ATTEND,
         WELCOME_TEA_STATUS_NOT_CONFIRM,
@@ -258,6 +274,29 @@ def _welcome_tea_chat_id(user_id: int, context: ContextTypes.DEFAULT_TYPE):
     return context.application.bot_data.get("welcome_tea_group_chat_id") or WELCOME_TEA_GROUP_CHAT_ID
 
 
+def _remember_welcome_tea_details_message(context: ContextTypes.DEFAULT_TYPE, user_id: int, message_id: int):
+    messages = context.application.bot_data.setdefault(WELCOME_TEA_DETAILS_MESSAGE_KEY, {})
+    messages.setdefault(str(user_id), []).append(message_id)
+
+
+async def _remove_pending_confirmation_buttons(context: ContextTypes.DEFAULT_TYPE):
+    messages = context.application.bot_data.get(WELCOME_TEA_DETAILS_MESSAGE_KEY, {})
+    removed = 0
+    for chat_id, message_ids in list(messages.items()):
+        for message_id in message_ids:
+            try:
+                await context.bot.edit_message_reply_markup(
+                    chat_id=int(chat_id),
+                    message_id=message_id,
+                    reply_markup=None,
+                )
+                removed += 1
+            except Exception as e:
+                print(f"[WELCOME TEA][WARN] Could not remove expired buttons for {chat_id}/{message_id}: {e}")
+    context.application.bot_data[WELCOME_TEA_DETAILS_MESSAGE_KEY] = {}
+    print(f"[WELCOME TEA] Removed confirmation buttons from {removed} detail messages.")
+
+
 async def _approve_welcome_tea_join_request(bot, user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
     request = welcome_tea_pending_requests.get(user_id)
     try:
@@ -294,6 +333,13 @@ def _scheduled_datetime(days_before: int, target_time):
     if combined.tzinfo is None:
         return sg_tz.localize(combined)
     return combined.astimezone(sg_tz)
+
+
+def _welcome_tea_approval_closed() -> bool:
+    return datetime.now(sg_tz) >= _scheduled_datetime(
+        WELCOME_TEA_APPROVAL_DAYS_BEFORE,
+        WELCOME_TEA_APPROVAL_TIME,
+    )
 
 
 def schedule_welcome_tea_jobs(application):

@@ -24,11 +24,17 @@ _DASHBOARD_CACHE_KEYS = (
 
 DASHBOARD_TEXT = (
     "🥁 ***NTUFD Command Centre*** 🥁\n"
-    "Welcome back, maestro! 🎶 The whole show runs from here:\n\n"
-    "🎭 ***Performances*** — create topics, edit details, track statuses\n"
-    "✅ ***Attendance*** — training & performance rosters, one tap to mark\n"
-    "📣 ***Comms*** — broadcast to any topic or fire off reminders\n"
-    "👥 ***People*** — thread directory & active member roster\n\n"
+    "Welcome back, maestro! 🎶 The whole show runs from here.\n\n"
+    "📂 ***Workspace Guide:***\n"
+    "🎭 *Events:* Create topics, modify details, or view the overall ledger.\n"
+    "✅ *Rosters:* Log attendance, view the thread index, or check member status.\n"
+    "📢 *Comms:* Broadcast announcements or trigger manual checklists.\n\n"
+    "🤖 ***Active Background Autopilots:***\n"
+    "• Training Polls (D-4 @ 9AM) & Eve Reminders (10PM)\n"
+    "• Perf. Checklists & Admin Nudges (D-7)\n"
+    "• Welcome Tea Staging & Auto-invites\n"
+    "• Live Member Join/Leave Sheet Tracking\n"
+    "• Strict Forum Topic Moderation\n\n"
     "👇 *Pick your move:*"
 )
 
@@ -278,7 +284,9 @@ async def handle_private_command(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     text = message.text.strip()
-    OFFICIAL_MENU_COMMANDS = {"/start", "/modify", "/list", "/attd", "/attendance", "/announce", "/remind", "/testremind", "/threadid", "/cancel"}
+    
+    # 🎯 STRICT WHITELIST: Only /start is allowed as a text command now.
+    OFFICIAL_MENU_COMMANDS = {"/start"}
 
     if text.lower() in OFFICIAL_MENU_COMMANDS:
         if context.user_data.get("dm_state") is not None or context.user_data.get("waiting_announcement_text") is not None or context.user_data.get("modify_field") is not None:
@@ -298,18 +306,6 @@ async def handle_private_command(update: Update, context: ContextTypes.DEFAULT_T
         from handlers.attendance_handlers import handle_moddate_text
         if await handle_moddate_text(update, context): return
 
-    if command == "testremind":
-        context.user_data.pop("modify_field", None)
-        from handlers.admin_handlers import execute_manual_test_scan
-        await execute_manual_test_scan(update, context)
-        return
-
-    if command == "remind":
-        context.user_data.pop("modify_field", None)
-        from handlers.admin_handlers import initiate_remind_portal_via_dm
-        await initiate_remind_portal_via_dm(update, context)
-        return
-
     if context.user_data.get("waiting_announcement_text") is not None:
         target_thread = context.user_data.pop("waiting_announcement_text")
         display_target_name = context.user_data.pop("waiting_announcement_name", "the group topic")
@@ -322,26 +318,6 @@ async def handle_private_command(update: Update, context: ContextTypes.DEFAULT_T
                 await context.bot.edit_message_text(chat_id=message.chat.id, message_id=current_dash_id, text=DASHBOARD_TEXT, reply_markup=_dashboard_keyboard(), parse_mode="Markdown")
         except Exception as e:
             await message.reply_text(f"❌ Failed to dispatch announcement: {e}")
-        return
-
-    if command in ["new", "modify", "attd", "attendance", "announce", "list", "threadid", "threads", "thread"]:
-        active_dash_id = context.user_data.get("master_dash_id")
-        if not active_dash_id:
-            msg = await message.reply_text(DASHBOARD_TEXT, reply_markup=_dashboard_keyboard(), parse_mode="Markdown")
-            context.user_data["master_dash_id"] = msg.message_id
-            return
-        from handlers.private_handlers import handle_dashboard_navigation
-        class FakeCallbackQuery:
-            def __init__(self, msg, cmd):
-                self.message = msg
-                self.data = f"DASH_VIEW|{cmd}"
-            async def answer(self): pass
-        class FakeUpdate:
-            def __init__(self, query): self.callback_query = query
-        cmd_map = {"new": "LAUNCH_NEW", "modify": "LAUNCH_MODIFY", "attd": "LAUNCH_ATTD", "attendance": "LAUNCH_ATTD", "announce": "LAUNCH_ANNOUNCE", "list": "LEDGER", "threadid": "THREADS", "threads": "THREADS", "thread": "THREADS"}
-        fake_msg = await context.bot.edit_message_reply_markup(chat_id=message.chat.id, message_id=active_dash_id)
-        fake_event = FakeUpdate(FakeCallbackQuery(fake_msg, cmd_map[command]))
-        await handle_dashboard_navigation(fake_event, context)
         return
 
     # =========================================================================
@@ -400,14 +376,12 @@ async def handle_private_command(update: Update, context: ContextTypes.DEFAULT_T
 
             active_dash_id = context.user_data.get("master_dash_id")
             if active_dash_id:
-                # 🎯 FIX: Intercept duplicate text edits to avoid BadRequest crashes
                 try:
                     await context.bot.edit_message_text(
                         chat_id=message.chat.id, message_id=active_dash_id, text=error_prompt, 
                         reply_markup=_get_back_keyboard("temp_event_name"), parse_mode="Markdown"
                     )
-                except Exception:
-                    pass # Ignore silently if message contents match exactly
+                except Exception: pass
             return
 
         context.user_data["temp_rehearsal"] = rehearsal_date
@@ -459,14 +433,12 @@ async def handle_private_command(update: Update, context: ContextTypes.DEFAULT_T
 
             active_dash_id = context.user_data.get("master_dash_id")
             if active_dash_id:
-                # 🎯 FIX: Intercept duplicate text edits to avoid BadRequest crashes
                 try:
                     await context.bot.edit_message_text(
                         chat_id=message.chat.id, message_id=active_dash_id, text=error_prompt, 
                         reply_markup=_get_back_keyboard("temp_rehearsal"), parse_mode="Markdown"
                     )
-                except Exception:
-                    pass
+                except Exception: pass
             return
 
         context.user_data["temp_perf_date"] = perf_date
@@ -545,19 +517,29 @@ async def handle_private_command(update: Update, context: ContextTypes.DEFAULT_T
 
     if context.user_data.get("modify_field") and not text.startswith("/"):
         current_field = context.user_data.get("modify_field")
-        
-        # 🎯 REDIRECTION HOOK: If text is captured for a broadcast, route to the announcement engine!
         if current_field == "ANNOUNCEMENT_TEXT_CAPTURE":
             from handlers.admin_handlers import apply_announcement_broadcast
             await apply_announcement_broadcast(update, context)
             return
-            
         from handlers.modify_handlers import apply_modify_value
         await apply_modify_value(update, context)
         return
 
     if command == "help" or text == "/start":
-        await message.reply_text(DASHBOARD_TEXT, reply_markup=_dashboard_keyboard(), parse_mode="Markdown")
+        try: await message.delete()
+        except Exception: pass
+        
+        active_dash_id = context.user_data.get("master_dash_id")
+        if active_dash_id:
+            try:
+                await context.bot.edit_message_text(chat_id=message.chat.id, message_id=active_dash_id, text=DASHBOARD_TEXT, reply_markup=_dashboard_keyboard(), parse_mode="Markdown")
+                return
+            except Exception: pass
+            
+        msg = await message.reply_text(DASHBOARD_TEXT, reply_markup=_dashboard_keyboard(), parse_mode="Markdown")
+        context.user_data["master_dash_id"] = msg.message_id
+        return
+    return
 
 async def handle_dashboard_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
@@ -882,7 +864,7 @@ async def handle_dashboard_navigation(update: Update, context: ContextTypes.DEFA
 
     elif target_view == "THREADS":
         records = get_cached_records()
-        lines = ["🧵 **Forum Thread Directory Chart**\n_Copy these numerical index IDs for broadcasts/reminders_\n"]
+        lines = ["🧵 ***Forum Thread Directory Chart***\nAn overview of individual topic Thread IDs\n"]
         lines.append("• `0` | 💬 **General/Main Landing Channel**")
         for row in records:
             tid = row.get("THREAD ID")

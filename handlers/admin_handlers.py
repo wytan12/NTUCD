@@ -239,28 +239,28 @@ async def daily_reminder_cron_job(context: ContextTypes.DEFAULT_TYPE):
     print(f"[AUTOMATION] {log_summary}")
 
 # 🧠 FIX: This helper function handles your manual execution without passing through the group decorator layer!
-async def execute_manual_test_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    status_msg = await update.message.reply_text("⏳ Processing live spreadsheet timeline analysis rules...")
-    try:
-        summary = await process_reminder_scan_cycle(context.bot, fallback_user_id=update.effective_user.id)
-        await status_msg.edit_text(summary)
-    except Exception as e:
-        await status_msg.edit_text(f"❌ Error encountered: `{str(e)}`", parse_mode="Markdown")
+# async def execute_manual_test_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+#     status_msg = await update.message.reply_text("⏳ Processing live spreadsheet timeline analysis rules...")
+#     try:
+#         summary = await process_reminder_scan_cycle(context.bot, fallback_user_id=update.effective_user.id)
+#         await status_msg.edit_text(summary)
+#     except Exception as e:
+#         await status_msg.edit_text(f"❌ Error encountered: `{str(e)}`", parse_mode="Markdown")
 
 @admin_only
-async def manual_test_reminder_trigger(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Direct diagnostic command hook allowing admins to run validation tests manually via private dashboard."""
-    if update.effective_chat.type != "private":
-        return # 🤐 TOTAL PASSIVITY: Leaves the message completely untouched inside group channels
+# async def manual_test_reminder_trigger(update: Update, context: ContextTypes.DEFAULT_TYPE):
+#     """Direct diagnostic command hook allowing admins to run validation tests manually via private dashboard."""
+#     if update.effective_chat.type != "private":
+#         return # 🤐 TOTAL PASSIVITY: Leaves the message completely untouched inside group channels
 
-    # 🛡️ Only verified dashboard admins may fire the reminder scan — stay silent otherwise.
-    from services.google_sheets import is_dashboard_admin
-    current_uid = update.effective_user.id
-    if not is_dashboard_admin(current_uid):
-        print(f"[SECURITY] Unauthorized /testremind attempt blocked for user ID: {current_uid}")
-        return
+#     # 🛡️ Only verified dashboard admins may fire the reminder scan — stay silent otherwise.
+#     from services.google_sheets import is_dashboard_admin
+#     current_uid = update.effective_user.id
+#     if not is_dashboard_admin(current_uid):
+#         print(f"[SECURITY] Unauthorized /testremind attempt blocked for user ID: {current_uid}")
+#         return
 
-    await execute_manual_test_scan(update, context)
+#     await execute_manual_test_scan(update, context)
 
 # 🧠 NEW DM PORTAL GENERATOR: Prompts admin to select which event they want to trigger manual reminders for
 async def initiate_remind_portal_via_dm(update: Update, context: ContextTypes.DEFAULT_TYPE, success_banner: str = ""):
@@ -275,6 +275,7 @@ async def initiate_remind_portal_via_dm(update: Update, context: ContextTypes.DE
     prompt_text += "🔔 *Manual Reminder Dispatch Center*\nSelect which performance topic thread you want to issue checklist reminders into:"
 
     try:
+        from services.google_sheets import get_cached_records
         records = get_cached_records()
         if not records:
             text_empty = "📋 The performance sheet is currently empty."
@@ -282,9 +283,25 @@ async def initiate_remind_portal_via_dm(update: Update, context: ContextTypes.DE
             elif active_dash_id: await context.bot.edit_message_text(chat_id=target_chat.id, message_id=active_dash_id, text=text_empty)
             else: await context.bot.send_message(chat_id=target_chat.id, text=text_empty)
             return
+
+        import re
+        from datetime import datetime
+        
+        # 🎯 Sorting Logic Applied Here
+        def get_sort_date(r):
+            date_str = str(r.get("PERF DATE | TIME", "")).strip()
+            if not date_str or date_str == "-": return datetime.min
+            first_line = date_str.splitlines()[0].strip()
+            match = re.match(r'^(\d{1,2}\s+[a-zA-Z]{3,9}\s+\d{4})', first_line)
+            if match:
+                try: return datetime.strptime(match.group(1), "%d %b %Y")
+                except ValueError: pass
+            return datetime.min
+
+        sorted_records = sorted(records, key=get_sort_date, reverse=True)
             
         buttons = []
-        for row in records:
+        for row in sorted_records:
             tid = row.get("THREAD ID")
             if str(tid).isdigit():
                 event_name = row.get("EVENT NAME", "Unnamed Event")
@@ -397,20 +414,20 @@ async def execute_manual_remind_dispatch(update: Update, context: ContextTypes.D
         await query.edit_message_text(f"❌ Critical error during dispatch runtime loop: `{e}`", parse_mode="Markdown")
 
 @admin_only
-async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle standard manual chat trigger command /remind securely."""
-    if update.effective_chat.type != "private":
-        return
+# async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+#     """Handle standard manual chat trigger command /remind securely."""
+#     if update.effective_chat.type != "private":
+#         return
 
-    from services.google_sheets import is_dashboard_admin
-    current_uid = update.effective_user.id
-    if not is_dashboard_admin(current_uid):
-        print(f"[SECURITY] Unauthorized command trigger blocked for user ID: {current_uid}")
-        return
+#     from services.google_sheets import is_dashboard_admin
+#     current_uid = update.effective_user.id
+#     if not is_dashboard_admin(current_uid):
+#         print(f"[SECURITY] Unauthorized command trigger blocked for user ID: {current_uid}")
+#         return
 
-    # In-place tracking update configuration
-    context.user_data["master_dash_id"] = update.effective_message.message_id
-    await initiate_remind_portal_via_dm(update, context)
+#     # In-place tracking update configuration
+#     context.user_data["master_dash_id"] = update.effective_message.message_id
+#     await initiate_remind_portal_via_dm(update, context)
 
 async def send_reminder(bot, chat_id, thread_id):
     """Send training reminder"""
@@ -517,7 +534,23 @@ async def initiate_announce_portal_via_dm(update: Update, context: ContextTypes.
         buttons.append([InlineKeyboardButton("💬 Post to: General Chat (Main Channel)", callback_data="ANNOUNCE_TARGET|0")])
         
         if records:
-            for row in records:
+            import re
+            from datetime import datetime
+            
+            # 🎯 Sorting Logic Applied Here
+            def get_sort_date(r):
+                date_str = str(r.get("PERF DATE | TIME", "")).strip()
+                if not date_str or date_str == "-": return datetime.min
+                first_line = date_str.splitlines()[0].strip()
+                match = re.match(r'^(\d{1,2}\s+[a-zA-Z]{3,9}\s+\d{4})', first_line)
+                if match:
+                    try: return datetime.strptime(match.group(1), "%d %b %Y")
+                    except ValueError: pass
+                return datetime.min
+
+            sorted_records = sorted(records, key=get_sort_date, reverse=True)
+
+            for row in sorted_records:
                 tid = row.get("THREAD ID")
                 if str(tid).isdigit():
                     event_name = row.get("EVENT NAME", "Unnamed Event")

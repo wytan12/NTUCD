@@ -231,7 +231,6 @@ async def attendance_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     # 🎯 Data must be defined here
     data = query.data 
     
-    print(f"[DEBUG] Callback: {data}")
     await query.answer()
 
     if not is_dashboard_admin(update.effective_user.id):

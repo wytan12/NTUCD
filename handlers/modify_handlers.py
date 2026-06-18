@@ -75,96 +75,84 @@ async def initiate_modify_via_dm(
     if not row:
         await target_chat.send_message("❌ This thread is not registered in the sheet.")
         return
+        
+    # Merge existing database row with any unsaved edits currently in memory
     pending_edits = _get_pending_edits(context, thread_id)
     row = _with_pending_edits(row, context, thread_id)
 
-    modify_options = ["EVENT TYPE", "EVENT NAME", "REHEARSAL DATE | TIME", "PERF DATE | TIME", "LOCATION", "OTHER INFO", "REMUNATION", "STATUS"]
-
-    emoji_map = {
-        "EVENT TYPE": "🎭",
-        "EVENT NAME": "📍",
-        "REHEARSAL DATE | TIME": "🔁",
-        "PERF DATE | TIME": "📅",
-        "LOCATION": "📌",
-        "OTHER INFO": "📝",
-        "REMUNATION": "💰",
-        "STATUS": "📊",
-    }
-
-    keyboard = []
-    for left_opt, right_opt in zip(modify_options[0::2], modify_options[1::2]):
-        left_alias = FIELD_ALIAS_MAP.get(left_opt, left_opt.replace(" ", "_").upper())
-        right_alias = FIELD_ALIAS_MAP.get(right_opt, right_opt.replace(" ", "_").upper())
-        keyboard.append([
-            InlineKeyboardButton(
-                f"{emoji_map.get(left_opt, '')} Edit {left_opt.title()}",
-                callback_data=f"MODIFY|{left_alias}|{thread_id}",
-            ),
-            InlineKeyboardButton(
-                f"{emoji_map.get(right_opt, '')} Edit {right_opt.title()}",
-                callback_data=f"MODIFY|{right_alias}|{thread_id}",
-            ),
-        ])
-    
-    if pending_edits:
-        keyboard.append([InlineKeyboardButton("✅ Confirm & Publish Summary to Topic", callback_data=f"MODIFY|PUBLISH_SUMMARY|{thread_id}")])
-    keyboard.append([InlineKeyboardButton("🔙 Back to Topic Selection List", callback_data=f"MODIFY|BACK_TO_LIST|{thread_id}")])
-    keyboard.append([InlineKeyboardButton("🦅 Exit to Cockpit", callback_data="DASH_VIEW|HOME")])
-
-    current_event_name = row.get("EVENT NAME", "Unnamed Event")
-    summary_card = build_performance_summary(
-        event_name=current_event_name,
-        rehearsal_date=row.get("REHEARSAL DATE | TIME", "-"),
-        perf_date=row.get("PERF DATE | TIME", ""),
-        location=row.get("LOCATION", ""),
-        other_info=row.get("OTHER INFO", ""),
+    # Build the Public Summary Preview
+    public_preview = (
+        f"👁️ ***Public Summary Preview:***\n"
+        f"🎭 **Event:** {row.get('EVENT NAME', 'TBD')}\n"
+        f"⏳ **Rehearsal:**\n{row.get('REHEARSAL DATE | TIME', 'TBD')}\n"
+        f"📅 **Perf Date:**\n{row.get('PERF DATE | TIME', 'TBD')}\n"
+        f"📍 **Location:** {row.get('LOCATION', 'TBD')}\n"
+        f"ℹ️ **Other Info:** {row.get('OTHER INFO', 'TBD')}\n"
     )
-    status = row.get("STATUS") or "PENDING"
-    event_type = row.get("EVENT TYPE") or "-"
-    remuneration = row.get("REMUNATION") or "-"
+
+    # Build the Internal Registry Preview
+    internal_preview = (
+        f"🔒 ***Internal Registry (Will not be posted):***\n"
+        f"🏷️ **Event Type:** {row.get('EVENT TYPE', 'EXT')}\n"
+        f"💰 **Remuneration:** {row.get('REMUNATION', 'TBD')}\n"
+        f"🚥 **Status:** {row.get('STATUS', 'PENDING')}\n"
+    )
+
     banner_text = f"{success_banner}\n\n" if success_banner else ""
+    if pending_edits:
+        banner_text += "⚠️ *Unsaved edits are shown below. Tap Save & Push Updates to go live.*\n\n"
+
     prompt_text = (
         f"{banner_text}"
-        f"\U0001F4CB **Performance Topic Preview**\n"
-        f"Current details for ID `{thread_id}`. Choose a section below to edit.\n\n"
-        f"{summary_card}\n\n"
-        f"\U0001F3AD *Event Type*: {event_type}\n"
-        f"\U0001F4B0 *Remuneration*: {remuneration}\n"
-        f"\U0001F4CA *Status*: {status}"
+        f"🛠️ ***Editing Performance: {row.get('EVENT NAME', 'Unnamed')} (ID: `{thread_id}`)***\n\n"
+        f"{public_preview}\n"
+        f"{internal_preview}\n"
+        f"_Select a field below to modify. Changes won't go live until you save._"
     )
-    if pending_edits:
-        prompt_text += "\n\n⚠️ *Unsaved edits are shown in this preview. Tap Confirm & Publish to update Google Sheets and the topic summary.*"
+
+    # 8-Button Grid + Save + Back to N-1
+    keyboard = [
+        [
+            InlineKeyboardButton("Event Type", callback_data=f"MODIFY|EVENT_TYPE|{thread_id}"),
+            InlineKeyboardButton("Event Name", callback_data=f"MODIFY|EVENT_NAME|{thread_id}")      
+        ],
+        [
+            InlineKeyboardButton("Rehearsal", callback_data=f"MODIFY|REHEARSAL_DATE|{thread_id}"),
+            InlineKeyboardButton("Perf Date", callback_data=f"MODIFY|PERF_DATE|{thread_id}")
+        ],
+        [
+            InlineKeyboardButton("Location", callback_data=f"MODIFY|LOCATION|{thread_id}"),
+            InlineKeyboardButton("Other Info", callback_data=f"MODIFY|OTHER_INFO|{thread_id}")
+        ],
+        [
+            InlineKeyboardButton("Remuneration", callback_data=f"MODIFY|REMUNERATION|{thread_id}"),
+            InlineKeyboardButton("Status", callback_data=f"MODIFY|STATUS|{thread_id}")
+        ],
+        [InlineKeyboardButton("💾 Save & Push Updates", callback_data=f"MODIFY|PUBLISH_SUMMARY|{thread_id}")],
+        [InlineKeyboardButton("🔙 Back to Topic Selection", callback_data=f"MODIFY|BACK_TO_LIST|{thread_id}")]
+    ]
+
+    markup = InlineKeyboardMarkup(keyboard)
 
     query = update.callback_query
     active_dash_id = context.user_data.get("master_dash_id")
 
-    # 🎯 FORCE IN-PLACE EDITS ALWAYS: Never send a new bubble if an active workspace anchor exists
     if query:
         try:
-            await query.edit_message_text(prompt_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+            await query.edit_message_text(prompt_text, reply_markup=markup, parse_mode="Markdown")
             return
-        except Exception:
-            pass
+        except Exception: pass
 
     if active_dash_id:
         try:
             await context.bot.edit_message_text(
-                chat_id=target_chat.id,
-                message_id=active_dash_id,
-                text=prompt_text,
-                reply_markup=InlineKeyboardMarkup(keyboard),
-                parse_mode="Markdown"
+                chat_id=target_chat.id, message_id=active_dash_id,
+                text=prompt_text, reply_markup=markup, parse_mode="Markdown"
             )
             return
-        except Exception:
-            pass
+        except Exception: pass
 
-    msg = await context.bot.send_message(
-        chat_id=target_chat.id,
-        text=prompt_text,
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="Markdown"
-    )
+    msg = await context.bot.send_message(chat_id=target_chat.id, text=prompt_text, reply_markup=markup, parse_mode="Markdown")
     context.user_data["master_dash_id"] = msg.message_id
     context.user_data["modify_thread_id"] = thread_id
 
@@ -209,10 +197,7 @@ async def get_modify_field_callback(update: Update, context: ContextTypes.DEFAUL
         pending_edits = _get_pending_edits(context, thread_id)
         if not pending_edits:
             await initiate_modify_via_dm(
-                update=update,
-                context=context,
-                thread_id=thread_id,
-                initiated_via_dm=True,
+                update=update, context=context, thread_id=thread_id, initiated_via_dm=True,
                 success_banner="ℹ️ *No edits to publish yet. Choose a section to edit first.*",
             )
             return ConversationHandler.END
@@ -234,10 +219,7 @@ async def get_modify_field_callback(update: Update, context: ContextTypes.DEFAUL
             invalidate_sheet_cache()
         except Exception as exc:
             await initiate_modify_via_dm(
-                update=update,
-                context=context,
-                thread_id=thread_id,
-                initiated_via_dm=True,
+                update=update, context=context, thread_id=thread_id, initiated_via_dm=True,
                 success_banner=f"❌ *Failed to update Google Sheets:* `{exc}`",
             )
             return ConversationHandler.END
@@ -246,46 +228,102 @@ async def get_modify_field_callback(update: Update, context: ContextTypes.DEFAUL
         if "EVENT NAME" in pending_edits:
             new_topic_name = f"PERF - {updated_row.get('EVENT NAME', '')}".strip()
             try:
-                await context.bot.edit_forum_topic(
-                    chat_id=CHAT_ID,
-                    message_thread_id=thread_id,
-                    name=new_topic_name,
-                )
+                await context.bot.edit_forum_topic(chat_id=CHAT_ID, message_thread_id=thread_id, name=new_topic_name)
             except Exception as exc:
                 rename_warning = f"\n\n⚠️ *Sheet and summary updated, but topic rename failed:* `{exc}`"
 
-        group_chat_data = context.application.bot_data.setdefault("group_chat_data", {}).setdefault(CHAT_ID, {})
-        try:
-            await publish_performance_summary(
-                bot=context.bot,
-                chat_data_store=group_chat_data,
-                sheet=sheet,
-                chat_id=CHAT_ID,
-                thread_id=thread_id,
-                event_name=updated_row.get("EVENT NAME", ""),
-                rehearsal_date=updated_row.get("REHEARSAL DATE | TIME", ""),
-                perf_date=updated_row.get("PERF DATE | TIME", ""),
-                location=updated_row.get("LOCATION", ""),
-                other_info=updated_row.get("OTHER INFO", ""),
-            )
-        except Exception as exc:
-            await initiate_modify_via_dm(
-                update=update,
-                context=context,
-                thread_id=thread_id,
-                initiated_via_dm=True,
-                success_banner=f"❌ *Failed to publish summary:* `{exc}`",
-            )
-            return ConversationHandler.END
+        old_status = str(row.get("STATUS", "")).strip().upper()
+        new_status = str(updated_row.get("STATUS", "")).strip().upper()
+        
+        if new_status == "REJECTED" and old_status != "REJECTED":
+            from handlers.admin_handlers import _extract_first_date_object
+            from config import sg_tz
+            from datetime import datetime
+            
+            perf_cell = str(updated_row.get("PERF DATE | TIME", "")).strip()
+            event_date_obj = _extract_first_date_object(perf_cell)
+            today_date = datetime.now(sg_tz).date()
+            
+            # Only send the message if the date is in the future (or today)
+            if event_date_obj and event_date_obj.date() >= today_date:
+                try:
+                    await context.bot.send_message(
+                        chat_id=CHAT_ID,
+                        message_thread_id=thread_id,
+                        text="⚠️ **UPDATE:** Unfortunately, this performance has been cancelled. Thank you to everyone who showed interest!",
+                        parse_mode="Markdown"
+                    )
+                except Exception as e:
+                    print(f"Failed to send cancellation notice: {e}")
+
+        # 🧠 THE SMART LOGIC GATE & 🔔 NEW FEATURE 2: Bypass Summary for REJECTED
+        public_fields = ["EVENT NAME", "REHEARSAL DATE | TIME", "PERF DATE | TIME", "LOCATION", "OTHER INFO"]
+        public_changed = any(f in pending_edits for f in public_fields)
+
+        if public_changed:
+            if new_status == "REJECTED":
+                # Bypass publishing summary entirely if the event is rejected
+                success_msg = f"✅ *Google Sheets updated! (Topic summary not renewed because performance is REJECTED).*{rename_warning}"
+            else:
+                group_chat_data = context.application.bot_data.setdefault("group_chat_data", {}).setdefault(CHAT_ID, {})
+                try:
+                    await publish_performance_summary(
+                        bot=context.bot,
+                        chat_data_store=group_chat_data,
+                        sheet=sheet,
+                        chat_id=CHAT_ID,
+                        thread_id=thread_id,
+                        event_name=updated_row.get("EVENT NAME", ""),
+                        rehearsal_date=updated_row.get("REHEARSAL DATE | TIME", ""),
+                        perf_date=updated_row.get("PERF DATE | TIME", ""),
+                        location=updated_row.get("LOCATION", ""),
+                        other_info=updated_row.get("OTHER INFO", ""),
+                    )
+                    success_msg = f"✅ *Published and pinned the updated summary in the topic!*{rename_warning}"
+                except Exception as exc:
+                    await initiate_modify_via_dm(
+                        update=update,
+                        context=context,
+                        thread_id=thread_id,
+                        initiated_via_dm=True,
+                        success_banner=f"❌ *Failed to publish summary:* `{exc}`",
+                    )
+                    return ConversationHandler.END
+        else:
+            success_msg = f"✅ *Internal registry updated! (No public fields changed, so the Topic was not pinged).*{rename_warning}"
         context.user_data.pop("modify_field", None)
         _clear_pending_edits(context, thread_id)
-        await initiate_modify_via_dm(
-            update=update,
-            context=context,
-            thread_id=thread_id,
-            initiated_via_dm=True,
-            success_banner=f"✅ *Published and pinned the updated summary in the topic!*{rename_warning}",
-        )
+        
+        import re
+        from datetime import datetime
+        
+        records = get_cached_records()
+        context.user_data["cached_records"] = records
+        
+        def get_sort_date(r):
+            date_str = str(r.get("PERF DATE | TIME", "")).strip()
+            if not date_str or date_str == "-": return datetime.min
+            first_line = date_str.splitlines()[0].strip()
+            match = re.match(r'^(\d{1,2}\s+[a-zA-Z]{3,9}\s+\d{4})', first_line)
+            if match:
+                try: return datetime.strptime(match.group(1), "%d %b %Y")
+                except ValueError: pass
+            return datetime.min
+
+        sorted_records = sorted(records, key=get_sort_date, reverse=True)
+        buttons = []
+        for r in sorted_records:
+            tid = r.get("THREAD ID")
+            if str(tid).isdigit():
+                event_name = r.get("EVENT NAME", "Unnamed Event")
+                buttons.append([InlineKeyboardButton(f"⚙️ {event_name} ({tid})", callback_data=f"LIST_MODIFY|{tid}")])
+                
+        buttons.append([InlineKeyboardButton("🦅 Exit to Cockpit", callback_data="DASH_VIEW|HOME")])
+        
+        # Inject the success message above the list prompt!
+        prompt_text = f"{success_msg}\n\n🛠️ ***Performance Modification Portal***\nWhich PERFORMANCE topic would you like to modify:"
+        
+        await query.edit_message_text(prompt_text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
         return ConversationHandler.END
 
     context.user_data["modify_field"] = field
@@ -295,15 +333,12 @@ async def get_modify_field_callback(update: Update, context: ContextTypes.DEFAUL
             [InlineKeyboardButton("✅ ACCEPTED", callback_data="modify_status_selected|ACCEPTED")],
             [InlineKeyboardButton("❌ REJECTED", callback_data="modify_status_selected|REJECTED")],
             [InlineKeyboardButton("⏳ PENDING (Reset)", callback_data="modify_status_selected|PENDING")],
-            [InlineKeyboardButton("🔙 Back to Fields Menu", callback_data=f"MODIFY|BACK_TO_MENU|{thread_id}")],
+            [InlineKeyboardButton("🔙 Back to Dashboard", callback_data=f"MODIFY|BACK_TO_MENU|{thread_id}")],
         ]
         await query.edit_message_text(
-            text=(
-                f"📊 Please select the new *STATUS* for *{current_event_name}*:\n"
-                f"Note: Rejections will update logs but will NOT delete or close the topic channel"
-            ),
-            reply_markup=InlineKeyboardMarkup(buttons),
-            parse_mode="Markdown",
+            text=(f"📊 Please select the new *STATUS* for *{current_event_name}*:\n"
+                  f"Note: Rejections will update logs but will NOT delete or close the topic channel"),
+            reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown",
         )
         return ConversationHandler.END
 
@@ -311,20 +346,19 @@ async def get_modify_field_callback(update: Update, context: ContextTypes.DEFAUL
         buttons = [
             [InlineKeyboardButton("🎭 EXT (External)", callback_data="modify_type_selected|EXT")],
             [InlineKeyboardButton("🏠 INT (Internal)", callback_data="modify_type_selected|INT")],
-            [InlineKeyboardButton("🔙 Back to Fields Menu", callback_data=f"MODIFY|BACK_TO_MENU|{thread_id}")],
+            [InlineKeyboardButton("🔙 Back to Dashboard", callback_data=f"MODIFY|BACK_TO_MENU|{thread_id}")],
         ]
         await query.edit_message_text(
             text=f"🎭 Please select the new *EVENT TYPE* for *{current_event_name}*:",
-            reply_markup=InlineKeyboardMarkup(buttons),
-            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown",
         )
         return ConversationHandler.END
 
     # =========================================================================
-    # 🎯 FIXED FOR FREE TEXT ENTRIES: Edit the bubble in-place! Never delete!
+    # FREE TEXT ENTRIES: Edit the bubble in-place!
     # =========================================================================
     escape_keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔙 Back to Fields Menu", callback_data=f"MODIFY|BACK_TO_MENU|{thread_id}")]
+        [InlineKeyboardButton("🔙 Back to Dashboard", callback_data=f"MODIFY|BACK_TO_MENU|{thread_id}")]
     ])
 
     if field == "REHEARSAL DATE | TIME":
@@ -357,7 +391,6 @@ async def get_modify_field_callback(update: Update, context: ContextTypes.DEFAUL
     else:
         prompt_text = f"✏️ Enter the new *{field}* for *{current_event_name}*:\n\n👉 _Type your new value below:_"
 
-    # Pull "Tap to Copy" metrics from local state cache
     records = context.user_data.get("cached_records", [])
     row_record = next((r for r in records if str(r.get("THREAD ID")) == str(thread_id)), None)
     if row_record:
@@ -366,7 +399,6 @@ async def get_modify_field_callback(update: Update, context: ContextTypes.DEFAUL
         if old_val and old_val != "-":
             prompt_text += f"\n\n📋 *Previous Value (Tap box below to copy instantly):*\n```\n{old_val}```\n"
 
-    # Edit the exact same bubble in-place to display text input instructions
     await query.edit_message_text(text=prompt_text, reply_markup=escape_keyboard, parse_mode="Markdown")
     return MODIFY_VALUE
 
@@ -414,7 +446,7 @@ async def apply_modify_value(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 except Exception: pass
     except ValueError as exc:
         escape_keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔙 Back to Fields Menu", callback_data=f"MODIFY|BACK_TO_MENU|{thread_id}")]
+            [InlineKeyboardButton("🔙 Back to Dashboard", callback_data=f"MODIFY|BACK_TO_MENU|{thread_id}")]
         ])
         
         error_prompt = f"⚠️ **ERROR:** {str(exc)}\n\n👉 **Please re-enter matching guidelines:**"

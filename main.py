@@ -13,7 +13,7 @@ from telegram.ext import (
 )
 import datetime
 import asyncio
-from handlers.admin_handlers import handle_remind_escrow_callback, start, thread_id_command, remind_command, daily_reminder_cron_job, manual_test_reminder_trigger, execute_manual_remind_dispatch, execute_manual_announcement_dispatch
+from handlers.admin_handlers import handle_remind_escrow_callback, start, thread_id_command, daily_reminder_cron_job, execute_manual_remind_dispatch, execute_manual_announcement_dispatch
 from handlers.message_handlers import handle_message
 from handlers.private_handlers import handle_private_command
 from handlers.poll_handlers import handle_poll_answer, auto_poll_check
@@ -142,9 +142,9 @@ def main():
     # Core engine endpoint configurations
     app.add_handler(CommandHandler("start", start_command_router))
     app.add_handler(CommandHandler("threadid", thread_id_command))
-    app.add_handler(CommandHandler("remind", remind_command))
-    app.add_handler(CommandHandler("testremind", manual_test_reminder_trigger))
-    app.add_handler(CommandHandler("modify", start_modify))
+    #app.add_handler(CommandHandler("remind", remind_command))
+    #app.add_handler(CommandHandler("testremind", manual_test_reminder_trigger))
+    #app.add_handler(CommandHandler("modify", start_modify))
     app.add_handler(conv_handler)
     app.add_handler(CallbackQueryHandler(final_date_selection, pattern="^FINALDATE\\|"))
     app.add_handler(CallbackQueryHandler(get_modify_field_callback, pattern="^MODIFY\\|"))

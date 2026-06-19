@@ -1114,6 +1114,126 @@ def _row_cell(row, one_based_col):
     return row[one_based_col - 1].strip() if one_based_col - 1 < len(row) else ""
 
 
+def _setting_key(label):
+    return re.sub(r"[^a-z0-9]+", "", str(label or "").strip().lower())
+
+
+def _parse_sheet_date(value):
+    from datetime import date, datetime
+
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    text = str(value or "").strip()
+    if not text:
+        return None
+    for fmt in (
+        "%Y-%m-%d",
+        "%m/%d/%Y",
+        "%d/%m/%Y",
+        "%m/%d/%y",
+        "%d/%m/%y",
+        "%d %b %Y",
+        "%d %B %Y",
+        "%b %d, %Y",
+        "%B %d, %Y",
+    ):
+        try:
+            return datetime.strptime(text, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _parse_sheet_time(value):
+    from datetime import time as dt_time, datetime
+
+    if isinstance(value, datetime):
+        return value.time().replace(second=0, microsecond=0)
+    if isinstance(value, dt_time):
+        return value.replace(second=0, microsecond=0)
+    text = str(value or "").strip()
+    if not text:
+        return None
+    normalized = text.upper().replace(".", "")
+    for fmt in ("%H:%M", "%H:%M:%S", "%I:%M %p", "%I:%M:%S %p"):
+        try:
+            return datetime.strptime(normalized, fmt).time().replace(second=0, microsecond=0)
+        except ValueError:
+            continue
+    return None
+
+
+def _parse_sheet_datetime(date_value, time_value, fallback_dt):
+    from datetime import datetime
+
+    date_text = str(date_value or "").strip()
+    time_text = str(time_value or "").strip()
+    for fmt in (
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%d %H:%M:%S",
+        "%m/%d/%Y %H:%M",
+        "%m/%d/%Y %H:%M:%S",
+        "%d/%m/%Y %H:%M",
+        "%d/%m/%Y %H:%M:%S",
+        "%m/%d/%Y %I:%M %p",
+        "%d/%m/%Y %I:%M %p",
+    ):
+        try:
+            parsed = datetime.strptime(date_text, fmt)
+            return sg_tz.localize(parsed)
+        except ValueError:
+            continue
+
+    parsed_date = _parse_sheet_date(date_text) or (fallback_dt.date() if fallback_dt else None)
+    parsed_time = _parse_sheet_time(time_text) or _parse_sheet_time(date_text)
+    if parsed_date and parsed_time:
+        return sg_tz.localize(datetime.combine(parsed_date, parsed_time))
+    return fallback_dt
+
+
+def get_welcome_tea_settings():
+    """Read Welcome Tea settings live from the WELCOME TEA ID tab.
+
+    Expected settings block:
+      F = Setting, G = Value, H = Time
+    """
+    raw = {}
+    try:
+        for row in _welcome_tea_ws().get_all_values():
+            key = _setting_key(_row_cell(row, 6))
+            if not key or key in {"setting", "welcometeasettings"}:
+                continue
+            raw[key] = {
+                "value": _row_cell(row, 7),
+                "time": _row_cell(row, 8),
+            }
+    except Exception as e:
+        print(f"[WELCOME TEA][WARN] Failed to read sheet settings: {e}")
+
+    event_date = _parse_sheet_date(raw.get("eventdate", {}).get("value"))
+
+    def setting_datetime(key):
+        entry = raw.get(key, {})
+        return _parse_sheet_datetime(entry.get("value"), entry.get("time"), None)
+
+    def setting_text(key):
+        value = raw.get(key, {}).get("value", "")
+        return value.strip() if value else ""
+
+    return {
+        "event_date": event_date,
+        "details_send_at": setting_datetime("detailssend"),
+        "reminder_send_at": setting_datetime("remindersend"),
+        "approval_at": setting_datetime("approvaltime"),
+        "followup_send_at": setting_datetime("followupsend"),
+        "welcome_tea_join_request_link": setting_text("welcometeagroupinvitelink"),
+        "main_group_welcome_tea_invite_link": setting_text("maingroupinvitelink"),
+        "signup_form_link": setting_text("welcometearegistrationform"),
+    }
+
+
 def get_welcome_tea_rows():
     """Return row dicts from WELCOME TEA ID.
 
@@ -1216,10 +1336,44 @@ def append_welcome_tea_id(user_id: int, username: str = ""):
                 print(f"[INFO] Welcome Tea ID {user_id} ({username}) refreshed in WELCOME TEA ID.")
                 return True
 
-        ws.append_row(
-            [target, username or "", timestamp, WELCOME_TEA_STATUS_NOT_CONFIRM],
-            value_input_option="USER_ENTERED",
+        for row_number, row in enumerate(values[first_data_row - 1:], start=first_data_row):
+            if _row_cell(row, 6) == target:
+                misplaced_status = _normalize_welcome_tea_status(_row_cell(row, 9))
+                target_row = next(
+                    (
+                        candidate for candidate in range(first_data_row, max(len(values) + 2, 101))
+                        if not _row_cell(
+                            values[candidate - 1] if candidate - 1 < len(values) else [],
+                            cols["tele_id"],
+                        )
+                    ),
+                    len(values) + 1,
+                )
+                ws.batch_update([{
+                    "range": f"{rowcol_to_a1(target_row, cols['tele_id'])}:{rowcol_to_a1(target_row, cols['status'])}",
+                    "values": [[target, username or _row_cell(row, 7), timestamp, misplaced_status]],
+                }, {
+                    "range": f"{rowcol_to_a1(row_number, 6)}:{rowcol_to_a1(row_number, 9)}",
+                    "values": [["", "", "", ""]],
+                }], value_input_option="USER_ENTERED")
+                invalidate_sheet_cache()
+                print(f"[INFO] Misplaced Welcome Tea ID {user_id} moved to A:D.")
+                return True
+
+        target_row = next(
+            (
+                row_number for row_number in range(first_data_row, max(len(values) + 2, 101))
+                if not _row_cell(
+                    values[row_number - 1] if row_number - 1 < len(values) else [],
+                    cols["tele_id"],
+                )
+            ),
+            len(values) + 1,
         )
+        ws.batch_update([{
+            "range": f"{rowcol_to_a1(target_row, cols['tele_id'])}:{rowcol_to_a1(target_row, cols['status'])}",
+            "values": [[target, username or "", timestamp, WELCOME_TEA_STATUS_NOT_CONFIRM]],
+        }], value_input_option="USER_ENTERED")
         invalidate_sheet_cache()
         print(f"[INFO] Welcome Tea ID {user_id} ({username}) logged to WELCOME TEA ID tab.")
         return True

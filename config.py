@@ -1,5 +1,4 @@
 import os
-from datetime import date, time as dt_time
 import pytz
 
 # Bot Configuration
@@ -46,24 +45,6 @@ WELCOME_TEA_ID_TAB = "WELCOME TEA ID"
 WELCOME_TEA_STATUS_NOT_CONFIRM = "Not Confirm"
 WELCOME_TEA_STATUS_ATTEND = "Attend"
 WELCOME_TEA_STATUS_REJECT = "Reject"
-
-# Welcome Tea confirmation automation. Update the event date and send times
-# here before each Welcome Tea run.
-WELCOME_TEA_EVENT_DATE = date(2026, 6, 17) # Tuesday
-WELCOME_TEA_DETAILS_DAYS_BEFORE = 0   # Friday before a Tuesday event (4)
-WELCOME_TEA_REMINDER_DAYS_BEFORE = 0  # Saturday before a Tuesday event (3)
-WELCOME_TEA_APPROVAL_DAYS_BEFORE = 0  # Sunday before a Tuesday event (2)
-WELCOME_TEA_DETAILS_TIME = dt_time(21, 8)
-WELCOME_TEA_REMINDER_TIME = dt_time(21, 9)
-WELCOME_TEA_APPROVAL_TIME = dt_time(21, 10)
-WELCOME_TEA_JOIN_REQUEST_LINK = "https://t.me/+1JT5ho8rjcVhZmI9"
-
-# Post-Welcome-Tea recruitment into the main NTUFD group.
-# The main-group invite must require admin approval so the bot receives a join request.
-MAIN_GROUP_WELCOME_TEA_INVITE_LINK = "https://t.me/+YHsI8ZiXbJczYjA1"
-WELCOME_TEA_SIGNUP_FORM_LINK = "https://docs.google.com/forms/d/e/1FAIpQLSeq96aCvJGcsbUYNDitHR1KQ13fzITSWiKn3gWDBk5GZ349cw/viewform?usp=header"
-WELCOME_TEA_FOLLOWUP_DAYS_AFTER = 0
-WELCOME_TEA_FOLLOWUP_TIME = dt_time(21, 11)
 
 # Chat Configuration
 #CHAT_ID =  -1004406293828 # Main group Chat ID (AY26/27)

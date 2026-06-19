@@ -1,22 +1,11 @@
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
 from config import (
-    MAIN_GROUP_WELCOME_TEA_INVITE_LINK,
-    WELCOME_TEA_DETAILS_DAYS_BEFORE,
-    WELCOME_TEA_DETAILS_TIME,
-    WELCOME_TEA_EVENT_DATE,
-    WELCOME_TEA_FOLLOWUP_DAYS_AFTER,
-    WELCOME_TEA_FOLLOWUP_TIME,
     WELCOME_TEA_GROUP_CHAT_ID,
-    WELCOME_TEA_APPROVAL_DAYS_BEFORE,
-    WELCOME_TEA_APPROVAL_TIME,
-    WELCOME_TEA_REMINDER_DAYS_BEFORE,
-    WELCOME_TEA_REMINDER_TIME,
-    WELCOME_TEA_SIGNUP_FORM_LINK,
     WELCOME_TEA_STATUS_ATTEND,
     WELCOME_TEA_STATUS_NOT_CONFIRM,
     WELCOME_TEA_STATUS_REJECT,
@@ -24,6 +13,7 @@ from config import (
 )
 from services.google_sheets import (
     append_welcome_tea_id,
+    get_welcome_tea_settings,
     get_welcome_tea_recipients,
     update_welcome_tea_status,
 )
@@ -34,7 +24,7 @@ WELCOME_TEA_MESSAGE = (
     "We've successfully recorded your information for the Welcome Tea event.\n\n"
     "We will disseminate more information nearer to the Welcome Tea event.\n\n"
     "Please fill in this Welcome Tea Registration form if you have not done so:\n"
-    f"{WELCOME_TEA_SIGNUP_FORM_LINK}\n"
+    "{signup_form_link}\n"
     "<i>(Please ignore this if you have already filled in the form.)</i>\n\n"
     "<i>If you have any questions, feel free to reach out to NTUFD chairperson @ma_ning (Ma Ning) or vice-chairperson @jurikawazu (Juri) on Telegram!</i>"
 )
@@ -65,9 +55,16 @@ WELCOME_TEA_REMINDER_TEXT = (
 )
 
 CONFIRMED_REPLY = "Thank you for confirming your attendance. We will add you to the group on Sunday!"
-REJECTED_REPLY = "Thank you so much for your interest, we hope to see you again!! ❤️"
+REJECTED_REPLY = (
+    "Thank you so much for your interest, we hope to see you again!! ❤️\n\n"
+    "If you change your mind and would like to join us, just reach out to our chairpersons "
+    "@ma_ning (Ma Ning) or @jurikawazu (Juri) and they will add you to the Telegram group."
+)
 
 WELCOME_TEA_DETAILS_MESSAGE_KEY = "welcome_tea_details_messages"
+WELCOME_TEA_SCHEDULER_RUN_KEY = "welcome_tea_scheduler_runs"
+WELCOME_TEA_SCHEDULER_INTERVAL_SECONDS = 60
+WELCOME_TEA_SCHEDULER_GRACE_SECONDS = 300
 
 
 def _confirmation_keyboard() -> InlineKeyboardMarkup:
@@ -79,13 +76,20 @@ def _confirmation_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
-WELCOME_TEA_FOLLOWUP_TEXT = (
-    "Thank you for coming to NTUFD Welcome Tea! We hope you had a great time.\n\n"
-    "Ready to join us? Request to join the NTUFD main Telegram group here:\n"
-    f"{MAIN_GROUP_WELCOME_TEA_INVITE_LINK}\n\n"
-    "After requesting to join, check your private messages from the bot and "
-    "complete the verification process."
-)
+def _welcome_tea_message() -> str:
+    settings = get_welcome_tea_settings()
+    return WELCOME_TEA_MESSAGE.format(signup_form_link=settings["signup_form_link"])
+
+
+def _welcome_tea_followup_text() -> str:
+    settings = get_welcome_tea_settings()
+    return (
+        "Thank you for coming to NTUFD Welcome Tea! We hope you had a great time.\n\n"
+        "Ready to join us? Request to join the NTUFD main Telegram group here:\n"
+        f"{settings['main_group_welcome_tea_invite_link']}\n\n"
+        "After requesting to join, check your private messages from the bot and "
+        "complete the verification process."
+    )
 
 
 async def handle_welcome_tea_qr(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -97,7 +101,7 @@ async def handle_welcome_tea_qr(update: Update, context: ContextTypes.DEFAULT_TY
     success = append_welcome_tea_id(user_id, username)
 
     if success:
-        await update.message.reply_text(WELCOME_TEA_MESSAGE, parse_mode=ParseMode.HTML)
+        await update.message.reply_text(_welcome_tea_message(), parse_mode=ParseMode.HTML)
         print(f"[INFO] Welcome Tea registration successful for user {user_id} (@{username})")
     else:
         error_msg = (
@@ -124,7 +128,7 @@ async def handle_welcome_tea_join_request(join_request, context: ContextTypes.DE
     try:
         await context.bot.send_message(
             chat_id=getattr(join_request, "user_chat_id", None) or user.id,
-            text=WELCOME_TEA_MESSAGE,
+            text=_welcome_tea_message(),
             parse_mode=ParseMode.HTML,
         )
     except Exception as e:
@@ -257,7 +261,7 @@ async def send_post_welcome_tea_followup_job(context: ContextTypes.DEFAULT_TYPE)
     try:
         await context.bot.send_message(
             chat_id=WELCOME_TEA_GROUP_CHAT_ID,
-            text=WELCOME_TEA_FOLLOWUP_TEXT,
+            text=_welcome_tea_followup_text(),
             disable_web_page_preview=True,
         )
         print("[WELCOME TEA] Post-event main-group invitation sent.")
@@ -327,57 +331,60 @@ async def _decline_welcome_tea_join_request(bot, user_id: int, context: ContextT
         return False
 
 
-def _scheduled_datetime(days_before: int, target_time):
-    target_date = WELCOME_TEA_EVENT_DATE - timedelta(days=days_before)
-    combined = datetime.combine(target_date, target_time)
-    if combined.tzinfo is None:
-        return sg_tz.localize(combined)
-    return combined.astimezone(sg_tz)
-
-
 def _welcome_tea_approval_closed() -> bool:
-    return datetime.now(sg_tz) >= _scheduled_datetime(
-        WELCOME_TEA_APPROVAL_DAYS_BEFORE,
-        WELCOME_TEA_APPROVAL_TIME,
-    )
+    approval_at = get_welcome_tea_settings()["approval_at"]
+    return bool(approval_at and datetime.now(sg_tz) >= approval_at)
+
+
+async def welcome_tea_scheduler_tick(context: ContextTypes.DEFAULT_TYPE):
+    """Poll sheet settings and run due Welcome Tea jobs once per configured datetime."""
+    settings = get_welcome_tea_settings()
+    now = datetime.now(sg_tz)
+    runs = context.application.bot_data.setdefault(WELCOME_TEA_SCHEDULER_RUN_KEY, {})
+    jobs = [
+        ("details", settings["details_send_at"], send_welcome_tea_details_job),
+        ("reminder", settings["reminder_send_at"], send_welcome_tea_reminder_job),
+        ("approval", settings["approval_at"], process_welcome_tea_join_requests_job),
+        ("followup", settings["followup_send_at"], send_post_welcome_tea_followup_job),
+    ]
+
+    for name, when, callback in jobs:
+        if when is None:
+            skip_key = f"missing:{name}"
+            if skip_key not in runs:
+                runs[skip_key] = now.isoformat()
+                print(f"[WELCOME TEA][WARN] Skipping {name}; sheet datetime is blank or invalid.")
+            continue
+        run_key = f"{name}:{when.isoformat()}"
+        skip_key = f"skipped:{run_key}"
+        if now < when:
+            continue
+        if (now - when).total_seconds() > WELCOME_TEA_SCHEDULER_GRACE_SECONDS:
+            if run_key not in runs and skip_key not in runs:
+                runs[skip_key] = now.isoformat()
+                print(f"[WELCOME TEA] Skipping {name}; sheet time is too far in the past: {when}")
+            continue
+        if run_key in runs:
+            continue
+
+        print(f"[WELCOME TEA] Running sheet-driven {name} job scheduled at {when}")
+        await callback(context)
+        runs[run_key] = now.isoformat()
 
 
 def schedule_welcome_tea_jobs(application):
-    """Register one-off Welcome Tea automation jobs from config.py."""
+    """Register the sheet-driven Welcome Tea automation checker."""
     if not application.job_queue:
         print("[WELCOME TEA][WARN] JobQueue unavailable; Welcome Tea jobs not scheduled.")
         return
 
-    now = datetime.now(sg_tz)
-    jobs = [
-        (
-            "welcome_tea_details",
-            _scheduled_datetime(WELCOME_TEA_DETAILS_DAYS_BEFORE, WELCOME_TEA_DETAILS_TIME),
-            send_welcome_tea_details_job,
-        ),
-        (
-            "welcome_tea_reminder",
-            _scheduled_datetime(WELCOME_TEA_REMINDER_DAYS_BEFORE, WELCOME_TEA_REMINDER_TIME),
-            send_welcome_tea_reminder_job,
-        ),
-        (
-            "welcome_tea_approval",
-            _scheduled_datetime(WELCOME_TEA_APPROVAL_DAYS_BEFORE, WELCOME_TEA_APPROVAL_TIME),
-            process_welcome_tea_join_requests_job,
-        ),
-        (
-            "welcome_tea_followup",
-            sg_tz.localize(datetime.combine(
-                WELCOME_TEA_EVENT_DATE + timedelta(days=WELCOME_TEA_FOLLOWUP_DAYS_AFTER),
-                WELCOME_TEA_FOLLOWUP_TIME,
-            )),
-            send_post_welcome_tea_followup_job,
-        ),
-    ]
-
-    for name, when, callback in jobs:
-        if when <= now:
-            print(f"[WELCOME TEA] Skipping {name}; scheduled time is in the past: {when}")
-            continue
-        application.job_queue.run_once(callback, when=when, name=name)
-        print(f"[WELCOME TEA] Scheduled {name} at {when}")
+    application.job_queue.run_repeating(
+        welcome_tea_scheduler_tick,
+        interval=WELCOME_TEA_SCHEDULER_INTERVAL_SECONDS,
+        first=0,
+        name="welcome_tea_sheet_settings_checker",
+    )
+    print(
+        "[WELCOME TEA] Sheet-driven automation checker scheduled "
+        f"every {WELCOME_TEA_SCHEDULER_INTERVAL_SECONDS} seconds."
+    )

@@ -2,9 +2,8 @@ import os
 import pytz
 
 # Bot Configuration
-#BOT_TOKEN = os.environ.get("BOT_TOKEN")
-#GOOGLE_CREDENTIALS_JSON = os.environ.get("GOOGLE_CREDENTIALS_JSON")
-
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+GOOGLE_CREDENTIALS_JSON = os.environ.get("GOOGLE_CREDENTIALS_JSON")
 
 # Google Sheets Configuration
 SHEET_NAME = "NTUFD AY26/27 Database" # Main GSheet

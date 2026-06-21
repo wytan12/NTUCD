@@ -4,10 +4,10 @@ from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, ConversationHandler
 
-from config import ADMIN_DM_USER_IDS, CHAT_ID
+from config import ADMIN_DM_USER_IDS, CHAT_ID, SHEET_TAB_NAME
 from handlers.conversation_handlers import build_performance_summary, publish_performance_summary
 from services.date_parser import parse_and_format_dates
-from services.google_sheets import get_gspread_sheet, get_cached_records, get_cached_values, invalidate_sheet_cache
+from services.google_sheets import get_gspread_sheet, get_cached_records, get_cached_values, invalidate_sheet_cache, is_main_admin
 from utils.constants import (
     WAITING_TOPIC_TITLE, PERF_EVENT_NAME, PERF_REHEARSAL, PERF_DATE, PERF_LOCATION, PERF_OTHER_INFO,
 )
@@ -20,6 +20,11 @@ PERF_EVENT_TYPES = [
 _DASHBOARD_CACHE_KEYS = (
     "cached_records",
     "attd_dates",
+)
+
+MAIN_ADMIN_TOPIC_ONLY_TEXT = (
+    "🔒 *Main-admin action only.*\n\n"
+    "Topic creation is limited to main admins. You can still use the other Cockpit tools."
 )
 
 DASHBOARD_TEXT = (
@@ -596,6 +601,16 @@ async def handle_confirm_new_perf(update: Update, context: ContextTypes.DEFAULT_
         )
         return
 
+    if data.startswith(("TYPE_SELECTED|", "PERF_EVENT_TYPE|", "SKIP_PERF_FIELD|", "PERF_RESET|")) or data in {"CONFIRM_NEW_OTHERS", "CONFIRM_NEW_PERF"}:
+        if not is_main_admin(update.effective_user.id):
+            await query.answer("Topic creation is limited to main admins.", show_alert=True)
+            await query.edit_message_text(
+                MAIN_ADMIN_TOPIC_ONLY_TEXT,
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🦅 Exit to Cockpit", callback_data="DASH_VIEW|HOME")]]),
+                parse_mode="Markdown",
+            )
+            return
+
     if data == "ANNOUNCE_BACK_MAPPED":
         await query.answer()
         context.user_data.pop("waiting_announcement_text", None)
@@ -751,7 +766,7 @@ async def handle_confirm_new_perf(update: Update, context: ContextTypes.DEFAULT_
         try:
             sheet = get_gspread_sheet()
             sheet.append_row([thread_id, event_type, event_name, rehearsal_date, perf_date, location, other_info, "", "", ""], value_input_option="USER_ENTERED")
-            invalidate_sheet_cache()
+            invalidate_sheet_cache(tab_name=SHEET_TAB_NAME)
         except Exception as e:
             await query.edit_message_text(f"❌ Sheet Write failure: {e}")
             return
@@ -930,6 +945,14 @@ async def handle_dashboard_navigation(update: Update, context: ContextTypes.DEFA
         return
 
     elif target_view == "LAUNCH_NEW":
+        if not is_main_admin(update.effective_user.id):
+            await query.edit_message_text(
+                MAIN_ADMIN_TOPIC_ONLY_TEXT,
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🦅 Exit to Cockpit", callback_data="DASH_VIEW|HOME")]]),
+                parse_mode="Markdown",
+            )
+            return
+
         current_dash_id = context.user_data.get("master_dash_id")
         context.user_data.clear()
         if current_dash_id: context.user_data["master_dash_id"] = current_dash_id

@@ -3,7 +3,8 @@ from telegram.ext import ContextTypes
 from utils.decorators import admin_only, is_admin
 from utils.constants import active_polls, yes_voters, interest_votes
 from services.google_sheets import (
-    set_attendance, is_training_poll_id, get_gspread_sheet
+    set_attendance, is_training_poll_id, get_gspread_sheet, invalidate_sheet_cache,
+    format_training_poll_ref,
 )
 from config import sg_tz, TOPIC_VOTING_ID, SHEET_COLUMNS
 from datetime import datetime
@@ -130,7 +131,7 @@ async def auto_poll_check(context: ContextTypes.DEFAULT_TYPE):
     and a reminder is scheduled for 10pm the day before training.
     """
     from datetime import datetime, timedelta, time as dtime
-    from config import (CHAT_ID, ATT_FIRST_DATE_COL, ATT_POLL_ROW, ATT_DATE_ROW)
+    from config import (CHAT_ID, ATTENDANCE_TAB, ATT_FIRST_DATE_COL, ATT_POLL_ROW, ATT_DATE_ROW)
     from services.google_sheets import get_attendance_ws, parse_sheet_date
 
     try:
@@ -169,7 +170,8 @@ async def auto_poll_check(context: ContextTypes.DEFAULT_TYPE):
             )
             active_polls[msg.poll.id] = "training"
             yes_voters.clear()
-            ws.update_cell(ATT_POLL_ROW, col, str(msg.poll.id))
+            ws.update_cell(ATT_POLL_ROW, col, format_training_poll_ref(msg.poll.id, msg.message_id))
+            invalidate_sheet_cache(tab_name=ATTENDANCE_TAB)
             print(f"[AUTO-POLL] Sent poll for {date_str} (col {col}), id {msg.poll.id}")
 
             from handlers.admin_handlers import send_reminder

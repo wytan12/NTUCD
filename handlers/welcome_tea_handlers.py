@@ -86,7 +86,7 @@ async def handle_welcome_tea_qr(update: Update, context: ContextTypes.DEFAULT_TY
     """Handle QR code scans from /start welcome_tea."""
     user = update.effective_user
     user_id = user.id
-    username = user.username or ""
+    username = user.full_name or ""
 
     success = append_welcome_tea_id(user_id, username)
 
@@ -105,7 +105,7 @@ async def handle_welcome_tea_qr(update: Update, context: ContextTypes.DEFAULT_TY
 async def handle_welcome_tea_join_request(join_request, context: ContextTypes.DEFAULT_TYPE):
     """Capture a Welcome Tea join request and leave it pending for Sunday."""
     user = join_request.from_user
-    username = user.username or ""
+    username = user.full_name or ""
 
     welcome_tea_pending_requests[user.id] = join_request
     welcome_tea_join_chats[user.id] = join_request.chat.id

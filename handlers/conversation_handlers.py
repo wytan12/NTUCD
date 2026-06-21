@@ -8,7 +8,7 @@ from utils.constants import (
     pending_questions, initialized_topics, OTHERS_THREAD_IDS,
     DATE, EVENT, LOCATION
 )
-from config import SHEET_COLUMNS, CHAT_ID
+from config import SHEET_COLUMNS, CHAT_ID, SHEET_TAB_NAME
 from services.google_sheets import get_gspread_sheet, append_to_others_list, invalidate_sheet_cache
 from services.date_parser import parse_and_format_dates
 from utils.decorators import is_admin
@@ -23,6 +23,11 @@ async def topic_type_selection(update: Update, context: ContextTypes.DEFAULT_TYP
     """
     query = update.callback_query
     await query.answer()
+
+    from services.google_sheets import is_main_admin
+    if not is_main_admin(update.effective_user.id):
+        await query.edit_message_text("🔒 Topic creation is limited to main admins.")
+        return ConversationHandler.END
 
     _, selection, thread_id = query.data.split("|")
     thread_id = int(thread_id)
@@ -147,7 +152,7 @@ async def parse_perf_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         sheet.append_row([thread_id, "", event_name, rehearsal_date, perf_date, location, other_info, "", ""])
-        invalidate_sheet_cache()
+        invalidate_sheet_cache(tab_name=SHEET_TAB_NAME)
         print("[DEBUG] Row appended successfully")
     except Exception as e:
         print(f"[ERROR] Failed to append row: {e}")

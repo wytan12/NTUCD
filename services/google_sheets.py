@@ -1,9 +1,11 @@
 import re
 import json
+import time
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from config import (GOOGLE_CREDENTIALS_JSON, SHEET_NAME, SHEET_TAB_NAME,
                    ATTENDANCE_TAB, WELCOME_TEA_SHEET, WELCOME_TEA_TAB,
+                   WELCOME_TEA_ID_TAB, MEMBER_INFO_TAB,
                    ATT_NAME_COL, ATT_TOTAL_COL, ATT_LABEL_COL, ATT_FIRST_DATE_COL,
                    ATT_POLL_ROW, ATT_DATE_ROW, ATT_FIRST_MEMBER_ROW, sg_tz,
                    PERF_TAB_NAME, PERF_NAME_COL, PERF_TOTAL_COL, PERF_FIRST_EVENT_COL,
@@ -59,13 +61,22 @@ def get_attendance_ws():
 # correct. Bot writes also bump it, so the cache self-heals after any update.
 _records_cache = {}
 _values_cache = {}
+_modified_time_cache = {}
+_MODIFIED_TIME_TTL_SECONDS = 30
 
-def _spreadsheet_modified_time(sheet_name):
-    """Return the spreadsheet's live Drive modifiedTime string, or None on error."""
+def _spreadsheet_modified_time(sheet_name, force=False):
+    """Return the spreadsheet's Drive modifiedTime string, or None on error."""
+    now = time.monotonic()
+    cached = _modified_time_cache.get(sheet_name)
+    if not force and cached and now - cached["checked_at"] < _MODIFIED_TIME_TTL_SECONDS:
+        return cached["stamp"]
+
     try:
         if sheet_name not in _spreadsheets:
             _spreadsheets[sheet_name] = _get_client().open(sheet_name)
-        return _spreadsheets[sheet_name].get_lastUpdateTime()
+        stamp = _spreadsheets[sheet_name].get_lastUpdateTime()
+        _modified_time_cache[sheet_name] = {"stamp": stamp, "checked_at": now}
+        return stamp
     except Exception as e:
         print(f"[WARN] modifiedTime check failed for '{sheet_name}': {e}")
         return None
@@ -83,7 +94,7 @@ def get_cached_records(sheet_name=SHEET_NAME, tab_name=SHEET_TAB_NAME, force=Fal
         return cached["records"]
     records = get_gspread_sheet(sheet_name, tab_name).get_all_records()
     if stamp is None:  # forced, or the pre-check failed — stamp it now
-        stamp = _spreadsheet_modified_time(sheet_name)
+        stamp = _spreadsheet_modified_time(sheet_name, force=True)
     _records_cache[key] = {"records": records, "stamp": stamp}
     return records
 
@@ -96,12 +107,20 @@ def get_cached_values(sheet_name=SHEET_NAME, tab_name=SHEET_TAB_NAME, force=Fals
         return cached["values"]
     values = get_gspread_sheet(sheet_name, tab_name).get_all_values()
     if stamp is None:
-        stamp = _spreadsheet_modified_time(sheet_name)
+        stamp = _spreadsheet_modified_time(sheet_name, force=True)
     _values_cache[key] = {"values": values, "stamp": stamp}
     return values
 
 def invalidate_sheet_cache(sheet_name=None, tab_name=None):
     """Drop cached snapshots so the next read re-downloads (manual Refresh)."""
+    if sheet_name is None and tab_name is not None:
+        sheet_name = SHEET_NAME
+
+    if sheet_name is None:
+        _modified_time_cache.clear()
+    else:
+        _modified_time_cache.pop(sheet_name, None)
+
     for cache in (_records_cache, _values_cache):
         if sheet_name is None:
             cache.clear()
@@ -116,6 +135,7 @@ def append_to_others_list(thread_id, event_name: str = ""):
         from config import SHEET_NAME
         sheet = get_gspread_sheet(sheet_name=SHEET_NAME, tab_name="OTHERS")
         sheet.append_row([str(thread_id), event_name], value_input_option="USER_ENTERED")
+        invalidate_sheet_cache(tab_name="OTHERS")
         print(f"[INFO] Thread ID {thread_id} ({event_name}) logged to OTHERS tab.")
         from utils.constants import OTHERS_THREAD_IDS
         OTHERS_THREAD_IDS.add(int(thread_id))
@@ -256,7 +276,7 @@ def sync_welcome_tea_member(matric_number: str, telegram_user_id: int):
             updates.append({"range": rowcol_to_a1(duplicate_row, leave_c), "values": [[""]]})
 
     ws.batch_update(updates, value_input_option="USER_ENTERED")
-    invalidate_sheet_cache()
+    invalidate_sheet_cache(tab_name=MEMBER_INFO_TAB)
     print(f"[VERIFY] Synced {matric_number} / Tele ID {telegram_user_id} into MEMBER INFO row {target_row}.")
     return True, "updated_existing" if (matching_rows or matric_rows) else "created"
 
@@ -310,6 +330,7 @@ def ensure_attendance_headers(ws=None):
         {"range": "C1", "values": [["POLL ID"]]},
         {"range": "C2", "values": [["TRAINING DATE [REG]"]]},
     ])
+    invalidate_sheet_cache(tab_name=ATTENDANCE_TAB)
 
 
 def parse_sheet_date(s):
@@ -372,7 +393,33 @@ def get_training_date_columns():
     return out
 
 
-def record_training_poll(poll_id, training_date) -> int:
+def format_training_poll_ref(poll_id, message_id=None):
+    if not poll_id:
+        return ""
+    return f"{poll_id}|{message_id}" if message_id else str(poll_id)
+
+
+def _parse_training_poll_ref(value):
+    text = str(value or "").strip()
+    if not text:
+        return "", None
+    poll_id, _, message_id = text.partition("|")
+    message_id = message_id.strip()
+    return poll_id.strip(), int(message_id) if message_id.isdigit() else None
+
+
+def get_training_poll_ref(col):
+    """Return (poll_id, message_id) stored in row 1 for a training-date column."""
+    try:
+        row1 = get_attendance_ws().row_values(ATT_POLL_ROW)
+        value = row1[col - 1] if col - 1 < len(row1) else ""
+        return _parse_training_poll_ref(value)
+    except Exception as e:
+        print(f"[ERROR] get_training_poll_ref failed for col {col}: {e}")
+        return "", None
+
+
+def record_training_poll(poll_id, training_date, poll_message_id=None) -> int:
     """Store a poll id in row 1 under the column matching `training_date` (a date).
 
     If no column matches, a new date column is appended to the right.
@@ -402,11 +449,12 @@ def record_training_poll(poll_id, training_date) -> int:
         target_col = first_empty or max(len(row2) + 1, ATT_FIRST_DATE_COL)
         ws.update_cell(ATT_DATE_ROW, target_col, f"{training_date.day}/{training_date.month}")
 
-    ws.update_cell(ATT_POLL_ROW, target_col, str(poll_id))
+    ws.update_cell(ATT_POLL_ROW, target_col, format_training_poll_ref(poll_id, poll_message_id))
+    invalidate_sheet_cache(tab_name=ATTENDANCE_TAB)
     return target_col
 
 
-def replace_training_date_column(col, new_date_str, poll_id=None):
+def replace_training_date_column(col, new_date_str, poll_id=None, poll_message_id=None):
     """Replace an existing training-date column in place.
 
     Writes `new_date_str` into row 2 of `col`, and clears every member mark in
@@ -424,7 +472,7 @@ def replace_training_date_column(col, new_date_str, poll_id=None):
 
     requests = [
         {"range": rowcol_to_a1(ATT_DATE_ROW, col), "values": [[new_date_str]]},
-        {"range": rowcol_to_a1(ATT_POLL_ROW, col), "values": [[str(poll_id) if poll_id else ""]]},
+        {"range": rowcol_to_a1(ATT_POLL_ROW, col), "values": [[format_training_poll_ref(poll_id, poll_message_id)]]},
     ]
     if last_row >= ATT_FIRST_MEMBER_ROW:
         c_start = rowcol_to_a1(ATT_FIRST_MEMBER_ROW, col)
@@ -433,6 +481,7 @@ def replace_training_date_column(col, new_date_str, poll_id=None):
         requests.append({"range": f"{c_start}:{c_end}", "values": cleared})
 
     ws.batch_update(requests, value_input_option="USER_ENTERED")
+    invalidate_sheet_cache(tab_name=ATTENDANCE_TAB)
 
 
 def is_training_poll_id(poll_id) -> bool:
@@ -440,7 +489,7 @@ def is_training_poll_id(poll_id) -> bool:
     try:
         ws = get_attendance_ws()
         row1 = ws.row_values(ATT_POLL_ROW)
-        return any((v or "").strip() == str(poll_id) for v in row1)
+        return any(_parse_training_poll_ref(v)[0] == str(poll_id) for v in row1)
     except Exception as e:
         print(f"[ERROR] is_training_poll_id failed: {e}")
         return False
@@ -557,7 +606,7 @@ def _config_admin_ids():
     return ids
 
 
-def get_admin_role_ids():
+def get_admin_role_ids(force=False):
     """Return (main_ids, secondary_ids) — Tele IDs from the MEMBER INFO tab
     whose Role/Position contains a tier keyword (case-insensitive).
 
@@ -567,7 +616,7 @@ def get_admin_role_ids():
     from config import MEMBER_INFO_TAB
     main, secondary = set(), set()
     try:
-        values = get_cached_values(tab_name=MEMBER_INFO_TAB)
+        values = get_cached_values(tab_name=MEMBER_INFO_TAB, force=force)
         if not values:
             return main, secondary
         header = [h.strip().lower() for h in values[0]]
@@ -591,29 +640,41 @@ def get_admin_role_ids():
     return main, secondary
 
 
-def get_alert_admin_ids():
+def get_alert_admin_ids(force=False):
     """Tele IDs that receive admin alert/reminder DMs: MAIN admins only.
     Falls back to config.ADMIN_DM_USER_IDS if no main admin is resolvable."""
-    main, _ = get_admin_role_ids()
+    main, _ = get_admin_role_ids(force=force)
     return main or _config_admin_ids()
 
 
-def get_dashboard_admin_ids():
+def get_dashboard_admin_ids(force=False):
     """Tele IDs allowed to use the DM dashboard: MAIN + SECONDARY admins only.
 
     The config ADMIN_DM_USER_IDS ids are used **only as an emergency fallback**
     when the role lookup yields nothing at all (sheet unreachable / Role column
     wiped) — they are NOT granted access alongside the role-holders, so a plain
     member listed in the old config set cannot reach the dashboard."""
-    main, secondary = get_admin_role_ids()
+    main, secondary = get_admin_role_ids(force=force)
     role_ids = main | secondary
     return role_ids if role_ids else _config_admin_ids()
 
 
-def is_dashboard_admin(user_id) -> bool:
-    """True if `user_id` may use the admin DM dashboard (either tier)."""
+def is_dashboard_admin(user_id, force=True) -> bool:
+    """True if `user_id` may use the admin DM dashboard (either tier).
+
+    Active user controls force a fresh MEMBER INFO role read by default, so role
+    edits take effect on the next bot interaction.
+    """
     try:
-        return int(user_id) in get_dashboard_admin_ids()
+        return int(user_id) in get_dashboard_admin_ids(force=force)
+    except (TypeError, ValueError):
+        return False
+
+
+def is_main_admin(user_id, force=True) -> bool:
+    """True if `user_id` has a MAIN admin role."""
+    try:
+        return int(user_id) in get_alert_admin_ids(force=force)
     except (TypeError, ValueError):
         return False
 
@@ -731,7 +792,7 @@ def update_member_join_in_info(user_id, full_name: str = "", nickname: str = "")
         {"range": rowcol_to_a1(target, status_c), "values": [["Join"]]},
     ]
     ws.batch_update(updates, value_input_option="USER_ENTERED")
-    invalidate_sheet_cache()
+    invalidate_sheet_cache(tab_name=MEMBER_INFO_TAB)
     print(f"[MEMBER INFO] Join stamped for {user_id} (row {target}): {today}, leave cleared, Join.")
     return True
 
@@ -768,7 +829,7 @@ def update_member_leave_in_info(user_id):
         {"range": rowcol_to_a1(target, leave_c), "values": [[today]]},
         {"range": rowcol_to_a1(target, status_c), "values": [["Left"]]},
     ], value_input_option="USER_ENTERED")
-    invalidate_sheet_cache()
+    invalidate_sheet_cache(tab_name=MEMBER_INFO_TAB)
     print(f"[MEMBER INFO] Leave stamped for {user_id} (row {target}): {today}, Left.")
     return True
 
@@ -837,7 +898,7 @@ def set_attendance(poll_id, user_id, present: bool):
     ws = get_attendance_ws()
     row1 = ws.row_values(ATT_POLL_ROW)
     col = next((i for i, v in enumerate(row1, start=1)
-                if (v or "").strip() == str(poll_id)), None)
+                if _parse_training_poll_ref(v)[0] == str(poll_id)), None)
     if not col:
         return False, f"poll id {poll_id} not found in sheet"
 
@@ -851,6 +912,7 @@ def set_attendance(poll_id, user_id, present: bool):
         ws.update_cell(member_row, ATT_NAME_COL, nickname)
 
     ws.update_cell(member_row, col, "1" if present else "")
+    invalidate_sheet_cache(tab_name=ATTENDANCE_TAB)
     return True, nickname
 
 
@@ -903,6 +965,7 @@ def commit_attendance_column(col, marks_by_row: dict):
     ws.batch_update([
         {"range": f"{c_start}:{c_end}", "values": col_cells},
     ], value_input_option="USER_ENTERED")
+    invalidate_sheet_cache(tab_name=ATTENDANCE_TAB)
 
 # ---- PERF TABULATION (performance-event attendance, keyed by thread id) ------
 
@@ -989,6 +1052,7 @@ def get_perf_event_column(thread_id, create=False, event_name=""):
     ws.update_cell(PERF_THREAD_ROW, target, str(thread_id))
     if event_name:
         ws.update_cell(PERF_EVENT_ROW, target, event_name)
+    invalidate_sheet_cache(tab_name=PERF_TAB_NAME)
     return target
 
 
@@ -1041,6 +1105,7 @@ def commit_perf_column(col, marks_by_row: dict):
     ws.batch_update([
         {"range": f"{c_start}:{c_end}", "values": col_cells},
     ], value_input_option="USER_ENTERED")
+    invalidate_sheet_cache(tab_name=PERF_TAB_NAME)
 
 
 def append_standard_topic_to_sheet(tid, name, rules_string):
@@ -1049,6 +1114,7 @@ def append_standard_topic_to_sheet(tid, name, rules_string):
         from config import SHEET_NAME
         sheet = get_gspread_sheet(sheet_name=SHEET_NAME, tab_name="STANDARD TOPIC Rules")
         sheet.append_row([str(tid), name, rules_string])
+        invalidate_sheet_cache(tab_name="STANDARD TOPIC Rules")
         print(f"✅ [GSheet] Successfully logged {name} to Rules sheet.")
     except Exception as e:
         print(f"❌ [GSheet ERROR] Failed to append standard topic: {e}")
@@ -1271,7 +1337,7 @@ def mark_welcome_tea_setting_sent(row_number: int):
         
         # We MUST invalidate the cache, otherwise the next heartbeat 
         # will read the old RAM and think it hasn't been sent!
-        invalidate_sheet_cache() 
+        invalidate_sheet_cache(tab_name=WELCOME_TEA_ID_TAB) 
         
         print(f"[SYSTEM] Successfully logged 'SENT' in row {row_number}.")
         return True
@@ -1338,7 +1404,7 @@ def update_welcome_tea_status(user_id: int, status: str) -> bool:
         for row_number, row in enumerate(values[first_data_row - 1:], start=first_data_row):
             if _row_cell(row, cols["tele_id"]) == target:
                 ws.update_cell(row_number, cols["status"], _normalize_welcome_tea_status(status))
-                invalidate_sheet_cache()
+                invalidate_sheet_cache(tab_name=WELCOME_TEA_ID_TAB)
                 print(f"[WELCOME TEA] Status for {user_id} updated to {status}.")
                 return True
         print(f"[WELCOME TEA][WARN] Tele ID {user_id} not found for status update.")
@@ -1377,7 +1443,7 @@ def append_welcome_tea_id(user_id: int, username: str = ""):
                     "range": rowcol_to_a1(row_number, cols["status"]),
                     "values": [[existing_status or WELCOME_TEA_STATUS_NOT_CONFIRM]],
                 }], value_input_option="USER_ENTERED")
-                invalidate_sheet_cache()
+                invalidate_sheet_cache(tab_name=WELCOME_TEA_ID_TAB)
                 print(f"[INFO] Welcome Tea ID {user_id} ({username}) refreshed in WELCOME TEA ID.")
                 return True
 
@@ -1401,7 +1467,7 @@ def append_welcome_tea_id(user_id: int, username: str = ""):
                     "range": f"{rowcol_to_a1(row_number, 6)}:{rowcol_to_a1(row_number, 9)}",
                     "values": [["", "", "", ""]],
                 }], value_input_option="USER_ENTERED")
-                invalidate_sheet_cache()
+                invalidate_sheet_cache(tab_name=WELCOME_TEA_ID_TAB)
                 print(f"[INFO] Misplaced Welcome Tea ID {user_id} moved to A:D.")
                 return True
 
@@ -1419,7 +1485,7 @@ def append_welcome_tea_id(user_id: int, username: str = ""):
             "range": f"{rowcol_to_a1(target_row, cols['tele_id'])}:{rowcol_to_a1(target_row, cols['status'])}",
             "values": [[target, username or "", timestamp, WELCOME_TEA_STATUS_NOT_CONFIRM]],
         }], value_input_option="USER_ENTERED")
-        invalidate_sheet_cache()
+        invalidate_sheet_cache(tab_name=WELCOME_TEA_ID_TAB)
         print(f"[INFO] Welcome Tea ID {user_id} ({username}) logged to WELCOME TEA ID tab.")
         return True
     except Exception as e:

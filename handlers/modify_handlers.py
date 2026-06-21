@@ -4,7 +4,7 @@ from telegram.error import BadRequest
 import asyncio
 
 from utils.constants import MODIFY_VALUE
-from config import SHEET_COLUMNS, CHAT_ID
+from config import SHEET_COLUMNS, CHAT_ID, SHEET_TAB_NAME
 from services.google_sheets import get_gspread_sheet, get_cached_records, invalidate_sheet_cache
 from services.date_parser import parse_and_format_dates
 from handlers.conversation_handlers import build_performance_summary, publish_performance_summary
@@ -216,7 +216,7 @@ async def get_modify_field_callback(update: Update, context: ContextTypes.DEFAUL
             for edit_field, edit_value in pending_edits.items():
                 col_index = SHEET_COLUMNS.index(edit_field) + 1
                 sheet.update_cell(row_number, col_index, edit_value)
-            invalidate_sheet_cache()
+            invalidate_sheet_cache(tab_name=SHEET_TAB_NAME)
         except Exception as exc:
             await initiate_modify_via_dm(
                 update=update, context=context, thread_id=thread_id, initiated_via_dm=True,

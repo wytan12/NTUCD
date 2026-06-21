@@ -22,7 +22,7 @@ from services.google_sheets import (
     get_training_date_columns, get_attendees_for_date, commit_attendance_column,
     parse_sheet_date, replace_training_date_column,
     get_perf_event_list, get_perf_event_column, get_perf_attendees, commit_perf_column,
-    is_dashboard_admin,
+    is_dashboard_admin, get_training_poll_ref,
 )
 from services.date_parser import parse_date_line
 
@@ -112,6 +112,28 @@ def _future_dates(dates):
         if d is None or d >= today:
             out.append(item)
     return out
+
+
+async def _remove_old_training_poll(bot, col: int) -> str:
+    """Delete or close the old training poll for a date column when possible."""
+    old_poll_id, old_message_id = get_training_poll_ref(col)
+    if old_poll_id:
+        active_polls.pop(old_poll_id, None)
+    if not old_poll_id:
+        return ""
+    if not old_message_id:
+        return "Old poll was cleared from the sheet, but it was created before message tracking so I could not remove it from the topic."
+
+    try:
+        await bot.delete_message(chat_id=CHAT_ID, message_id=old_message_id)
+        return "Old poll was removed from the Voting topic."
+    except Exception as delete_err:
+        try:
+            await bot.stop_poll(chat_id=CHAT_ID, message_id=old_message_id)
+            return "Old poll could not be deleted, so it was closed instead."
+        except Exception as stop_err:
+            print(f"[ATTD][WARN] Could not remove old poll {old_poll_id}/{old_message_id}: delete={delete_err}; stop={stop_err}")
+            return "Old poll was cleared from the sheet, but Telegram did not let me delete or close the topic message."
 
 
 def _load_dates(context: ContextTypes.DEFAULT_TYPE, force: bool = False):
@@ -450,11 +472,14 @@ async def attendance_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         await query.edit_message_text(f"⏳ Updating training date to {new_str}...")
         poll_id = None
+        poll_message_id = None
+        old_poll_note = ""
         try:
+            old_poll_note = await _remove_old_training_poll(context.bot, col)
             if send_now:
                 msg = await context.bot.send_poll(
                     chat_id=CHAT_ID,
-                    question=f"🥁 Training on {new_str} — you in? 🔥",
+                    question=f"🥁 Training on {new_str}, you in? 🔥",
                     options=["✅ Count me in!", "❌ Can't make it"],  # option 0 must stay = "yes"
                     is_anonymous=False,
                     message_thread_id=TOPIC_VOTING_ID,
@@ -462,8 +487,9 @@ async def attendance_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                 active_polls[msg.poll.id] = "training"
                 yes_voters.clear()
                 poll_id = msg.poll.id
+                poll_message_id = msg.message_id
             # poll_id=None clears row 1, so auto_poll_check will pick it up later.
-            replace_training_date_column(col, new_str, poll_id)
+            replace_training_date_column(col, new_str, poll_id, poll_message_id)
         except Exception as e:
             await query.edit_message_text(f"❌ Failed to modify the date: {e}")
             _clear_moddate(context)
@@ -475,6 +501,8 @@ async def attendance_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             tail = "A fresh poll has been posted to the Voting topic (it's within 4 days)."
         else:
             tail = "A poll will be auto-posted when the date is 4 days away."
+        if old_poll_note:
+            tail = f"{old_poll_note} {tail}"
         _clear_moddate(context)
         banner = f"🟢 *Date changed: {old_label} → {new_str}. {tail}*"
         await _show_reg_dates(query, context, force=True, success_banner=banner)

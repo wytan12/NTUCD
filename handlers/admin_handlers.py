@@ -2,7 +2,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from utils.decorators import admin_only
 from services.google_sheets import get_gspread_sheet, get_attendance_ws, get_cached_records, invalidate_sheet_cache
-from config import sg_tz, CHAT_ID, ADMIN_DM_USER_IDS, SHEET_COLUMNS
+from config import sg_tz, CHAT_ID, ADMIN_DM_USER_IDS, SHEET_COLUMNS, SHEET_TAB_NAME
 from datetime import datetime, timedelta
 from handlers.private_handlers import DASHBOARD_TEXT, _dashboard_keyboard
 import re
@@ -133,11 +133,28 @@ def _extract_first_date_object(date_cell_text: str) -> datetime | None:
     except Exception:
         return None
 
-def _compile_checklist_notice_template(event_name: str, location: str, formatted_dates: str) -> str:
+def _countdown_phrase(event_date_obj: datetime | None) -> str:
+    if not event_date_obj:
+        return "Showtime is coming"
+
+    days_left = (event_date_obj.date() - datetime.now(sg_tz).date()).days
+    if days_left == 0:
+        return "Showtime is today"
+    if days_left == 1:
+        return "Only *1 day* to go"
+    if days_left > 1:
+        return f"Only *{days_left} days* to go"
+    if days_left == -1:
+        return "Showtime was *1 day* ago"
+    return f"Showtime was *{abs(days_left)} days* ago"
+
+
+def _compile_checklist_notice_template(event_name: str, location: str, formatted_dates: str, event_date_obj: datetime | None = None) -> str:
     """Standardized checklist layout template block for public announcements."""
+    countdown = _countdown_phrase(event_date_obj)
     return (
         f"🎉✨ *SHOWTIME IS COMING!* ✨🎉\n"
-        f"Only *7 days* to go — time for the final prep ritual! 🥁🔥\n\n"
+        f"{countdown} — time for the final prep ritual! 🥁🔥\n\n"
         f"🎭 *Event*\n• {event_name}\n\n"
         f"📅 *Performance Date | Time*\n{formatted_dates}\n\n"
         f"📍 *Location*\n• {location}\n\n"
@@ -192,7 +209,7 @@ async def process_reminder_scan_cycle(bot, fallback_user_id: int = None) -> str:
             # Action A: Broadcast checklist notice if the performance is ACCEPTED
             if status == "ACCEPTED":
                 date_lines = "\n".join([f"• {d.strip()}" for d in perf_cell.splitlines() if d.strip()])
-                notice_text = _compile_checklist_notice_template(event_name, location, date_lines)
+                notice_text = _compile_checklist_notice_template(event_name, location, date_lines, event_date_obj)
                 
                 try:
                     await bot.send_message(
@@ -207,9 +224,10 @@ async def process_reminder_scan_cycle(bot, fallback_user_id: int = None) -> str:
                     
             # Action B: Send private admin alerts if STATUS column is completely empty/blank
             elif status == "":
+                countdown = _countdown_phrase(event_date_obj).replace("*", "").lower()
                 nudge_text = (
                     f"⏰🚨 *Knock knock, boss!* 🚨⏰\n\n"
-                    f"🎭 *{event_name}* (ID: `{tid}`) is exactly *7 days away*…\n"
+                    f"🎭 *{event_name}* (ID: `{tid}`) — {countdown}…\n"
                     f"but its status is still ⏳ *PENDING* in the sheet! 😱\n\n"
                     f"👉 Hop into the Command Centre → 🛠️ *Edit Performance* and flip it to "
                     f"✅ `ACCEPTED` or ❌ `REJECTED`, so I can fire the prep checklist on time! 🥁💨"
@@ -398,7 +416,7 @@ async def execute_manual_remind_dispatch(update: Update, context: ContextTypes.D
 
         # Status is already ACCEPTED -> Run standard broadcast immediately
         date_lines = "\n".join([f"• {d.strip()}" for d in perf_cell.splitlines() if d.strip()])
-        notice_text = _compile_checklist_notice_template(event_name, row.get("LOCATION", "TBD"), date_lines)
+        notice_text = _compile_checklist_notice_template(event_name, row.get("LOCATION", "TBD"), date_lines, event_date_obj)
         
         await context.bot.send_message(
             chat_id=CHAT_ID,
@@ -489,7 +507,7 @@ async def handle_remind_escrow_callback(update: Update, context: ContextTypes.DE
     sheet = get_gspread_sheet()
     status_col = SHEET_COLUMNS.index("STATUS") + 1
     sheet.update_cell(row_number, status_col, "ACCEPTED")
-    invalidate_sheet_cache()
+    invalidate_sheet_cache(tab_name=SHEET_TAB_NAME)
     
     updated_row = sheet.row_values(row_number)
     while len(updated_row) < len(SHEET_COLUMNS):
@@ -499,7 +517,7 @@ async def handle_remind_escrow_callback(update: Update, context: ContextTypes.DE
     event_name = row_data.get("EVENT NAME", "Unnamed Event")
     perf_cell = row_data.get("PERF DATE | TIME", "").strip()
     date_lines = "\n".join([f"• {d.strip()}" for d in perf_cell.splitlines() if d.strip()])
-    notice_text = _compile_checklist_notice_template(event_name, row_data.get("LOCATION", "TBD"), date_lines)
+    notice_text = _compile_checklist_notice_template(event_name, row_data.get("LOCATION", "TBD"), date_lines, _extract_first_date_object(perf_cell))
     
     await context.bot.send_message(
         chat_id=CHAT_ID,

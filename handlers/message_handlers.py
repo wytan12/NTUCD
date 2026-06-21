@@ -1,6 +1,7 @@
 from telegram import Update
 from telegram.ext import ContextTypes, ConversationHandler
 from utils.constants import OTHERS_THREAD_IDS, initialized_topics
+from config import MAIN_ADMIN_ROLE_KEYWORDS, SHEET_NAME, MEMBER_INFO_TAB
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Route incoming group messages seamlessly, keeping channels completely untouched by admin inputs."""
@@ -17,10 +18,33 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if thread_id in initialized_topics:
             return
 
+        user = update.effective_user
+        if user and not user.is_bot:
+            from services.google_sheets import get_cached_records
+            
+            try:
+                # Fetch records from the RAM cache (Instant, no delay)
+                records = get_cached_records(SHEET_NAME, MEMBER_INFO_TAB)
+                user_role_lower = ""
+                
+                for row in records:
+                    tele_id = str(row.get("Tele ID", "")).strip()
+                    if tele_id == str(user.id):
+                        # Safely handle both "Role" and "Role/Position" column headers
+                        role_raw = row.get("Role/Position") or row.get("Role") or ""
+                        user_role_lower = str(role_raw).strip().lower()
+                        break
+
+                # 🌟 MAIN ADMIN EXEMPTION CHECK (Substring Match)
+                if user_role_lower and any(keyword in user_role_lower for keyword in MAIN_ADMIN_ROLE_KEYWORDS):
+                    print(f"[SYSTEM] Core infrastructure topic manually created by {user_role_lower} (ID: {user.id}). Permitted.")
+                    return
+            except Exception as e:
+                print(f"[SECURITY] Failed to verify topic creator role: {e}")
+
         # If it is an unrecognized thread manually created by a user, shut it down!
         try:
             await context.bot.delete_forum_topic(chat_id=chat.id, message_thread_id=thread_id)
-            user = update.effective_user
             if user and not user.is_bot:
                 try:
                     # 🎯 Updated Alert Text

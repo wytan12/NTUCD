@@ -16,62 +16,53 @@ from services.google_sheets import (
     get_welcome_tea_settings,
     get_welcome_tea_recipients,
     update_welcome_tea_status,
+    mark_welcome_tea_setting_sent,
 )
 from utils.constants import welcome_tea_join_chats, welcome_tea_pending_requests
 
 WELCOME_TEA_MESSAGE = (
-    "🎉 **Thank you for scanning the Welcome Tea QR code!**\n\n"
-    "We've successfully recorded your information for the Welcome Tea event.\n\n"
-    "We will disseminate more information nearer to the Welcome Tea event.\n\n"
-    "Please fill in this Welcome Tea Registration form if you have not done so:\n"
-    "{signup_form_link}\n"
-    "<i>(Please ignore this if you have already filled in the form.)</i>\n\n"
-    "<i>If you have any questions, feel free to reach out to NTUFD chairperson @ma_ning (Ma Ning) or vice-chairperson @jurikawazu (Juri) on Telegram!</i>"
+    "🎉 <b>Yay! Thank you so much for your interest in NTU Festive Drums!</b>\n\n"
+    "We've got your details safely recorded, and we can't wait to meet you! 🥁 We'll be sending out more exciting details as we get closer to the event, so keep an eye out. 👀\n"
+    "If you haven't yet, please take a quick moment to fill out our <a href='{signup_form_link}'>Welcome Tea Registration form</a>. 📝\n"
+    "<i>(If you've already filled this in, you're all set! ✅)</i>\n\n"
+    "<i>Got any questions? Don't hesitate to drop a message to our friendly NTUFD Chairperson, @ma_ning (Ma Ning), or Vice-Chairperson, @jurikawazu (Juri), right here on Telegram! We'd love to help! 💬❤️</i>"
 )
 
 WELCOME_TEA_DETAILS_TEXT = (
-    "Hi! Welcome!!🥁\n\n"
+    "Hello there! We are so excited to see you soon! 🥁✨\n\n"
     "<b>NTU Festive Drums' Welcome Tea Session</b>\n"
-    "<b>Date:</b> 18th August 2026 (Tuesday)\n"
-    "<b>Time:</b> 1830 - 2130 (GMT+8)\n"
-    "<b>Venue:</b> <a href='https://goo.gl/maps/7yqc3EfYNE92'>Nanyang House Foyer</a>\n"
-    "<b>Dress Code:</b> Comfortable & Casual (we generally go barefoot for our practices/performances, "
-    "so preferably wear slippers - but covered shoes are fine too!)\n\n"
-    "🍱 <b>Dinner is provided</b> and time is allocated to eat, so no need to dabao. "
-    "You can come straight from class!\n\n"
-    "<b>🗺 Video Guide to Nanyang House</b>\n"
-    "▶️ <b>Red Bus (Hall 2) Video Guide:</b>\n"
-    "<a href='https://drive.google.com/file/d/1PWvvD4kmmnYbFOL0AzE25NEiQ2983ZJl/view?usp=drive_link'>Watch here</a>\n"
-    "▶️ <b>Blue Bus (Hall 6) Video Guide:</b>\n"
-    "<a href='https://drive.google.com/file/d/1ZFmAQHcFQL6VpNzO87UG6KB0u0FuOAlh/view?usp=drive_link'>Watch here</a>\n"
-    "📄 <b>PDF Guide to Nanyang House:</b>\n"
-    "<a href='https://drive.google.com/file/d/1pO1GoNn4MReqFXqBUowyZPL7EJqKpmHb/view?usp=drive_link'>View PDF</a>\n\n"
-    "Please confirm whether you will be joining us below."
+    "📅 <b>Date:</b> {event_date}\n"
+    "⏰ <b>Time:</b> 1830 - 2130 (GMT+8)\n"
+    "📍 <b>Venue:</b> <a href='https://maps.app.goo.gl/VHDueGBZ6AyHNjdx5'>Nanyang House Foyer</a>\n"
+    "👕 <b>Dress Code:</b> Comfortable & Casual! (We generally go barefoot during practice, so slippers or sandals are highly recommended—but covered shoes are totally fine too!)\n\n"
+    "🍱 <b>Dinner is on us!</b> Time is allocated for eating, so no need to dabao. Feel free to come straight from class! 🏃💨\n\n"
+    "<b>How to get to Nanyang House</b>\n"
+    "▶️ <a href='https://drive.google.com/file/d/1PWvvD4kmmnYbFOL0AzE25NEiQ2983ZJl/view?usp=drive_link'>Red Bus (Hall 2) Video Guide</a>\n"
+    "▶️ <a href='https://drive.google.com/file/d/1ZFmAQHcFQL6VpNzO87UG6KB0u0FuOAlh/view?usp=drive_link'>Blue Bus (Hall 6) Video Guide</a>\n"
+    "📄 <a href='https://drive.google.com/file/d/1pO1GoNn4MReqFXqBUowyZPL7EJqKpmHb/view?usp=drive_link'>PDF Route Guide</a>\n\n"
+    "<i>Please let us know if you'll be joining us by clicking one of the buttons below! 👇</i>"
 )
 
 WELCOME_TEA_REMINDER_TEXT = (
-    "🥁 Gentle reminder for Welcome Tea!\n\n"
-    "Please let us know if you'll be attending. We look forward to hearing from you!"
+    "🥁 ***Just a gentle little reminder!***\n\n"
+    "Our Welcome Tea is coming up, and we'd love to know if you can make it. Please let us know by confirming below—we hope to see you there! 😊✨"
 )
 
-CONFIRMED_REPLY = "Thank you for confirming your attendance. We will add you to the group on Sunday!"
+CONFIRMED_REPLY = "Awesome! 🎉 Thanks for confirming. We'll be adding you to the Welcome Tea group chat soon, so keep an eye out for that! 🥁"
 REJECTED_REPLY = (
-    "Thank you so much for your interest, we hope to see you again!! ❤️\n\n"
-    "If you change your mind and would like to join us, just reach out to our chairpersons "
-    "@ma_ning (Ma Ning) or @jurikawazu (Juri) and they will add you to the Telegram group."
+    "Aww, what a bummer! 🥺 But thank you so much for your interest in our club! ❤️\n\n"
+    "If your schedule clears up and you change your mind, the door is always open. Just drop a message to our Chairpersons @ma_ning (Ma Ning) or @jurikawazu (Juri) and we'll gladly add you in! Have a great semester ahead! ✨"
 )
 
 WELCOME_TEA_DETAILS_MESSAGE_KEY = "welcome_tea_details_messages"
-WELCOME_TEA_SCHEDULER_RUN_KEY = "welcome_tea_scheduler_runs"
-WELCOME_TEA_SCHEDULER_INTERVAL_SECONDS = 60
-WELCOME_TEA_SCHEDULER_GRACE_SECONDS = 300
+WELCOME_TEA_SCHEDULER_INTERVAL_SECONDS = 30
 
 
 def _confirmation_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("Confirm", callback_data="WELCOME_TEA_CONFIRM"),
-            InlineKeyboardButton("Reject", callback_data="WELCOME_TEA_REJECT"),
+            InlineKeyboardButton("✅ Confirm", callback_data="WELCOME_TEA_CONFIRM"),
+            InlineKeyboardButton("❌ Reject", callback_data="WELCOME_TEA_REJECT"),
         ]
     ])
 
@@ -84,11 +75,10 @@ def _welcome_tea_message() -> str:
 def _welcome_tea_followup_text() -> str:
     settings = get_welcome_tea_settings()
     return (
-        "Thank you for coming to NTUFD Welcome Tea! We hope you had a great time.\n\n"
-        "Ready to join us? Request to join the NTUFD main Telegram group here:\n"
-        f"{settings['main_group_welcome_tea_invite_link']}\n\n"
-        "After requesting to join, check your private messages from the bot and "
-        "complete the verification process."
+        "🎉 <b>Thank you for coming to our Welcome Tea!</b> We really hope you had a fantastic time with us! 🥁✨\n\n"
+        "Ready to make some noise and officially join the NTUFD family? 🤩\n"
+        f"👉 <a href='{settings['main_group_welcome_tea_invite_link']}'>Click here to request to join our Main Group!</a>\n\n"
+        "<i>⚠️ Important: After requesting to join, please check your private messages. The bot will send you a quick verification message to get you fully approved!</i>"
     )
 
 
@@ -191,9 +181,27 @@ async def handle_welcome_tea_confirmation(update: Update, context: ContextTypes.
 
 
 async def _send_welcome_tea_details(bot, user_id: int):
+    # 1. Fetch live settings from Google Sheets
+    settings = get_welcome_tea_settings()
+    event_date_obj = settings.get("event_date")
+    
+    # 2. Format the date beautifully (e.g. "18 August 2026 (Tuesday)")
+    if event_date_obj:
+        # %d = Day, %B = Full Month Name, %Y = Year, %A = Full Day Name
+        formatted_date = event_date_obj.strftime("%d %B %Y (%A)")
+        
+        # Optional: Strip leading zero for single-digit days (e.g., "08" -> "8")
+        if formatted_date.startswith("0"):
+            formatted_date = formatted_date[1:]
+    else:
+        formatted_date = "TBA" # Fallback just in case the sheet cell is empty
+        
+    # 3. Inject the formatted date into the text template
+    final_text = WELCOME_TEA_DETAILS_TEXT.format(event_date=formatted_date)
+    
     return await bot.send_message(
         chat_id=user_id,
-        text=WELCOME_TEA_DETAILS_TEXT,
+        text=final_text,
         parse_mode=ParseMode.HTML,
         reply_markup=_confirmation_keyboard(),
         disable_web_page_preview=True,
@@ -262,6 +270,7 @@ async def send_post_welcome_tea_followup_job(context: ContextTypes.DEFAULT_TYPE)
         await context.bot.send_message(
             chat_id=WELCOME_TEA_GROUP_CHAT_ID,
             text=_welcome_tea_followup_text(),
+            parse_mode=ParseMode.HTML,
             disable_web_page_preview=True,
         )
         print("[WELCOME TEA] Post-event main-group invitation sent.")
@@ -339,37 +348,41 @@ def _welcome_tea_approval_closed() -> bool:
 async def welcome_tea_scheduler_tick(context: ContextTypes.DEFAULT_TYPE):
     """Poll sheet settings and run due Welcome Tea jobs once per configured datetime."""
     settings = get_welcome_tea_settings()
+    if not settings:
+        return
+        
     now = datetime.now(sg_tz)
-    runs = context.application.bot_data.setdefault(WELCOME_TEA_SCHEDULER_RUN_KEY, {})
+
+    # Map the jobs to our newly formatted settings dictionary
     jobs = [
-        ("details", settings["details_send_at"], send_welcome_tea_details_job),
-        ("reminder", settings["reminder_send_at"], send_welcome_tea_reminder_job),
-        ("approval", settings["approval_at"], process_welcome_tea_join_requests_job),
-        ("followup", settings["followup_send_at"], send_post_welcome_tea_followup_job),
+        ("details", settings.get("details_send_at"), settings.get("details_send_status"), settings.get("details_send_row"), send_welcome_tea_details_job),
+        ("reminder", settings.get("reminder_send_at"), settings.get("reminder_send_status"), settings.get("reminder_send_row"), send_welcome_tea_reminder_job),
+        ("approval", settings.get("approval_at"), settings.get("approval_status"), settings.get("approval_row"), process_welcome_tea_join_requests_job),
+        ("followup", settings.get("followup_send_at"), settings.get("followup_send_status"), settings.get("followup_send_row"), send_post_welcome_tea_followup_job),
     ]
 
-    for name, when, callback in jobs:
-        if when is None:
-            skip_key = f"missing:{name}"
-            if skip_key not in runs:
-                runs[skip_key] = now.isoformat()
-                print(f"[WELCOME TEA][WARN] Skipping {name}; sheet datetime is blank or invalid.")
-            continue
-        run_key = f"{name}:{when.isoformat()}"
-        skip_key = f"skipped:{run_key}"
-        if now < when:
-            continue
-        if (now - when).total_seconds() > WELCOME_TEA_SCHEDULER_GRACE_SECONDS:
-            if run_key not in runs and skip_key not in runs:
-                runs[skip_key] = now.isoformat()
-                print(f"[WELCOME TEA] Skipping {name}; sheet time is too far in the past: {when}")
-            continue
-        if run_key in runs:
+    for name, when, status, row_num, callback in jobs:
+        # 1. 🛡️ THE BULLETPROOF CHECK: If the sheet says SENT, immediately skip!
+        if status and str(status).strip().upper() == "SENT":
             continue
 
-        print(f"[WELCOME TEA] Running sheet-driven {name} job scheduled at {when}")
-        await callback(context)
-        runs[run_key] = now.isoformat()
+        # Skip if the date/time is blank or invalid in the sheet
+        if when is None:
+            continue 
+
+        # 2. 🎯 TRIGGER ACTION: Has the clock passed the target time?
+        if now >= when:
+            print(f"[WELCOME TEA] Running sheet-driven {name} job scheduled at {when}")
+            try:
+                # Run the actual broadcast
+                await callback(context)
+                
+                # 3. 📝 LOCK IT IN: Write "SENT" to the Google Sheet permanently
+                if row_num:
+                    mark_welcome_tea_setting_sent(row_num)
+                    
+            except Exception as e:
+                print(f"[WELCOME TEA][ERROR] Job {name} failed: {e}")
 
 
 def schedule_welcome_tea_jobs(application):

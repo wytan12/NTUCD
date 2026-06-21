@@ -2,15 +2,26 @@ import os
 import pytz
 
 # Bot Configuration
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-GOOGLE_CREDENTIALS_JSON = os.environ.get("GOOGLE_CREDENTIALS_JSON")
+#BOT_TOKEN = os.environ.get("BOT_TOKEN")
+#GOOGLE_CREDENTIALS_JSON = os.environ.get("GOOGLE_CREDENTIALS_JSON")
 
 
 # Google Sheets Configuration
-SHEET_NAME = "NTUFD AY26/27 Timeline (Tele Bot Debug)"
+SHEET_NAME = "NTUFD AY26/27 Database" # Main GSheet
+#SHEET_NAME = "NTUFD AY26/27 Timeline (Tele Bot Debug)" # Debug GSheet
 SHEET_TAB_NAME = "PERF"
 ATTENDANCE_TAB = "ATTENDANCE"
 MEMBER_INFO_TAB = "MEMBER INFO AY26/27"  # holds Nickname (col B) + Tele ID (col P)
+
+# Chat Configuration
+CHAT_ID =  -1004406293828 # Main group Chat ID (AY26/27)
+#CHAT_ID = -1002614985856  # Debug group Chat ID
+WELCOME_TEA_GROUP_CHAT_ID = -1004392666592
+
+# Thread Configuration
+GENERAL_TOPIC_ID = None
+TOPIC_VOTING_ID = 53  # Main group voting thread ID
+# TOPIC_VOTING_ID = 5   # Debug group voting thread ID
 
 # --- Attendance tab layout (1-based row/column indices) ---
 # Col A = member NAME (nickname), Col B = TOTAL, Col C = row labels
@@ -41,26 +52,13 @@ PERF_FIRST_MEMBER_ROW = 3
 
 WELCOME_TEA_SHEET = "NTUFD Welcome Tea Registration 2026 (Responses)"
 WELCOME_TEA_TAB = "Form Responses 1"
-WELCOME_TEA_ID_TAB = "WELCOME TEA ID"
+WELCOME_TEA_ID_TAB = "WELCOME TEA"
 WELCOME_TEA_STATUS_NOT_CONFIRM = "Not Confirm"
 WELCOME_TEA_STATUS_ATTEND = "Attend"
 WELCOME_TEA_STATUS_REJECT = "Reject"
 
-# Chat Configuration
-#CHAT_ID =  -1004406293828 # Main group Chat ID (AY26/27)
-CHAT_ID = -1002614985856  # Debug group Chat ID
-WELCOME_TEA_GROUP_CHAT_ID = -5027731042
-
 # Timezone
 sg_tz = pytz.timezone("Asia/Singapore")
-
-# Thread Configuration
-GENERAL_TOPIC_ID = None
-TOPIC_VOTING_ID = 4  # Main group voting thread ID
-# TOPIC_VOTING_ID = 5   # Debug group voting thread ID
-
-# Threads exempt from /remind and /modify (non-performance threads)
-EXEMPTED_THREAD_IDS = [GENERAL_TOPIC_ID, TOPIC_VOTING_ID]
 
 # Sheet Columns
 SHEET_COLUMNS = ["THREAD ID", "EVENT TYPE", "EVENT NAME", "REHEARSAL DATE | TIME", "PERF DATE | TIME", "LOCATION",

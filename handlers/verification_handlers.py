@@ -26,16 +26,17 @@ async def _send_main_group_verification_prompt(join_request, context):
     user = join_request.from_user
     settings = get_welcome_tea_settings()
     pending_users[user.id] = join_request
+    
     try:
         await context.bot.send_message(
             chat_id=getattr(join_request, "user_chat_id", None) or user.id,
             text=(
-                "Thank you for requesting to join NTUFD!\n\n"
-                "If you have not filled in the Welcome Tea Registration Form, please submit it first:\n"
-                f"{settings['signup_form_link']}\n\n"
-                "Please type /verification here as a message to the bot. The bot will then prompt you to enter your matriculation "
-                "number to verify your Welcome Tea registration."
+                "🎉 <b>Welcome to the NTUFD family!</b>\n\n"
+                "Thank you for requesting to join our main group. We are so excited to have you on board! 🥁✨\n\n"
+                f"If you haven't filled out our <a href='{settings['signup_form_link']}'>Welcome Tea Registration Form</a> yet, please take a quick moment to do so first.\n\n"
+                "To complete your entry, simply type /verification in this chat! I will ask for your matriculation number to quickly verify your registration, and then you'll be let right in! ✅"
             ),
+            parse_mode=ParseMode.HTML, # 👈 Added so the link and bolding works!
             disable_web_page_preview=True,
         )
     except Exception as e:
@@ -72,7 +73,7 @@ async def join_request_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     is_welcome_tea_request = (
         request_chat_id == WELCOME_TEA_GROUP_CHAT_ID
         or (welcome_tea_link and link_url == welcome_tea_link)
-        or WELCOME_TEA_LINK_KEYWORD in link_name.lower()
+        #or WELCOME_TEA_LINK_KEYWORD in link_name.lower()
     )
     if is_welcome_tea_request:
         await handle_welcome_tea_join_request(request, context)
@@ -135,14 +136,18 @@ async def start_verification(update: Update, context: ContextTypes.DEFAULT_TYPE)
     user_id = update.effective_user.id
     if user_id not in pending_users:
         await update.effective_message.reply_text(
-            "I do not see a pending main-group join request for you. "
-            "Please request to join using the Welcome Tea main-group link first."
+            "Oops! 🙈 It looks like we don't have a pending main-group join request from you right now.\n\n"
+            "Please make sure to click the main-group invite link and request to join first, then come back here and type /verification again! ✨",
+            parse_mode=ParseMode.HTML
         )
         return ConversationHandler.END
 
     await update.effective_message.reply_text(
-        "Please enter your NTU matriculation number, for example U2512345F."
+        "Awesome! Let's get you verified. 🎉\n\n"
+        "Please enter your NTU matriculation number (for example: <code>U2512345F</code>).",
+        parse_mode=ParseMode.HTML
     )
+    # ASK_MATRIC is the "state" telling the bot to wait for the user's next message!
     return ASK_MATRIC
 
 
@@ -154,20 +159,22 @@ async def handle_matric(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if join_request is None:
         await update.effective_message.reply_text(
-            "No pending main-group join request was found. "
-            "Please request to join, then send /verification again."
+            "Oops! 🙈 It looks like we don't have a pending main-group join request from you.\n\n"
+            "Please request to join the group first, and then type /verification again so we can let you in! ✨",
+            parse_mode=ParseMode.HTML
         )
         return ConversationHandler.END
 
     synced, result = sync_welcome_tea_member(matric, user_id)
+    
     if result == "matric_not_found":
         signup_form_link = get_welcome_tea_settings()["signup_form_link"]
         await update.effective_message.reply_text(
-            "We could not find that matriculation number in the Welcome Tea registration form.\n\n"
-            "Please fill in the form first if you have not done so:\n"
-            f"<a href='{escape(signup_form_link, quote=True)}'>Welcome Tea Registration form</a>\n\n"
-            "After submitting it, enter /verification again to retry.\n\n"
-            "If you have already filled in the form, please check that you entered the correct matriculation number, or contact NTUFD chairperson @ma_ning (Ma Ning) or vice-chairperson @jurikawazu (Juri) on Telegram for assistance.",
+            "Hmm, we couldn't find that matriculation number in our records. 🤔\n\n"
+            "If you haven't filled out our registration form yet, please do so here:\n"
+            f"👉 <a href='{escape(signup_form_link, quote=True)}'>Welcome Tea Registration Form</a> 📝\n\n"
+            "Once submitted, just type /verification again to retry!\n\n"
+            "<i>(If you've already filled it out, please double-check your matriculation number for any typos. Still stuck? Just drop a message to our Chairpersons @ma_ning or @jurikawazu for help! ❤️)</i>",
             parse_mode=ParseMode.HTML,
             disable_web_page_preview=True,
         )
@@ -176,8 +183,10 @@ async def handle_matric(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not synced:
         print(f"[VERIFY][ERROR] MEMBER INFO sync failed for {user_id}: {result}")
         await update.effective_message.reply_text(
-            "We found your registration, but could not update the member database. "
-            "Please contact an admin and try /verification again later."
+            "Good news: We found your registration! 🎉\n"
+            "Bad news: Our database is taking a little nap right now and couldn't sync your profile. 💤\n\n"
+            "Please contact our friendly admins so we can help you out, and try /verification again a bit later!",
+            parse_mode=ParseMode.HTML
         )
         return ConversationHandler.END
 
@@ -186,15 +195,19 @@ async def handle_matric(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         print(f"[VERIFY][ERROR] Join approval failed for {user_id}: {e}")
         await update.effective_message.reply_text(
-            "Your details were verified, but Telegram could not approve the join request. "
-            "Please submit the main-group join request again."
+            "Your details are perfectly verified! ✅\n\n"
+            "However, Telegram had a little hiccup and couldn't approve your join request right now. 🫠\n"
+            "Please try submitting the main-group join request one more time!",
+            parse_mode=ParseMode.HTML
         )
         pending_users.pop(user_id, None)
         return ConversationHandler.END
 
+    # Success!
     pending_users.pop(user_id, None)
     await update.effective_message.reply_text(
-        "Your matriculation number has been verified and your join request was approved. "
-        "Welcome to NTUFD!"
+        "Woohoo! 🎉 Your matriculation number is fully verified and your join request has been approved.\n\n"
+        "<b>Officially welcome to the NTUFD family! We are absolutely thrilled to have you here!</b> 🥁🔥",
+        parse_mode=ParseMode.HTML
     )
     return ConversationHandler.END

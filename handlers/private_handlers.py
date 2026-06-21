@@ -865,7 +865,8 @@ async def handle_dashboard_navigation(update: Update, context: ContextTypes.DEFA
     elif target_view == "THREADS":
         records = get_cached_records()
         lines = ["🧵 ***Forum Thread Directory Chart***\nAn overview of individual topic Thread IDs\n"]
-        lines.append("• `0` | 💬 **General/Main Landing Channel**")
+        lines.append("• `0` | 💬 **General/Chit Chat Channel**")
+        lines.append("• `53` | 📅 **Attendance**")
         for row in records:
             tid = row.get("THREAD ID")
             if str(tid).isdigit(): lines.append(f"• `{tid}` | 🎭 *PERF:* **{row.get('EVENT NAME', 'Unnamed Event')}**")

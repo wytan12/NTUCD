@@ -1,8 +1,10 @@
 from telegram import BotCommand, BotCommandScopeDefault, BotCommandScopeChat, Update
 from telegram.ext import (
     ApplicationBuilder,
+    ApplicationHandlerStop,
     CommandHandler,
     MessageHandler,
+    TypeHandler,
     filters,
     CallbackQueryHandler,
     ConversationHandler,
@@ -54,6 +56,32 @@ admin_commands = [
     # BotCommand("threadid", "🧵 Print the entire group topic directory chart"),
     # BotCommand("info", "Preview summary card details in DM")
 ]
+
+async def global_button_security_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Intercepts EVERY button click globally before it reaches any handler."""
+    if update.callback_query:
+        query = update.callback_query
+        
+        # 🟢 VIP PASS: Let the Welcome Tea RSVP buttons bypass the admin security check
+        if query.data in ["WELCOME_TEA_CONFIRM", "WELCOME_TEA_REJECT"]:
+            return  # Let it pass cleanly to the normal handlers!
+            
+        user_id = query.from_user.id
+        from services.google_sheets import is_dashboard_admin
+        
+        # 🔴 SECURITY CHECK: Verify if they are a Dashboard Admin
+        if not is_dashboard_admin(user_id):
+            await query.answer()
+            try:
+                await query.edit_message_text(
+                    text="⛔ **Access Denied**\nYour admin rights have been revoked. This dashboard session has expired.",
+                    parse_mode="Markdown"
+                )
+            except Exception as e:
+                print(f"[SECURITY] Failed to edit expired dashboard: {e}")
+            
+            # 3. Instantly kill the request so no other file processes it
+            raise ApplicationHandlerStop
 
 async def register_private_admin_menus(application):
     """🧠 CRASH-PROOF DISPATCHER: Non-blocking async background worker that pushes menu suggestions
@@ -140,6 +168,7 @@ def main():
     )
 
     # Core engine endpoint configurations
+    app.add_handler(TypeHandler(Update, global_button_security_check), group=-1)
     app.add_handler(CommandHandler("start", start_command_router))
     app.add_handler(CommandHandler("threadid", thread_id_command))
     #app.add_handler(CommandHandler("remind", remind_command))

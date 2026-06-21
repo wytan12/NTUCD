@@ -1197,17 +1197,21 @@ def get_welcome_tea_settings():
     """Read Welcome Tea settings live from the WELCOME TEA ID tab.
 
     Expected settings block:
-      F = Setting, G = Value, H = Time
+      G = Setting, H = Value, I = Time, J = Status
     """
     raw = {}
     try:
-        for row in _welcome_tea_ws().get_all_values():
-            key = _setting_key(_row_cell(row, 6))
+        for row_idx, row in enumerate(_welcome_tea_ws().get_all_values()):
+            actual_row_number = row_idx + 1
+            # Shifted to read Column G (7)
+            key = _setting_key(_row_cell(row, 7))
             if not key or key in {"setting", "welcometeasettings"}:
                 continue
             raw[key] = {
-                "value": _row_cell(row, 7),
-                "time": _row_cell(row, 8),
+                "value": _row_cell(row, 8),    # Col H
+                "time": _row_cell(row, 9),     # Col I
+                "status": _row_cell(row, 10),  # Col J
+                "row_number": actual_row_number
             }
     except Exception as e:
         print(f"[WELCOME TEA][WARN] Failed to read sheet settings: {e}")
@@ -1222,17 +1226,58 @@ def get_welcome_tea_settings():
         value = raw.get(key, {}).get("value", "")
         return value.strip() if value else ""
 
+    def setting_status(key):
+        return raw.get(key, {}).get("status", "").strip()
+
+    def setting_row(key):
+        return raw.get(key, {}).get("row_number")
+
     return {
         "event_date": event_date,
+        
+        # 🕒 Parsed Datetimes
         "details_send_at": setting_datetime("detailssend"),
         "reminder_send_at": setting_datetime("remindersend"),
         "approval_at": setting_datetime("approvaltime"),
         "followup_send_at": setting_datetime("followupsend"),
+        
+        # 🛡️ Safety Statuses (Reads Column J)
+        "details_send_status": setting_status("detailssend"),
+        "reminder_send_status": setting_status("remindersend"),
+        "approval_status": setting_status("approvaltime"),
+        "followup_send_status": setting_status("followupsend"),
+        
+        # 📍 Exact Row Locations (So the bot knows where to write)
+        "details_send_row": setting_row("detailssend"),
+        "reminder_send_row": setting_row("remindersend"),
+        "approval_row": setting_row("approvaltime"),
+        "followup_send_row": setting_row("followupsend"),
+
+        # 🔗 Links
         "welcome_tea_join_request_link": setting_text("welcometeagroupinvitelink"),
         "main_group_welcome_tea_invite_link": setting_text("maingroupinvitelink"),
         "signup_form_link": setting_text("welcometearegistrationform"),
     }
 
+def mark_welcome_tea_setting_sent(row_number: int):
+    """Writes 'SENT' into Column J (10) for a specific setting to permanently prevent double-sending."""
+    if not row_number:
+        return False
+        
+    try:
+        ws = _welcome_tea_ws()
+        # Update exactly that row in Column 10 (J)
+        ws.update_cell(row_number, 10, "SENT")
+        
+        # We MUST invalidate the cache, otherwise the next heartbeat 
+        # will read the old RAM and think it hasn't been sent!
+        invalidate_sheet_cache() 
+        
+        print(f"[SYSTEM] Successfully logged 'SENT' in row {row_number}.")
+        return True
+    except Exception as e:
+        print(f"[ERROR] Failed to mark setting as SENT on row {row_number}: {e}")
+        return False
 
 def get_welcome_tea_rows():
     """Return row dicts from WELCOME TEA ID.

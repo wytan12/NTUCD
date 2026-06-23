@@ -66,6 +66,12 @@ def _dashboard_keyboard() -> InlineKeyboardMarkup:
         ]
     ])
 
+def _dashboard_back_keyboard(back_callback: str = "DASH_VIEW|HOME") -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔙 Back", callback_data=back_callback)],
+        [InlineKeyboardButton("🦅 Exit to Cockpit", callback_data="DASH_VIEW|HOME")],
+    ])
+
 def _parse_command_payload(text: str) -> tuple[str, str | None, str]:
     stripped = text.lstrip()
     if not stripped.startswith("/"):
@@ -231,8 +237,11 @@ async def render_modify_list(update: Update, context: ContextTypes.DEFAULT_TYPE,
         
         if not records:
             text = "📋 The performance sheet is empty."
-            if incoming_query: await incoming_query.edit_message_text(text)
-            elif status_loading: await status_loading.edit_text(text)
+            keyboard = _dashboard_back_keyboard()
+            if incoming_query:
+                await incoming_query.edit_message_text(text, reply_markup=keyboard)
+            elif status_loading:
+                await status_loading.edit_text(text, reply_markup=keyboard)
             return
 
         from datetime import datetime
@@ -873,7 +882,11 @@ async def handle_dashboard_navigation(update: Update, context: ContextTypes.DEFA
                 lines.append(f"{emoji} *{event_name}* | {date_display}")
             text = "\n".join(lines)
             
-        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🦅 Exit to Cockpit", callback_data="DASH_VIEW|HOME")]])
+        keyboard = (
+            _dashboard_back_keyboard()
+            if not records
+            else InlineKeyboardMarkup([[InlineKeyboardButton("🦅 Exit to Cockpit", callback_data="DASH_VIEW|HOME")]])
+        )
         await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
         return
 

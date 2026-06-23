@@ -4,7 +4,7 @@ from utils.decorators import admin_only
 from services.google_sheets import get_gspread_sheet, get_attendance_ws, get_cached_records, invalidate_sheet_cache
 from config import sg_tz, CHAT_ID, ADMIN_DM_USER_IDS, SHEET_COLUMNS, SHEET_TAB_NAME
 from datetime import datetime, timedelta
-from handlers.private_handlers import DASHBOARD_TEXT, _dashboard_keyboard
+from handlers.private_handlers import DASHBOARD_TEXT, _dashboard_keyboard, _dashboard_back_keyboard
 import re
 
 @admin_only
@@ -297,9 +297,23 @@ async def initiate_remind_portal_via_dm(update: Update, context: ContextTypes.DE
         records = get_cached_records()
         if not records:
             text_empty = "📋 The performance sheet is currently empty."
-            if query: await query.edit_message_text(text_empty)
-            elif active_dash_id: await context.bot.edit_message_text(chat_id=target_chat.id, message_id=active_dash_id, text=text_empty)
-            else: await context.bot.send_message(chat_id=target_chat.id, text=text_empty)
+            empty_markup = _dashboard_back_keyboard()
+            if query:
+                await query.edit_message_text(text_empty, reply_markup=empty_markup)
+            elif active_dash_id:
+                await context.bot.edit_message_text(
+                    chat_id=target_chat.id,
+                    message_id=active_dash_id,
+                    text=text_empty,
+                    reply_markup=empty_markup,
+                )
+            else:
+                msg = await context.bot.send_message(
+                    chat_id=target_chat.id,
+                    text=text_empty,
+                    reply_markup=empty_markup,
+                )
+                context.user_data["master_dash_id"] = msg.message_id
             return
 
         import re

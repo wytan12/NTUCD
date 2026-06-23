@@ -205,7 +205,11 @@ async def _show_perf_events(query, context: ContextTypes.DEFAULT_TYPE, success_b
 
     if not events:
         error_text = "🎭 No performances found in the PERF tab yet. Create one with `/new` first."
-        await _update_attendance_bubble(query, error_text, None, context)
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔙 Back to Category", callback_data="ATTD_HOME")],
+            [InlineKeyboardButton("🦅 Exit to Cockpit", callback_data="DASH_VIEW|HOME")],
+        ])
+        await _update_attendance_bubble(query, error_text, keyboard, context)
         return
         
     await _update_attendance_bubble(

@@ -1,7 +1,7 @@
 from telegram import Update
 from telegram.ext import ContextTypes, ConversationHandler
-from utils.constants import OTHERS_THREAD_IDS, initialized_topics
-from config import MAIN_ADMIN_ROLE_KEYWORDS, SHEET_NAME, MEMBER_INFO_TAB
+from services.google_sheets import is_main_admin
+from utils.constants import initialized_topics
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Route incoming group messages seamlessly, keeping channels completely untouched by admin inputs."""
@@ -19,7 +19,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         user = update.effective_user
-        if user and not user.is_bot:
+        if user and not user.is_bot and is_main_admin(user.id):
+            initialized_topics.add(thread_id)
+            print(f"[SYSTEM] Manual forum topic created by MAIN admin {user.id}. Permitted.")
+            return
+
+        if False and user and not user.is_bot:
             from services.google_sheets import get_cached_records
             
             try:
@@ -50,7 +55,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     # 🎯 Updated Alert Text
                     await context.bot.send_message(
                         chat_id=user.id,
-                        text="⚠️ **Manual Topic Creation Blocked**\nPlease use the 🎪 **New Topic** button inside the Command Centre (`/start`) to generate events.",
+                        text="⚠️ *Manual Topic Creation Blocked*\nPlease use the 🎪 *New Topic* button inside the Command Centre (`/start`) to generate events.",
                         parse_mode="Markdown"
                     )
                 except Exception: pass

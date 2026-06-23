@@ -74,7 +74,7 @@ async def global_button_security_check(update: Update, context: ContextTypes.DEF
             await query.answer()
             try:
                 await query.edit_message_text(
-                    text="⛔ **Access Denied**\nYour admin rights have been revoked. This dashboard session has expired.",
+                    text="⛔ *Access Denied*\nYour admin rights have been revoked. This dashboard session has expired.",
                     parse_mode="Markdown"
                 )
             except Exception as e:

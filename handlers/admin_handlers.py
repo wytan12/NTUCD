@@ -68,7 +68,7 @@ async def thread_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         records = sheet.get_all_records()
         
         chart_lines = ["🧵 *NTU Festive Drums — Forum Directory Chart*\n"]
-        chart_lines.append("• 0 | **General Topic (Main Channel)**\n")
+        chart_lines.append("• 0 | *General Topic (Main Channel)*\n")
 
         # 2. Compile Performance List segment
         chart_lines.append("🎭 *Performance Thread IDs*")
@@ -388,7 +388,7 @@ async def execute_manual_remind_dispatch(update: Update, context: ContextTypes.D
         if status == "REJECTED":
             banner = (
                 f"❌ *Manual Remind Blocked: The performance '{event_name}' is currently marked as REJECTED!*\n\n"
-                f"👉 _Reminders are explicitly disabled. To proceed, please update the status to **ACCEPTED** first via the edit cockpit fields panel view._"
+                f"👉 _Reminders are explicitly disabled. To proceed, please update the status to ACCEPTED first via the edit cockpit fields panel view._"
             )
             await initiate_remind_portal_via_dm(update, context, success_banner=banner)
             return
@@ -405,9 +405,9 @@ async def execute_manual_remind_dispatch(update: Update, context: ContextTypes.D
             
             await query.edit_message_text(
                 text=(
-                    f"⚠️ **STATUS NOTICE:** Cannot push reminders out to the public thread channel for *{event_name}* "
-                    f"because its status is currently **{status or 'PENDING'}**.\n\n"
-                    f"❓ Would you like to update its row status to **ACCEPTED** right now inside the database to authorize this public broadcast?"
+                    f"⚠️ *STATUS NOTICE:* Cannot push reminders out to the public thread channel for *{event_name}* "
+                    f"because its status is currently *{status or 'PENDING'}*.\n\n"
+                    f"❓ Would you like to update its row status to *ACCEPTED* right now inside the database to authorize this public broadcast?"
                 ),
                 reply_markup=escrow_keyboard,
                 parse_mode="Markdown"

@@ -162,7 +162,7 @@ def parse_date_line(line: str) -> str:
             "Multiple dates Single/Multiple times:\n"
             "`31 aug, 9pm`\n"
             "`1 sep, 7pm 9pm`\n\n"
-            "Separate the date and time using a **comma (,)**"
+            "Separate the date and time using a *comma (,)*"
         )
 
     day_s, month_s, year_s = m.groups()

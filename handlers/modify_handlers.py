@@ -82,20 +82,20 @@ async def initiate_modify_via_dm(
 
     # Build the Public Summary Preview
     public_preview = (
-        f"👁️ ***Public Summary Preview:***\n"
-        f"🎭 **Event:** {row.get('EVENT NAME', 'TBD')}\n"
-        f"⏳ **Rehearsal:**\n{row.get('REHEARSAL DATE | TIME', 'TBD')}\n"
-        f"📅 **Perf Date:**\n{row.get('PERF DATE | TIME', 'TBD')}\n"
-        f"📍 **Location:** {row.get('LOCATION', 'TBD')}\n"
-        f"ℹ️ **Other Info:** {row.get('OTHER INFO', 'TBD')}\n"
+        f"👁️ *Public Summary Preview:*\n"
+        f"🎭 *Event:* {row.get('EVENT NAME', 'TBD')}\n"
+        f"⏳ *Rehearsal:*\n{row.get('REHEARSAL DATE | TIME', 'TBD')}\n"
+        f"📅 *Perf Date:*\n{row.get('PERF DATE | TIME', 'TBD')}\n"
+        f"📍 *Location:* {row.get('LOCATION', 'TBD')}\n"
+        f"ℹ️ *Other Info:* {row.get('OTHER INFO', 'TBD')}\n"
     )
 
     # Build the Internal Registry Preview
     internal_preview = (
-        f"🔒 ***Internal Registry (Will not be posted):***\n"
-        f"🏷️ **Event Type:** {row.get('EVENT TYPE', 'EXT')}\n"
-        f"💰 **Remuneration:** {row.get('REMUNATION', 'TBD')}\n"
-        f"🚥 **Status:** {row.get('STATUS', 'PENDING')}\n"
+        f"🔒 *Internal Registry (Will not be posted):*\n"
+        f"🏷️ *Event Type:* {row.get('EVENT TYPE', 'EXT')}\n"
+        f"💰 *Remuneration:* {row.get('REMUNATION', 'TBD')}\n"
+        f"🚥 *Status:* {row.get('STATUS', 'PENDING')}\n"
     )
 
     banner_text = f"{success_banner}\n\n" if success_banner else ""
@@ -104,7 +104,7 @@ async def initiate_modify_via_dm(
 
     prompt_text = (
         f"{banner_text}"
-        f"🛠️ ***Editing Performance: {row.get('EVENT NAME', 'Unnamed')} (ID: `{thread_id}`)***\n\n"
+        f"🛠️ *Editing Performance: {row.get('EVENT NAME', 'Unnamed')} (ID: `{thread_id}`)*\n\n"
         f"{public_preview}\n"
         f"{internal_preview}\n"
         f"_Select a field below to modify. Changes won't go live until you save._"
@@ -250,7 +250,7 @@ async def get_modify_field_callback(update: Update, context: ContextTypes.DEFAUL
                     await context.bot.send_message(
                         chat_id=CHAT_ID,
                         message_thread_id=thread_id,
-                        text="⚠️ **UPDATE:** Unfortunately, this performance has been cancelled. Thank you to everyone who showed interest!",
+                        text="⚠️ *UPDATE:* Unfortunately, this performance has been cancelled. Thank you to everyone who showed interest!",
                         parse_mode="Markdown"
                     )
                 except Exception as e:
@@ -321,7 +321,7 @@ async def get_modify_field_callback(update: Update, context: ContextTypes.DEFAUL
         buttons.append([InlineKeyboardButton("🦅 Exit to Cockpit", callback_data="DASH_VIEW|HOME")])
         
         # Inject the success message above the list prompt!
-        prompt_text = f"{success_msg}\n\n🛠️ ***Performance Modification Portal***\nWhich PERFORMANCE topic would you like to modify:"
+        prompt_text = f"{success_msg}\n\n🛠️ *Performance Modification Portal*\nWhich PERFORMANCE topic would you like to modify:"
         
         await query.edit_message_text(prompt_text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
         return ConversationHandler.END
@@ -449,7 +449,7 @@ async def apply_modify_value(update: Update, context: ContextTypes.DEFAULT_TYPE)
             [InlineKeyboardButton("🔙 Back to Dashboard", callback_data=f"MODIFY|BACK_TO_MENU|{thread_id}")]
         ])
         
-        error_prompt = f"⚠️ **ERROR:** {str(exc)}\n\n👉 **Please re-enter matching guidelines:**"
+        error_prompt = f"⚠️ *ERROR:* {str(exc)}\n\n👉 *Please re-enter matching guidelines:*"
         if raw_value and raw_value != "-":
             error_prompt += f"\n\n📋 *Previous Value (Tap box below to copy instantly):*\n```\n{raw_value}```\n"
             

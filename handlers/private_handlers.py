@@ -28,18 +28,18 @@ MAIN_ADMIN_TOPIC_ONLY_TEXT = (
 )
 
 DASHBOARD_TEXT = (
-    "🥁 ***NTUFD Command Centre*** 🥁\n"
+    "🥁 *NTUFD Command Centre* 🥁\n"
     "Welcome back, maestro! 🎶 The whole show runs from here.\n\n"
-    "📂 ***Workspace Guide:***\n"
-    "🎭 *Events:* Create topics, modify details, or view the overall ledger.\n"
-    "✅ *Rosters:* Log attendance, view the thread index, or check member status.\n"
-    "📢 *Comms:* Broadcast announcements or trigger manual checklists.\n\n"
-    "🤖 ***Active Background Autopilots:***\n"
-    "• Training Polls (D-4 @ 9AM) & Eve Reminders (10PM)\n"
-    "• Perf. Checklists & Admin Nudges (D-7)\n"
-    "• Welcome Tea Staging & Auto-invites\n"
-    "• Live Member Join/Leave Sheet Tracking\n"
-    "• Strict Forum Topic Moderation\n\n"
+    "📂 *Workspace Guide:*\n"
+    "🎭 *Events:* Create Topics | Modify Perf Details | Perf Ledger Preview\n"
+    "✅ *Rosters:* Attendance | Topic Thread Index | Member Roaster\n"
+    "📢 *Comms:* Broadcast Announcements | Auto/Manual Checklists.\n\n"
+    "🤖 *Active Bot Background Autopilots:*\n"
+    "• *Attendance:* Auto-sends regular training attendance poll 4 days ahead, plus a night-before reminder at 10 PM.\n"
+    "• *Performance Pre-flight:* Triggers final checklists and admin nudges exactly 7 days before gig day.\n"
+    "• *Recruitment Engine:* Manages the Welcome Tea RSVP timeline and auto-verifies new members.\n"
+    "• *Database Sync:* Silently updates your Google Sheet the moment members join or leave the chat.\n"
+    "• *Forum Security:* Instantly deletes unauthorized topics to keep your channels perfectly clean.\n\n"
     "👇 *Pick your move:*"
 )
 
@@ -142,7 +142,7 @@ async def _show_perf_summary(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
     
     prompt_text = (
-        f"📋 **Performance Topic Entry Preview**\n"
+        f"📋 *Performance Topic Entry Preview*\n"
         f"Plss verify all fields details before creating\n\n"
         f"{summary_card}"
     )
@@ -263,7 +263,7 @@ async def render_modify_list(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 buttons.append([InlineKeyboardButton(f"⚙️ {event_name} ({tid})", callback_data=f"LIST_MODIFY|{tid}")])
         
         buttons.append([InlineKeyboardButton("🦅 Exit to Cockpit", callback_data="DASH_VIEW|HOME")])
-        prompt_text = "🛠️ ***Performance Modification Portal***\nWhich PERFORMANCE topic would you like to modify:"
+        prompt_text = "🛠️ *Performance Modification Portal*\nWhich PERFORMANCE topic would you like to modify:"
         markup = InlineKeyboardMarkup(buttons)
         
         if incoming_query:
@@ -302,7 +302,7 @@ async def handle_private_command(update: Update, context: ContextTypes.DEFAULT_T
                 try:
                     await context.bot.edit_message_text(chat_id=message.chat.id, message_id=current_dash_id, text=DASHBOARD_TEXT, reply_markup=_dashboard_keyboard(), parse_mode="Markdown")
                 except Exception: pass
-            await message.reply_text("🛑 **Wizard Cancelled**\nYour active configuration flow was terminated cleanly.", parse_mode="Markdown")
+            await message.reply_text("🛑 *Wizard Cancelled*\nYour active configuration flow was terminated cleanly.", parse_mode="Markdown")
             return
 
     command, thread_token, payload = _parse_command_payload(text)
@@ -369,10 +369,10 @@ async def handle_private_command(update: Update, context: ContextTypes.DEFAULT_T
             
             tracker = _build_progress_tracker(context.user_data)
             error_prompt = (
-                f"⚠️ **ERROR:** {str(e)}\n\n"
+                f"⚠️ *ERROR:* {str(e)}\n\n"
                 f"{tracker}"
-                f"✏️ **Updating Rehearsal Date & Time**\n"
-                f"👉 **Please re-enter matching the format guidelines above:**"
+                f"✏️ *Updating Rehearsal Date & Time*\n"
+                f"👉 *Please re-enter matching the format guidelines above:*"
             )
             
             old_val = context.user_data.get("temp_rehearsal", "")
@@ -426,10 +426,10 @@ async def handle_private_command(update: Update, context: ContextTypes.DEFAULT_T
             
             tracker = _build_progress_tracker(context.user_data)
             error_prompt = (
-                f"⚠️ **ERROR:** {str(e)}\n\n"
+                f"⚠️ *ERROR:* {str(e)}\n\n"
                 f"{tracker}"
-                f"✏️ **Updating Performance Date & Time**\n"
-                f"👉 **Please re-enter matching the format guidelines above:**"
+                f"✏️ *Updating Performance Date & Time*\n"
+                f"👉 *Please re-enter matching the format guidelines above:*"
             )
             
             old_val = context.user_data.get("temp_perf_date", "")
@@ -514,7 +514,7 @@ async def handle_private_command(update: Update, context: ContextTypes.DEFAULT_T
                 except Exception: pass
                 await context.bot.edit_message_text(
                     chat_id=message.chat.id, message_id=active_dash_id,
-                    text=f"❓ **Confirm creation request**\n\nWould you like to build the following **OTHERS** forum topic channel entry?\n• Title: `{text}`",
+                    text=f"❓ *Confirm creation request*\n\nWould you like to build the following *OTHERS* forum topic channel entry?\n• Title: `{text}`",
                     reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown"
                 )
                 context.user_data["dm_state"] = None
@@ -566,7 +566,7 @@ async def handle_confirm_new_perf(update: Update, context: ContextTypes.DEFAULT_
 
     active_dash_id = context.user_data.get("master_dash_id")
     if active_dash_id and query.message.message_id != active_dash_id:
-        await query.message.edit_text("🛑 **This menu panel has expired!**\n\nPlease use the latest menu screen at the bottom of your screen!", reply_markup=None)
+        await query.message.edit_text("🛑 *This menu panel has expired!*\n\nPlease use the latest menu screen at the bottom of your screen!", reply_markup=None)
         return
 
     if data.startswith("MANUAL_REMIND_TID|"):
@@ -628,11 +628,11 @@ async def handle_confirm_new_perf(update: Update, context: ContextTypes.DEFAULT_
         field_to_clear = data.split("|")[1]
         state_map = {
             "temp_event_type": (None, "🎭 *Event Type Selection*\nIs this External or Internal?"),
-            "temp_event_name": (PERF_EVENT_NAME, "✏️ **Updating Event Name**\nWhat is the adjusted name of this performance?"),
-            "temp_rehearsal": (PERF_REHEARSAL, "✏️ **Updating Rehearsal Date & Time**\nEnter scheduling details below:"),
-            "temp_perf_date": (PERF_DATE, "✏️ **Updating Performance Date & Time**\nEnter scheduling details below:"),
-            "temp_location": (PERF_LOCATION, "✏️ **Updating Location**\nEnter localized arena info below:"),
-            "temp_other_info": (PERF_OTHER_INFO, "✏️ **Updating Other Info**\nEnter additional remarks below:")
+            "temp_event_name": (PERF_EVENT_NAME, "✏️ *Updating Event Name*\nWhat is the adjusted name of this performance?"),
+            "temp_rehearsal": (PERF_REHEARSAL, "✏️ *Updating Rehearsal Date & Time*\nEnter scheduling details below:"),
+            "temp_perf_date": (PERF_DATE, "✏️ *Updating Performance Date & Time*\nEnter scheduling details below:"),
+            "temp_location": (PERF_LOCATION, "✏️ *Updating Location*\nEnter localized arena info below:"),
+            "temp_other_info": (PERF_OTHER_INFO, "✏️ *Updating Other Info*\nEnter additional remarks below:")
         }
         if field_to_clear in state_map:
             target_state, text_prompt = state_map[field_to_clear]
@@ -655,7 +655,7 @@ async def handle_confirm_new_perf(update: Update, context: ContextTypes.DEFAULT_
                         f"*Examples:*\n"
                         f"• Single date Single time: `31 aug, 9pm`\n"
                         f"• Single date Multiple times: `1 sep, 7pm 9pm`\n\n"
-                        f"👉 _Separate date/time with a **comma (,)**._"
+                        f"👉 _Separate date/time with a comma (,)._"
                     )
 
             # 🎯 FIX FOR POINT 1: Added explicit "\n" right after the open backticks to resolve the markdown language parser glitch!
@@ -683,7 +683,7 @@ async def handle_confirm_new_perf(update: Update, context: ContextTypes.DEFAULT_
             
         context.user_data["dm_state"] = WAITING_TOPIC_TITLE
         step_one_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Type Selection", callback_data="DASH_VIEW|LAUNCH_NEW")]])
-        await query.edit_message_text(f"Selected Type: **{selected_type}** ☕\n\n**Step 1:** Please type and enter the **Topic Title** for the group forum below:", reply_markup=step_one_keyboard, parse_mode="Markdown")
+        await query.edit_message_text(f"Selected Type: *{selected_type}* ☕\n\n*Step 1:* Please type and enter the *Topic Title* for the group forum below:", reply_markup=step_one_keyboard, parse_mode="Markdown")
         return
 
     if data.startswith("PERF_EVENT_TYPE|"):
@@ -708,7 +708,7 @@ async def handle_confirm_new_perf(update: Update, context: ContextTypes.DEFAULT_
                 
             context.user_data["dm_state"] = PERF_DATE
             tracker = _build_progress_tracker(context.user_data)
-            prompt = f"{tracker}📅 *Step 4/6: Performance Date & Time*\n\nSeparate date/time with a **comma (,)**."
+            prompt = f"{tracker}📅 *Step 4/6: Performance Date & Time*\n\nSeparate date/time with a *comma (,)*."
             await query.edit_message_text(text=prompt, reply_markup=_get_back_keyboard("temp_rehearsal"), parse_mode="Markdown")
         elif field == "other_info":
             context.user_data["temp_other_info"] = "-"
@@ -814,7 +814,7 @@ async def handle_dashboard_navigation(update: Update, context: ContextTypes.DEFA
     active_dash_id = context.user_data.get("master_dash_id")
     if active_dash_id and query.message.message_id != active_dash_id:
         await query.message.edit_text(
-            "🛑 **This menu panel has expired!**\n\n"
+            "🛑 *This menu panel has expired!*\n\n"
             "You opened a newer dashboard bubble further down in your chat history. "
             "Please use the latest menu screen at the bottom of your screen!",
             reply_markup=None
@@ -851,7 +851,7 @@ async def handle_dashboard_navigation(update: Update, context: ContextTypes.DEFA
             # Sort records descending (Latest date first, TBD/Blank at the bottom)
             sorted_records = sorted(records, key=get_sort_date, reverse=True)
 
-            lines = ["📊 ***Performance Status Ledger***\nQuick overview of all registered bookings\n"]
+            lines = ["📊 *Performance Status Ledger*\nQuick overview of all registered bookings\n"]
             for row in sorted_records:
                 event_name = row.get("EVENT NAME", "Unnamed Event")
                 status = row.get("STATUS", "").strip().upper() or "PENDING"
@@ -870,7 +870,7 @@ async def handle_dashboard_navigation(update: Update, context: ContextTypes.DEFA
                     else:
                         date_display = first_date
 
-                lines.append(f"{emoji} **{event_name}** | {date_display}")
+                lines.append(f"{emoji} *{event_name}* | {date_display}")
             text = "\n".join(lines)
             
         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🦅 Exit to Cockpit", callback_data="DASH_VIEW|HOME")]])
@@ -879,15 +879,15 @@ async def handle_dashboard_navigation(update: Update, context: ContextTypes.DEFA
 
     elif target_view == "THREADS":
         records = get_cached_records()
-        lines = ["🧵 ***Forum Thread Directory Chart***\nAn overview of individual topic Thread IDs\n"]
-        lines.append("• `0` | 💬 **General/Chit Chat Channel**")
-        lines.append("• `53` | 📅 **Attendance**")
+        lines = ["🧵 *Forum Thread Directory Chart*\nAn overview of individual topic Thread IDs\n"]
+        lines.append("• `0` | 💬 *General/Chit Chat Channel*")
+        lines.append("• `53` | 📅 *Attendance*")
         for row in records:
             tid = row.get("THREAD ID")
-            if str(tid).isdigit(): lines.append(f"• `{tid}` | 🎭 *PERF:* **{row.get('EVENT NAME', 'Unnamed Event')}**")
+            if str(tid).isdigit(): lines.append(f"• `{tid}` | 🎭 *PERF:* *{row.get('EVENT NAME', 'Unnamed Event')}*")
         try:
             for o_row in get_cached_values(tab_name="OTHERS"):
-                if o_row and str(o_row[0]).isdigit(): lines.append(f"• `{o_row[0]}` | ☕ *OTHERS:* **{o_row[1] if len(o_row) > 1 and o_row[1] else 'Unnamed'}**")
+                if o_row and str(o_row[0]).isdigit(): lines.append(f"• `{o_row[0]}` | ☕ *OTHERS:* *{o_row[1] if len(o_row) > 1 and o_row[1] else 'Unnamed'}*")
         except Exception: pass
         text = "\n".join(lines)
         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🦅 Exit to Cockpit", callback_data="DASH_VIEW|HOME")]])
@@ -909,7 +909,7 @@ async def handle_dashboard_navigation(update: Update, context: ContextTypes.DEFA
             group = [(lbl, nm) for _sk, tok, lbl, nm in members if tok == token]
             label = group[0][0] if group else "Group"
             names = [nm for _lbl, nm in group]
-            lines = [f"👥 **Active Members — {label}**\n_{len(names)} members_\n"]
+            lines = [f"👥 *Active Members — {label}*\n_{len(names)} members_\n"]
             lines += [f"• {n}" for n in names] or ["_(none)_"]
             keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("🔙 Back to Group Menu", callback_data="DASH_VIEW|MEMBERS")],
@@ -919,7 +919,7 @@ async def handle_dashboard_navigation(update: Update, context: ContextTypes.DEFA
 
         # --- Group menu: groups in seniority order (Graduates → years → named → —) ---
         if not members:
-            text = "👥 **Active Member Roster Listing**\n\n📭 No members marked *Active* in the MEMBER INFO sheet yet."
+            text = "👥 *Active Member Roster Listing*\n\n📭 No members marked *Active* in the MEMBER INFO sheet yet."
             keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🦅 Exit to Cockpit", callback_data="DASH_VIEW|HOME")]])
         else:
             order, meta = [], {}
@@ -929,7 +929,7 @@ async def handle_dashboard_navigation(update: Update, context: ContextTypes.DEFA
                     order.append(tok)
                 meta[tok]["count"] += 1
             text = (
-                "👥 **Active Member Roster Listing**\n"
+                "👥 *Active Member Roster Listing*\n"
                 f"_{len(members)} active members — pick a group to view:_"
             )
             buttons = [
@@ -962,7 +962,7 @@ async def handle_dashboard_navigation(update: Update, context: ContextTypes.DEFA
             [InlineKeyboardButton("☕ OTHERS (Bonding/Misc)", callback_data="TYPE_SELECTED|OTHERS")],
             [InlineKeyboardButton("🦅 Exit to Cockpit", callback_data="DASH_VIEW|HOME")]
         ]
-        await query.edit_message_text("📝 **Topic Creation Wizard**\nWhat kind of topic are you creating inside the group forum?", reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.edit_message_text("📝 *Topic Creation Wizard*\nWhat kind of topic are you creating inside the group forum?", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
         return
 
     elif target_view == "LAUNCH_MODIFY":

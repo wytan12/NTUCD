@@ -44,7 +44,7 @@ WELCOME_TEA_DETAILS_TEXT = (
 )
 
 WELCOME_TEA_REMINDER_TEXT = (
-    "🥁 ***Just a gentle little reminder!***\n\n"
+    "🥁 *Just a gentle little reminder!*\n\n"
     "Our Welcome Tea is coming up, and we'd love to know if you can make it. Please let us know by confirming below—we hope to see you there! 😊✨"
 )
 
@@ -212,6 +212,7 @@ async def _send_welcome_tea_reminder(bot, user_id: int):
     await bot.send_message(
         chat_id=user_id,
         text=WELCOME_TEA_REMINDER_TEXT,
+        parse_mode=ParseMode.MARKDOWN,
     )
 
 

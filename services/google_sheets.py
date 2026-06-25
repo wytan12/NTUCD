@@ -63,6 +63,7 @@ _records_cache = {}
 _values_cache = {}
 _modified_time_cache = {}
 _MODIFIED_TIME_TTL_SECONDS = 30
+_role_cache: dict = {}  # {tele_id: "main" | "secondary" | None}
 
 def _spreadsheet_modified_time(sheet_name, force=False):
     """Return the spreadsheet's Drive modifiedTime string, or None on error."""
@@ -118,8 +119,10 @@ def invalidate_sheet_cache(sheet_name=None, tab_name=None):
 
     if sheet_name is None:
         _modified_time_cache.clear()
+        _role_cache.clear()
     else:
         _modified_time_cache.pop(sheet_name, None)
+        _role_cache.clear()  # role data lives in MEMBER INFO; any sheet write may affect it
 
     for cache in (_records_cache, _values_cache):
         if sheet_name is None:
@@ -659,22 +662,76 @@ def get_dashboard_admin_ids(force=False):
     return role_ids if role_ids else _config_admin_ids()
 
 
-def is_dashboard_admin(user_id, force=True) -> bool:
-    """True if `user_id` may use the admin DM dashboard (either tier).
+def _get_user_role(user_id: int) -> str | None:
+    """Return "main", "secondary", or None for this Tele ID.
 
-    Active user controls force a fresh MEMBER INFO role read by default, so role
-    edits take effect on the next bot interaction.
+    Checks the per-user cache first. On a miss, scans the smart-cached MEMBER INFO
+    values (already in memory; only re-downloaded when the sheet actually changed)
+    for that one row and reads their Role/Position. Caches the result so every
+    subsequent check for the same user is a pure dict lookup.
+    Cleared by invalidate_sheet_cache() so role changes propagate on the next
+    interaction after a sheet edit or admin ♻️ Refresh.
+    """
+    from config import MEMBER_INFO_TAB
+    uid = int(user_id)
+    if uid in _role_cache:
+        return _role_cache[uid]
+    try:
+        values = get_cached_values(tab_name=MEMBER_INFO_TAB)
+        if not values:
+            _role_cache[uid] = None
+            return None
+        header = [h.strip().lower() for h in values[0]]
+        try:
+            role_i = header.index("role/position")
+            tele_i = header.index("tele id")
+        except ValueError:
+            print("[ADMIN][WARN] Role/Position or Tele ID column not found in MEMBER INFO.")
+            return None
+        role = None
+        for row in values[1:]:
+            tid = row[tele_i].strip() if tele_i < len(row) else ""
+            if not tid.isdigit() or int(tid) != uid:
+                continue
+            r = row[role_i].strip().lower() if role_i < len(row) else ""
+            if any(k in r for k in MAIN_ADMIN_ROLE_KEYWORDS):
+                role = "main"
+            elif any(k in r for k in SECONDARY_ADMIN_ROLE_KEYWORDS):
+                role = "secondary"
+            break  # found the user's row — stop scanning
+        _role_cache[uid] = role
+        return role
+    except Exception as e:
+        print(f"[ADMIN][WARN] Role lookup failed for {user_id}: {e}")
+        return None
+
+
+def is_dashboard_admin(user_id, force=False) -> bool:
+    """True if `user_id` may use the admin DM dashboard (MAIN or SECONDARY tier).
+
+    Uses the per-user role cache — instant after the first lookup. The cache is
+    cleared by invalidate_sheet_cache() on any sheet edit or Refresh, so role
+    changes propagate on the next interaction without a forced re-download.
+    Falls back to config.ADMIN_DM_USER_IDS only when MEMBER INFO is unreachable.
     """
     try:
-        return int(user_id) in get_dashboard_admin_ids(force=force)
+        uid = int(user_id)
+        role = _get_user_role(uid)
+        if role in ("main", "secondary"):
+            return True
+        # Emergency fallback: config ids used only when sheet is unreachable
+        # (role would be None due to exception, not because no row matched)
+        if uid in _config_admin_ids() and not get_cached_values(tab_name=MEMBER_INFO_TAB):
+            return True
+        return False
     except (TypeError, ValueError):
         return False
 
 
-def is_main_admin(user_id, force=True) -> bool:
+def is_main_admin(user_id, force=False) -> bool:
     """True if `user_id` has a MAIN admin role."""
     try:
-        return int(user_id) in get_alert_admin_ids(force=force)
+        return _get_user_role(int(user_id)) == "main"
     except (TypeError, ValueError):
         return False
 

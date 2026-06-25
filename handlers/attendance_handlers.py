@@ -223,7 +223,6 @@ async def _show_perf_events(query, context: ContextTypes.DEFAULT_TYPE, success_b
 async def start_attendance_modify(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_dashboard_admin(update.effective_user.id):
         return
-    context.user_data["_admin_verified"] = True  # cache for this session
     old_master = context.user_data.get("master_dash_id")
     _clear(context)
     _clear_moddate(context)
@@ -260,12 +259,8 @@ async def attendance_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     await query.answer()
 
-    # Use session-cached result to avoid a Google Sheets read on every button tap.
-    # The full check runs once in start_attendance_modify / handle_dashboard_navigation.
-    if not context.user_data.get("_admin_verified"):
-        if not is_dashboard_admin(update.effective_user.id):
-            return
-        context.user_data["_admin_verified"] = True
+    if not is_dashboard_admin(update.effective_user.id):
+        return
 
     # 🔒 Only the LATEST dashboard / attendance bubble is live. After a fresh
     # /start (or /attd) `master_dash_id` points at the newest panel, so a click on

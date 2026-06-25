@@ -24,6 +24,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 🧼 Clear out any stale session context variables first
     saved_master_id = context.user_data.get("master_dash_id")
     context.user_data.clear()
+    context.user_data["_admin_verified"] = True  # skip redundant sheet reads for callbacks
 
     # 🛑 Neutralise the PREVIOUS panel so whatever sub-section it was showing can
     # no longer be operated. Everything runs as one in-place bubble, so the old

@@ -22,7 +22,7 @@ from services.google_sheets import (
     get_training_date_columns, get_attendees_for_date, commit_attendance_column,
     parse_sheet_date, replace_training_date_column,
     get_perf_event_list, get_perf_event_column, get_perf_attendees, commit_perf_column,
-    is_dashboard_admin, get_training_poll_ref,
+    get_training_poll_ref,
 )
 from services.date_parser import parse_date_line
 
@@ -258,9 +258,6 @@ async def attendance_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     data = query.data
 
     await query.answer()
-
-    if not is_dashboard_admin(update.effective_user.id):
-        return
 
     # 🔒 Only the LATEST dashboard / attendance bubble is live. After a fresh
     # /start (or /attd) `master_dash_id` points at the newest panel, so a click on

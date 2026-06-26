@@ -355,11 +355,13 @@ async def handle_private_command(update: Update, context: ContextTypes.DEFAULT_T
         prompt = (
             f"{tracker}📅 *Step 3/6: Rehearsal Date & Time*\n\n"
             f"*Examples:*\n"
-            f"• Single date Single time: `31 aug, 9pm`\n"
-            f"• Single date Multiple times: `1 sep, 7pm 2100`\n"
-            f"• Multiple dates Single/Multiple times:\n"
-            f"`31 aug, 9pm`\n"
-            f"`1 sep, 7pm 2100`"
+            f"• `31 aug, 9pm`\n"
+            f"• `31 aug, 7pm 9pm`\n"
+            f"• `31 aug, 7am / 9am - 6pm`\n"
+            f"• `31 aug, 9am - 6pm / 8pm - 10pm`\n"
+            f"• `31 aug` — date only (no specific time)\n\n"
+            f"For multiple dates: separate into new lines\n"
+            f"Separate the date and time using a *comma (,)*"
         )
         
         rehearsal_keyboard = InlineKeyboardMarkup([
@@ -386,7 +388,7 @@ async def handle_private_command(update: Update, context: ContextTypes.DEFAULT_T
                 f"⚠️ *ERROR:* {str(e)}\n\n"
                 f"{tracker}"
                 f"✏️ *Updating Rehearsal Date & Time*\n"
-                f"👉 *Please re-enter matching the format guidelines above:*"
+                f"👉 _Please re-enter:_"
             )
             
             old_val = context.user_data.get("temp_rehearsal", "")
@@ -417,11 +419,13 @@ async def handle_private_command(update: Update, context: ContextTypes.DEFAULT_T
         prompt = (
             f"{tracker}📅 *Step 4/6: Performance Date & Time*\n\n"
             f"*Examples:*\n"
-            f"• Single date Single time: `31 aug, 9pm`\n"
-            f"• Single date Multiple times: `1 sep, 7pm 2100`\n"
-            f"• Multiple dates Single/Multiple times:\n"
-            f"`31 aug, 9pm`\n"
-            f"`1 sep, 7pm 2100`"
+            f"• `31 aug, 9pm`\n"
+            f"• `31 aug, 7pm 9pm`\n"
+            f"• `31 aug, 7am / 9am - 6pm`\n"
+            f"• `31 aug, 9am - 6pm / 8pm - 10pm`\n"
+            f"• `31 aug` — date only (no specific time)\n\n"
+            f"For multiple dates: separate into new lines\n"
+            f"Separate the date and time using a *comma (,)*"
         )
         
         perf_date_keyboard = InlineKeyboardMarkup([
@@ -448,7 +452,7 @@ async def handle_private_command(update: Update, context: ContextTypes.DEFAULT_T
                 f"⚠️ *ERROR:* {str(e)}\n\n"
                 f"{tracker}"
                 f"✏️ *Updating Performance Date & Time*\n"
-                f"👉 *Please re-enter matching the format guidelines above:*"
+                f"👉 _Please re-enter:_"
             )
             
             old_val = context.user_data.get("temp_perf_date", "")
@@ -587,6 +591,8 @@ async def handle_confirm_new_perf(update: Update, context: ContextTypes.DEFAULT_
     if active_dash_id and query.message.message_id != active_dash_id:
         await query.message.edit_text("🛑 *This menu panel has expired!*\n\nPlease use the latest menu screen at the bottom of your screen!", reply_markup=None)
         return
+    if not active_dash_id:
+        context.user_data["master_dash_id"] = query.message.message_id
 
     if data.startswith("MANUAL_REMIND_TID|"):
         await query.answer()
@@ -672,9 +678,13 @@ async def handle_confirm_new_perf(update: Update, context: ContextTypes.DEFAULT_
                     prompt_header = (
                         f"{tracker}{text_prompt}\n\n"
                         f"*Examples:*\n"
-                        f"• Single date Single time: `31 aug, 9pm`\n"
-                        f"• Single date Multiple times: `1 sep, 7pm 9pm`\n\n"
-                        f"👉 _Separate date/time with a comma (,)._"
+                        f"• `31 aug, 9pm`\n"
+                        f"• `31 aug, 7pm 9pm`\n"
+                        f"• `31 aug, 7am / 9am - 6pm`\n"
+                        f"• `31 aug, 9am - 6pm / 8pm - 10pm`\n"
+                        f"• `31 aug` — date only (no specific time)\n\n"
+                        f"For multiple dates: separate into new lines\n"
+                        f"Separate the date and time using a *comma (,)*"
                     )
 
             # 🎯 FIX FOR POINT 1: Added explicit "\n" right after the open backticks to resolve the markdown language parser glitch!
@@ -745,11 +755,13 @@ async def handle_confirm_new_perf(update: Update, context: ContextTypes.DEFAULT_
             prompt = (
                 f"{tracker}📅 *Step 4/6: Performance Date & Time*\n\n"
                 f"*Examples:*\n"
-                f"• Single date Single time: `31 aug, 9pm`\n"
-                f"• Single date Multiple times: `1 sep, 7pm 2100`\n"
-                f"• Multiple dates Single/Multiple times:\n"
-                f"`31 aug, 9pm`\n"
-                f"`1 sep, 7pm 2100`"
+                f"• `31 aug, 9pm`\n"
+                f"• `31 aug, 7pm 9pm`\n"
+                f"• `31 aug, 7am / 9am - 6pm`\n"
+                f"• `31 aug, 9am - 6pm / 8pm - 10pm`\n"
+                f"• `31 aug` — date only (no specific time)\n\n"
+                f"For multiple dates: separate into new lines\n"
+                f"Separate the date and time using a *comma (,)*"
             )
             perf_date_keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("⏭ Skip (Date TBD)", callback_data="SKIP_PERF_FIELD|perf_date")],
@@ -877,6 +889,8 @@ async def handle_dashboard_navigation(update: Update, context: ContextTypes.DEFA
             reply_markup=None
         )
         return
+    if not active_dash_id:
+        context.user_data["master_dash_id"] = query.message.message_id
 
     if target_view == "HOME":
         await query.edit_message_text(DASHBOARD_TEXT, reply_markup=_dashboard_keyboard(), parse_mode="Markdown")

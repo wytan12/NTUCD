@@ -294,6 +294,8 @@ async def attendance_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         except Exception:
             pass
         return
+    if not active and query.message:
+        context.user_data["master_dash_id"] = query.message.message_id
 
     # Ensure attd_bubble_id is set (adopt this live bubble for in-place edits)
     if not context.user_data.get("attd_bubble_id"):

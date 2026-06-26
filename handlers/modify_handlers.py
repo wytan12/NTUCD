@@ -80,14 +80,16 @@ async def initiate_modify_via_dm(
     pending_edits = _get_pending_edits(context, thread_id)
     row = _with_pending_edits(row, context, thread_id)
 
-    # Build the Public Summary Preview
+    # Build the Public Summary Preview using the same formatter as the pinned post
     public_preview = (
-        f"👁️ *Public Summary Preview:*\n"
-        f"🎭 *Event:* {row.get('EVENT NAME', 'TBD')}\n"
-        f"⏳ *Rehearsal:*\n{row.get('REHEARSAL DATE | TIME', 'TBD')}\n"
-        f"📅 *Perf Date:*\n{row.get('PERF DATE | TIME', 'TBD')}\n"
-        f"📍 *Location:* {row.get('LOCATION', 'TBD')}\n"
-        f"ℹ️ *Other Info:* {row.get('OTHER INFO', 'TBD')}\n"
+        f"👁️ *Public Summary Preview:*\n\n"
+        + build_performance_summary(
+            event_name=row.get("EVENT NAME", "TBD"),
+            rehearsal_date=row.get("REHEARSAL DATE | TIME", "-"),
+            perf_date=row.get("PERF DATE | TIME", "TBD"),
+            location=row.get("LOCATION", "TBD"),
+            other_info=row.get("OTHER INFO", "-"),
+        )
     )
 
     # Build the Internal Registry Preview
@@ -99,13 +101,13 @@ async def initiate_modify_via_dm(
     )
 
     banner_text = f"{success_banner}\n\n" if success_banner else ""
-    if pending_edits:
+    if pending_edits and not success_banner:
         banner_text += "⚠️ *Unsaved edits are shown below. Tap Save & Push Updates to go live.*\n\n"
 
     prompt_text = (
         f"{banner_text}"
         f"🛠️ *Editing Performance: {row.get('EVENT NAME', 'Unnamed')} (ID: `{thread_id}`)*\n\n"
-        f"{public_preview}\n"
+        f"{public_preview}\n\n"
         f"{internal_preview}\n"
         f"_Select a field below to modify. Changes won't go live until you save._"
     )
@@ -113,20 +115,20 @@ async def initiate_modify_via_dm(
     # 8-Button Grid + Save + Back to N-1
     keyboard = [
         [
-            InlineKeyboardButton("Event Type", callback_data=f"MODIFY|EVENT_TYPE|{thread_id}"),
-            InlineKeyboardButton("Event Name", callback_data=f"MODIFY|EVENT_NAME|{thread_id}")      
+            InlineKeyboardButton("🏷️ Event Type", callback_data=f"MODIFY|EVENT_TYPE|{thread_id}"),
+            InlineKeyboardButton("📝 Event Name", callback_data=f"MODIFY|EVENT_NAME|{thread_id}")
         ],
         [
-            InlineKeyboardButton("Rehearsal", callback_data=f"MODIFY|REHEARSAL_DATE|{thread_id}"),
-            InlineKeyboardButton("Perf Date", callback_data=f"MODIFY|PERF_DATE|{thread_id}")
+            InlineKeyboardButton("🔁 Rehearsal", callback_data=f"MODIFY|REHEARSAL_DATE|{thread_id}"),
+            InlineKeyboardButton("📅 Perf Date", callback_data=f"MODIFY|PERF_DATE|{thread_id}")
         ],
         [
-            InlineKeyboardButton("Location", callback_data=f"MODIFY|LOCATION|{thread_id}"),
-            InlineKeyboardButton("Other Info", callback_data=f"MODIFY|OTHER_INFO|{thread_id}")
+            InlineKeyboardButton("📍 Location", callback_data=f"MODIFY|LOCATION|{thread_id}"),
+            InlineKeyboardButton("ℹ️ Other Info", callback_data=f"MODIFY|OTHER_INFO|{thread_id}")
         ],
         [
-            InlineKeyboardButton("Remuneration", callback_data=f"MODIFY|REMUNERATION|{thread_id}"),
-            InlineKeyboardButton("Status", callback_data=f"MODIFY|STATUS|{thread_id}")
+            InlineKeyboardButton("💰 Remuneration", callback_data=f"MODIFY|REMUNERATION|{thread_id}"),
+            InlineKeyboardButton("🚥 Status", callback_data=f"MODIFY|STATUS|{thread_id}")
         ],
         [InlineKeyboardButton("💾 Save & Push Updates", callback_data=f"MODIFY|PUBLISH_SUMMARY|{thread_id}")],
         [InlineKeyboardButton("🔙 Back to Topic Selection", callback_data=f"MODIFY|BACK_TO_LIST|{thread_id}")]
@@ -175,6 +177,7 @@ async def get_modify_field_callback(update: Update, context: ContextTypes.DEFAUL
 
     if field == "BACK_TO_LIST":
         context.user_data.pop("modify_field", None)
+        _clear_pending_edits(context, thread_id)
         from handlers.private_handlers import render_modify_list
         await render_modify_list(update, context, incoming_query=query)
         return ConversationHandler.END
@@ -365,31 +368,30 @@ async def get_modify_field_callback(update: Update, context: ContextTypes.DEFAUL
         prompt_text = (
             "🔁 *Update Rehearsal Date & Time*\n\n"
             "*Examples:*\n"
-            "Single date Single time: `31 aug 9pm`\n"
-            "Single date Multiple times: `1 sep 7pm 2100`\n"
-            "Multiple dates Single/Multiple times:\n"
-            "`31 aug 9pm`\n"
-            "`1 sep 7pm 2100`\n\n"
-            
-            "👉 _Type your new value below (or type `-` to clear it):_"
+            "• `31 aug, 9pm`\n"
+            "• `31 aug, 7pm 9pm`\n"
+            "• `31 aug, 7am / 9am - 6pm`\n"
+            "• `31 aug, 9am - 6pm / 8pm - 10pm`\n"
+            "• `31 aug` — date only (no specific time)\n"
+            "Multiple dates: separate into new lines\n\n"
+            "👉 Type your new value below (or type `-` to clear it)"
         )
     elif field == "PERF DATE | TIME":
         prompt_text = (
             "📅 *Update Performance Date & Time*\n\n"
-            
             "*Examples:*\n"
-            "Single date Single time: `31 aug 9pm`\n"
-            "Single date Multiple times: `1 sep 7pm 2100`\n"
-            "Multiple dates Single/Multiple times:\n"
-            "`31 aug 9pm`\n"
-            "`1 sep 7pm 2100`\n\n"
-            
-            "👉 _Type your new value below (or type `-` to clear it):_"
+            "• `31 aug, 9pm`\n"
+            "• `31 aug, 7pm 9pm`\n"
+            "• `31 aug, 7am / 9am - 6pm`\n"
+            "• `31 aug, 9am - 6pm / 8pm - 10pm`\n"
+            "• `31 aug` — date only (no specific time)\n"
+            "Multiple dates: separate into new lines\n\n"
+            "👉 Type your new value below (or type `-` to clear it)"
         )
     elif field == "REMUNATION":
-        prompt_text = f"💰 Enter the *Remuneration* details for *{current_event_name}*:\n\n👉 _Type your new value below:_"
+        prompt_text = f"💰 Enter the *Remuneration* details for *{current_event_name}*:\n\n👉 Type your new value below:"
     else:
-        prompt_text = f"✏️ Enter the new *{field}* for *{current_event_name}*:\n\n👉 _Type your new value below:_"
+        prompt_text = f"✏️ Enter the new *{field}* for *{current_event_name}*:\n\n👉 Type your new value below:"
 
     records = context.user_data.get("cached_records", [])
     row_record = next((r for r in records if str(r.get("THREAD ID")) == str(thread_id)), None)

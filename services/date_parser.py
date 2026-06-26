@@ -18,7 +18,7 @@ def _parse_time_token(token: str) -> str | None:
     # 🎯 FIX 1: Handle pre-formatted colon times that might have an AM/PM suffix attached (e.g., '9:00pm', '10:30am')
     if ('am' in t or 'pm' in t) and ':' in t:
         suffix = 'PM' if 'pm' in t else 'AM'
-        cleaned_num = re.sub(r'[a-zA-Z:\.]', '', t) # Extract digits only
+        cleaned_num = re.sub(r'[a-zA-Z:\.\s]', '', t) # Extract digits only
         if len(cleaned_num) <= 2:
             return f"{int(cleaned_num)}:00 {suffix}"
         elif len(cleaned_num) >= 3:
@@ -154,14 +154,14 @@ def parse_date_line(line: str) -> str:
     m = re.match(r'^(\d{1,2})\s*([a-zA-Z]{3,9})(?:\s*(\d{2}|\d{4}))?$', date_part)
     if not m:
         raise ValueError(
-            f"❌ Invalid format: `{date_part}`. Please re-enter.\n"
-            "👉 Make sure to use the correct format oh!\n\n"
+            f"❌ Invalid format: `{date_part}`\n\n"
             "*Examples:*\n"
-            "Single date Single time: `31 aug, 9pm`\n"
-            "Single date Multiple times: `1 sep, 7pm 9pm`\n"
-            "Multiple dates Single/Multiple times:\n"
-            "`31 aug, 9pm`\n"
-            "`1 sep, 7pm 9pm`\n\n"
+            "• `31 aug, 9pm`\n"
+            "• `31 aug, 7pm 9pm`\n"
+            "• `31 aug, 7am / 9am - 6pm`\n"
+            "• `31 aug, 9am - 6pm / 8pm - 10pm`\n"
+            "• `31 aug` — date only (no specific time)\n\n"
+            "For multiple dates: separate into new lines\n"
             "Separate the date and time using a *comma (,)*"
         )
 
@@ -172,32 +172,52 @@ def parse_date_line(line: str) -> str:
     if not time_part:
         return date_label
 
-    # 4. Process time component tokens safely
-    time_part_cleaned = re.sub(r'[\.]', ' ', time_part)
-    time_part_cleaned = time_part_cleaned.replace('/', ' ')
-    
-    # Combine tokens back with their adjacent AM/PM string if they were split by spaces
-    time_part_cleaned = re.sub(r'\s+(am|pm)\b', r'\1', time_part_cleaned, flags=re.IGNORECASE)
-    tokens = [t for t in re.split(r'[\s]+', time_part_cleaned) if t]
+    # 4. Process time component — supports single times, multiple times, and ranges.
+    # Split by '/' first to get distinct slots; each slot is either a single time
+    # ("9pm") or a range ("9am - 6pm"). Space-separated times inside a slot still
+    # work ("7pm 9pm" → two single times joined with ' / ').
+    chunks = [c.strip() for c in time_part.split('/') if c.strip()]
+    parsed_slots = []
 
-    times = []
-    for token in tokens:
-        if token.lower() in ['am', 'pm', '/']:
-            continue
-        parsed = _parse_time_token(token)
-        if parsed:
-            times.append(parsed)
+    for chunk in chunks:
+        # Detect range pattern: "9am - 6pm" or "0900 - 1800"
+        range_match = re.match(r'^(.+?)\s*-\s*(.+)$', chunk)
+        if range_match:
+            t1_str = range_match.group(1).strip()
+            t2_str = range_match.group(2).strip()
+            t1 = _parse_time_token(t1_str)
+            t2 = _parse_time_token(t2_str)
+            if t1 and t2:
+                parsed_slots.append(f"{t1} - {t2}")
+            else:
+                bad = t1_str if not t1 else t2_str
+                raise ValueError(
+                    f"❌ IDK what time you wan lar: `{bad}` is semo?\n"
+                    "👉 Use formatting like `8am`, `10:30pm`, `0000`, `1230`\n\n"
+                    "Please re-enter!"
+                )
         else:
-            if re.match(r'^\d{1,2}:\d{2}$', token):
-                continue
-            raise ValueError(
-                f"❌ IDK what time you wan lar: `{token}` is semo?\n"
-                "👉 Use formatting like `8am`, `10:30pm`, `0000`, `1230`\n\n"
-                "Please re-enter!"
-            )
+            # Single time or space-separated times: "9pm" or "7pm 9pm"
+            chunk_cleaned = re.sub(r'[\.]', ' ', chunk)
+            chunk_cleaned = re.sub(r'\s+(am|pm)\b', r'\1', chunk_cleaned, flags=re.IGNORECASE)
+            tokens = [t for t in re.split(r'\s+', chunk_cleaned) if t]
+            for token in tokens:
+                if token.lower() in ['am', 'pm']:
+                    continue
+                parsed = _parse_time_token(token)
+                if parsed:
+                    parsed_slots.append(parsed)
+                else:
+                    if re.match(r'^\d{1,2}:\d{2}$', token):
+                        continue
+                    raise ValueError(
+                        f"❌ IDK what time you wan lar: `{token}` is semo?\n"
+                        "👉 Use formatting like `8am`, `10:30pm`, `0000`, `1230`\n\n"
+                        "Please re-enter!"
+                    )
 
-    if times:
-        return f"{date_label}  {' / '.join(times)}"
+    if parsed_slots:
+        return f"{date_label}  {' / '.join(parsed_slots)}"
     return date_label
 
 

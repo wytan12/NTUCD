@@ -11,7 +11,8 @@ from telegram.ext import (
     PollAnswerHandler,
     ChatMemberHandler,
     ChatJoinRequestHandler,
-    ContextTypes
+    ContextTypes,
+    PicklePersistence,
 )
 import datetime
 import asyncio
@@ -141,7 +142,8 @@ async def start_command_router(update: Update, context: ContextTypes.DEFAULT_TYP
 
 def main():
     print("Bot starting...")
-    app = ApplicationBuilder().token(BOT_TOKEN).post_init(on_startup).build()
+    persistence = PicklePersistence(filepath="bot_data.pkl")
+    app = ApplicationBuilder().token(BOT_TOKEN).persistence(persistence).post_init(on_startup).build()
     
     verify_conv_handler = ConversationHandler(
         entry_points=[

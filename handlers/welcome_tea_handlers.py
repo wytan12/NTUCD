@@ -45,7 +45,7 @@ WELCOME_TEA_DETAILS_TEXT = (
 
 WELCOME_TEA_REMINDER_TEXT = (
     "🥁 *Just a gentle little reminder!*\n\n"
-    "Our Welcome Tea is coming up, and we'd love to know if you can make it. Please let us know by confirming below—we hope to see you there! 😊✨"
+    "Our Welcome Tea is coming up, and we'd love to know if you can make it. Please let us know by confirming the attendance—we hope to see you there! 😊✨"
 )
 
 CONFIRMED_REPLY = "Awesome! 🎉 Thanks for confirming. We'll be adding you to the Welcome Tea group chat soon, so keep an eye out for that! 🥁"

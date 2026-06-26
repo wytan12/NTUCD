@@ -362,11 +362,16 @@ async def handle_private_command(update: Update, context: ContextTypes.DEFAULT_T
             f"`1 sep, 7pm 2100`"
         )
         
+        rehearsal_keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("⏭ Skip (No Rehearsal)", callback_data="SKIP_PERF_FIELD|rehearsal")],
+            [InlineKeyboardButton("🔙 Edit Previous Step", callback_data="PERF_RESET|temp_event_name")],
+            [InlineKeyboardButton("🔙 Back to Type Selection", callback_data="DASH_VIEW|LAUNCH_NEW")],
+        ])
         active_dash_id = context.user_data.get("master_dash_id")
         if active_dash_id:
-            await context.bot.edit_message_text(chat_id=message.chat.id, message_id=active_dash_id, text=prompt, reply_markup=_get_back_keyboard("temp_event_name"), parse_mode="Markdown")
+            await context.bot.edit_message_text(chat_id=message.chat.id, message_id=active_dash_id, text=prompt, reply_markup=rehearsal_keyboard, parse_mode="Markdown")
             return
-        await _render_step(message, prompt, _get_back_keyboard("temp_event_name"))
+        await _render_step(message, prompt, rehearsal_keyboard)
         return
 
     if state == PERF_REHEARSAL:
@@ -419,11 +424,16 @@ async def handle_private_command(update: Update, context: ContextTypes.DEFAULT_T
             f"`1 sep, 7pm 2100`"
         )
         
+        perf_date_keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("⏭ Skip (Date TBD)", callback_data="SKIP_PERF_FIELD|perf_date")],
+            [InlineKeyboardButton("🔙 Edit Previous Step", callback_data="PERF_RESET|temp_rehearsal")],
+            [InlineKeyboardButton("🔙 Back to Type Selection", callback_data="DASH_VIEW|LAUNCH_NEW")],
+        ])
         active_dash_id = context.user_data.get("master_dash_id")
         if active_dash_id:
-            await context.bot.edit_message_text(chat_id=message.chat.id, message_id=active_dash_id, text=prompt, reply_markup=_get_back_keyboard("temp_rehearsal"), parse_mode="Markdown")
+            await context.bot.edit_message_text(chat_id=message.chat.id, message_id=active_dash_id, text=prompt, reply_markup=perf_date_keyboard, parse_mode="Markdown")
             return
-        await _render_step(message, prompt, _get_back_keyboard("temp_rehearsal"))
+        await _render_step(message, prompt, perf_date_keyboard)
         return
 
     if state == PERF_DATE:
@@ -669,7 +679,7 @@ async def handle_confirm_new_perf(update: Update, context: ContextTypes.DEFAULT_
 
             # 🎯 FIX FOR POINT 1: Added explicit "\n" right after the open backticks to resolve the markdown language parser glitch!
             old_value = context.user_data.get(field_to_clear, "")
-            if old_value and old_value != "-":
+            if old_value and old_value not in ("-", "TBD"):
                 prompt_header = (
                     f"{prompt_header}\n\n"
                     f"📋 *Previous Value (Tap box below to copy instantly):*\n"
@@ -677,8 +687,23 @@ async def handle_confirm_new_perf(update: Update, context: ContextTypes.DEFAULT_
                     f"{old_value}```\n"
                     f"👉 _Paste your copied text into the chat bar, edit it, and send!_"
                 )
-            
-            await query.edit_message_text(prompt_header, reply_markup=_get_back_keyboard(back_maps.get(target_state)), parse_mode="Markdown")
+
+            if target_state == PERF_REHEARSAL:
+                step_markup = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("⏭ Skip (No Rehearsal)", callback_data="SKIP_PERF_FIELD|rehearsal")],
+                    [InlineKeyboardButton("🔙 Edit Previous Step", callback_data=f"PERF_RESET|{back_maps.get(target_state)}")],
+                    [InlineKeyboardButton("🔙 Back to Type Selection", callback_data="DASH_VIEW|LAUNCH_NEW")],
+                ])
+            elif target_state == PERF_DATE:
+                step_markup = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("⏭ Skip (Date TBD)", callback_data="SKIP_PERF_FIELD|perf_date")],
+                    [InlineKeyboardButton("🔙 Edit Previous Step", callback_data=f"PERF_RESET|{back_maps.get(target_state)}")],
+                    [InlineKeyboardButton("🔙 Back to Type Selection", callback_data="DASH_VIEW|LAUNCH_NEW")],
+                ])
+            else:
+                step_markup = _get_back_keyboard(back_maps.get(target_state))
+
+            await query.edit_message_text(prompt_header, reply_markup=step_markup, parse_mode="Markdown")
         return
 
     if data.startswith("TYPE_SELECTED|"):
@@ -714,11 +739,34 @@ async def handle_confirm_new_perf(update: Update, context: ContextTypes.DEFAULT_
             if context.user_data.get("in_summary_mode"):
                 await _show_perf_summary(update, context)
                 return
-                
+
             context.user_data["dm_state"] = PERF_DATE
             tracker = _build_progress_tracker(context.user_data)
-            prompt = f"{tracker}📅 *Step 4/6: Performance Date & Time*\n\nSeparate date/time with a *comma (,)*."
-            await query.edit_message_text(text=prompt, reply_markup=_get_back_keyboard("temp_rehearsal"), parse_mode="Markdown")
+            prompt = (
+                f"{tracker}📅 *Step 4/6: Performance Date & Time*\n\n"
+                f"*Examples:*\n"
+                f"• Single date Single time: `31 aug, 9pm`\n"
+                f"• Single date Multiple times: `1 sep, 7pm 2100`\n"
+                f"• Multiple dates Single/Multiple times:\n"
+                f"`31 aug, 9pm`\n"
+                f"`1 sep, 7pm 2100`"
+            )
+            perf_date_keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("⏭ Skip (Date TBD)", callback_data="SKIP_PERF_FIELD|perf_date")],
+                [InlineKeyboardButton("🔙 Edit Previous Step", callback_data="PERF_RESET|temp_rehearsal")],
+                [InlineKeyboardButton("🔙 Back to Type Selection", callback_data="DASH_VIEW|LAUNCH_NEW")],
+            ])
+            await query.edit_message_text(text=prompt, reply_markup=perf_date_keyboard, parse_mode="Markdown")
+        elif field == "perf_date":
+            context.user_data["temp_perf_date"] = "TBD"
+            if context.user_data.get("in_summary_mode"):
+                await _show_perf_summary(update, context)
+                return
+
+            context.user_data["dm_state"] = PERF_LOCATION
+            tracker = _build_progress_tracker(context.user_data)
+            prompt = f"{tracker}📌 *Step 5/6: Location*\nWhere is the performance taking place?"
+            await query.edit_message_text(text=prompt, reply_markup=_get_back_keyboard("temp_perf_date"), parse_mode="Markdown")
         elif field == "other_info":
             context.user_data["temp_other_info"] = "-"
             context.user_data["dm_state"] = None

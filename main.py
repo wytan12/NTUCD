@@ -23,7 +23,6 @@ from handlers.attendance_handlers import attendance_callback
 from handlers.verification_handlers import start_verification, handle_matric, join_request_handler
 from handlers.modify_handlers import start_modify, get_modify_field_callback
 from handlers.modify_handlers import handle_modify_status_selection, handle_modify_date_selection
-from handlers.conversation_handlers import final_date_selection, topic_type_selection, parse_perf_input, cancel
 from handlers.member_handlers import handle_member_status, handle_new_member
 from handlers.private_handlers import handle_confirm_new_perf, handle_dashboard_refresh, handle_dashboard_navigation
 from handlers.welcome_tea_handlers import (
@@ -37,8 +36,7 @@ from config import BOT_TOKEN, SHEET_NAME, CHAT_ID, sg_tz, ADMIN_DM_USER_IDS
 from datetime import time as dt_time
 from utils.constants import (
     initialized_topics,
-    DATE,
-    ASK_MATRIC, 
+    ASK_MATRIC,
     OTHERS_THREAD_IDS
 )
 
@@ -145,16 +143,6 @@ def main():
     print("Bot starting...")
     app = ApplicationBuilder().token(BOT_TOKEN).post_init(on_startup).build()
     
-    conv_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(topic_type_selection, pattern="^topic_type\\|")],
-        states={
-            # Remove & ~filters.COMMAND so the conversation handler captures slash commands!
-            DATE: [MessageHandler(filters.TEXT, parse_perf_input)], 
-        },
-        fallbacks=[],
-        per_message=False,
-    )
-    
     verify_conv_handler = ConversationHandler(
         entry_points=[
             CommandHandler("verify", start_verification),
@@ -174,8 +162,6 @@ def main():
     #app.add_handler(CommandHandler("remind", remind_command))
     #app.add_handler(CommandHandler("testremind", manual_test_reminder_trigger))
     #app.add_handler(CommandHandler("modify", start_modify))
-    app.add_handler(conv_handler)
-    app.add_handler(CallbackQueryHandler(final_date_selection, pattern="^FINALDATE\\|"))
     app.add_handler(CallbackQueryHandler(get_modify_field_callback, pattern="^MODIFY\\|"))
     app.add_handler(CallbackQueryHandler(handle_modify_status_selection, pattern="^modify_status_selected\\|"))
     app.add_handler(CallbackQueryHandler(handle_modify_date_selection, pattern='^modify_date_selected\\|'))
@@ -189,7 +175,6 @@ def main():
     app.add_handler(ChatJoinRequestHandler(join_request_handler))
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT, handle_private_command))
     app.add_handler(MessageHandler(filters.ChatType.GROUPS, handle_message))
-    #app.add_handler(CallbackQueryHandler(handle_confirm_new_perf, pattern="^(CONFIRM_NEW_PERF|CONFIRM_NEW_OTHERS|CANCEL_NEW_PERF|ANNOUNCE_TARGET\\||ANNOUNCE_BACK_MAPPED|TYPE_SELECTED\\||TOGGLE_RULE\\||CONFIRM_STANDARD|PERF_EVENT_TYPE\\||SKIP_PERF_FIELD\\||PERF_RESET\\|)"))
     app.add_handler(CallbackQueryHandler(handle_confirm_new_perf, pattern="^(CONFIRM_NEW_PERF|CONFIRM_NEW_OTHERS|CANCEL_NEW_PERF|ANNOUNCE_BACK_MAPPED|TYPE_SELECTED\\||TOGGLE_RULE\\||CONFIRM_STANDARD|PERF_EVENT_TYPE\\||SKIP_PERF_FIELD\\||PERF_RESET\\|)"))
     app.add_handler(CallbackQueryHandler(execute_manual_remind_dispatch, pattern="^MANUAL_REMIND_TID\\|"))
     app.add_handler(CallbackQueryHandler(handle_dashboard_refresh, pattern="^DASH_REFRESH$"))

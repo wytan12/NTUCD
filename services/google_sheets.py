@@ -981,7 +981,7 @@ def get_attendees_for_date(col):
     for r in range(ATT_FIRST_MEMBER_ROW, len(values) + 1):
         row = values[r - 1]
         name = (row[ATT_NAME_COL - 1] if len(row) >= ATT_NAME_COL else "").strip()
-        if not name:
+        if not name or name.lower() == "member":
             continue
         total_raw = (row[ATT_TOTAL_COL - 1] if len(row) >= ATT_TOTAL_COL else "").strip()
         try:
@@ -1125,7 +1125,7 @@ def get_perf_attendees(col):
     for r in range(PERF_FIRST_MEMBER_ROW, len(values) + 1):
         row = values[r - 1]
         name = (row[PERF_NAME_COL - 1] if len(row) >= PERF_NAME_COL else "").strip()
-        if not name:
+        if not name or name.lower() == "member":
             continue
         total_raw = (row[PERF_TOTAL_COL - 1] if len(row) >= PERF_TOTAL_COL else "").strip()
         try:

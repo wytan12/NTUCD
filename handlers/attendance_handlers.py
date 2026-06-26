@@ -22,38 +22,56 @@ from services.google_sheets import (
     get_training_date_columns, get_attendees_for_date, commit_attendance_column,
     parse_sheet_date, replace_training_date_column,
     get_perf_event_list, get_perf_event_column, get_perf_attendees, commit_perf_column,
-    get_training_poll_ref,
+    get_training_poll_ref, is_dashboard_admin,
 )
 from services.date_parser import parse_date_line
 
 HOME_TEXT = "✅ *Take Attendance*\nChoose a category:"
+PAGE_SIZE = 10
 
 
 def _render_attendance_keyboard(context: ContextTypes.DEFAULT_TYPE) -> InlineKeyboardMarkup:
     marks = context.user_data.get("attd_marks", {})
     names = context.user_data.get("attd_names", {})
     order = context.user_data.get("attd_order", [])
+    page = context.user_data.get("attd_page", 0)
+    total = len(order)
+    total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+    start = page * PAGE_SIZE
+    page_order = order[start: start + PAGE_SIZE]
 
     keyboard, buf = [], []
-    for row in order:
+    for row in page_order:
         label = ("✅ " if marks.get(row) else "⬜ ") + names.get(row, str(row))
         buf.append(InlineKeyboardButton(label, callback_data=f"ATTD_TOGGLE|{row}"))
         if len(buf) == 2:
             keyboard.append(buf)
             buf = []
-    if buf: keyboard.append(buf)
+    if buf:
+        keyboard.append(buf)
 
-    # 🎯 FIX: Apply the new dynamic naming and remove the Exit button
+    present = sum(1 for v in marks.values() if v)
+    keyboard.append([InlineKeyboardButton(f"✅ Present: {present} / {total}", callback_data="ATTD_NOOP")])
+
+    if total_pages > 1:
+        indicator = InlineKeyboardButton(f"Page {page + 1}/{total_pages}", callback_data="ATTD_NOOP")
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton("◀ Prev", callback_data="ATTD_PAGE|prev"))
+        nav.append(indicator)
+        if page < total_pages - 1:
+            nav.append(InlineKeyboardButton("Next ▶", callback_data="ATTD_PAGE|next"))
+        keyboard.append(nav)
+
     mode = context.user_data.get("attd_mode", "REG")
-    
-    # 🎯 FIX: Use the mode to set the correct destination and label
     if mode == "REG":
         back_label = "🔙 Back to Training Dates"
-        back_data = "ATTD_BACK_REG" 
+        back_data = "ATTD_BACK_REG"
     else:
         back_label = "🔙 Back to Performance Topics"
         back_data = "ATTD_BACK_PERF"
-    
+
     keyboard.append([InlineKeyboardButton("💾 Confirm & Save Record", callback_data="ATTD_CONFIRM")])
     keyboard.append([InlineKeyboardButton(back_label, callback_data=back_data)])
     return InlineKeyboardMarkup(keyboard)
@@ -341,9 +359,10 @@ async def attendance_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         context.user_data["attd_order"] = [r for r, _n, _t, _m in attendees]
         context.user_data["attd_names"] = {r: n for r, n, _t, _m in attendees}
         context.user_data["attd_marks"] = {r: m for r, _n, _t, m in attendees}
+        context.user_data["attd_page"] = 0
 
         await query.edit_message_text(
-            f"🎭 *{name}* — tap to toggle, then CONFIRM.\n"
+            f"🎭 *{name}* — tap to toggle, then CONFIRM.\n\n"
             "✅ = present | ⬜ = absent",
             reply_markup=_render_attendance_keyboard(context),
             parse_mode="Markdown",
@@ -373,6 +392,7 @@ async def attendance_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         context.user_data["attd_order"] = [r for r, _n, _t, _m in attendees]
         context.user_data["attd_names"] = {r: n for r, n, _t, _m in attendees}
         context.user_data["attd_marks"] = {r: m for r, _n, _t, m in attendees}
+        context.user_data["attd_page"] = 0
 
         await query.edit_message_text(
             f"📅 *{label}* — tap to toggle, then CONFIRM.\n\n"
@@ -527,6 +547,25 @@ async def attendance_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             await query.edit_message_text(f"❌ Failed to read sheet: {e}")
         return
 
+    # --- Page indicator tap (no-op) ---
+    if data == "ATTD_NOOP":
+        return
+
+    # --- Page navigation ---
+    if data.startswith("ATTD_PAGE|"):
+        direction = data.split("|")[1]
+        page = context.user_data.get("attd_page", 0)
+        order = context.user_data.get("attd_order", [])
+        total = len(order)
+        total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+        if direction == "next":
+            page = min(page + 1, total_pages - 1)
+        else:
+            page = max(page - 1, 0)
+        context.user_data["attd_page"] = page
+        await query.edit_message_reply_markup(reply_markup=_render_attendance_keyboard(context))
+        return
+
     # --- Toggle one member ---
     if data.startswith("ATTD_TOGGLE|"):
         row = int(data.split("|")[1])
@@ -640,7 +679,7 @@ async def handle_moddate_text(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 def _clear(context: ContextTypes.DEFAULT_TYPE):
-    for key in ("attd_col", "attd_date_label", "attd_order", "attd_names", "attd_marks"):
+    for key in ("attd_col", "attd_date_label", "attd_order", "attd_names", "attd_marks", "attd_page"):
         context.user_data.pop(key, None)
 
 

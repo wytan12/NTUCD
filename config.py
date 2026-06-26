@@ -20,7 +20,7 @@ WELCOME_TEA_GROUP_CHAT_ID = -1004392666592
 # Thread Configuration
 GENERAL_TOPIC_ID = None
 TOPIC_VOTING_ID = 53  # Main group voting thread ID
-# TOPIC_VOTING_ID = 5   # Debug group voting thread ID
+#TOPIC_VOTING_ID = 5   # Debug group voting thread ID
 
 # --- Attendance tab layout (1-based row/column indices) ---
 # Col A = member NAME (nickname), Col B = TOTAL, Col C = row labels

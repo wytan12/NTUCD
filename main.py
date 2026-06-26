@@ -42,7 +42,7 @@ from utils.constants import (
 )
 
 admin_commands = [
-    BotCommand("start", "🚀 Admin DM Dashboard!!"),
+    BotCommand("start", "🚀 Admin DM Dashboard!!!"),
     # 🦅 Unified dashboard: every other action lives inside the /start Cockpit, so
     # the Telegram command menu only advertises /start. (Re-enable any line below
     # to surface that command in the menu again.)

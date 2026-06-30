@@ -1188,6 +1188,7 @@ def _normalize_welcome_tea_status(status: str) -> str:
         WELCOME_TEA_STATUS_ATTEND,
         WELCOME_TEA_STATUS_NOT_CONFIRM,
         WELCOME_TEA_STATUS_REJECT,
+        WELCOME_TEA_STATUS_STILL_COMING,
     )
     raw = (status or "").strip()
     if not raw:
@@ -1197,48 +1198,80 @@ def _normalize_welcome_tea_status(status: str) -> str:
         WELCOME_TEA_STATUS_NOT_CONFIRM.lower(): WELCOME_TEA_STATUS_NOT_CONFIRM,
         WELCOME_TEA_STATUS_ATTEND.lower(): WELCOME_TEA_STATUS_ATTEND,
         WELCOME_TEA_STATUS_REJECT.lower(): WELCOME_TEA_STATUS_REJECT,
+        WELCOME_TEA_STATUS_STILL_COMING.lower(): WELCOME_TEA_STATUS_STILL_COMING,
     }
     return status_map.get(lowered, raw)
 
 
 def _welcome_tea_layout(values=None):
-    """Return column indexes for WELCOME TEA ID, supporting the new header row."""
+    """Return (first_data_row, col_indexes) for WELCOME TEA ID tab.
+
+    Scans the first 6 rows for a header row to support the new layout where
+    rows 1-5 are config/header and user data begins at row 6.
+    Falls back to the default A-N column positions if no header is detected.
+    """
     values = values or []
     default_cols = {
         "tele_id": 1,
         "tele_handle": 2,
         "timestamp": 3,
         "status": 4,
+        "dietary": 5,
+        "attendance": 6,
+        "cutoff_msg_id": 7,
+        "final_cutoff_msg_id": 8,
+        "details_sent": 9,
+        "reminder_sent": 10,
+        "approval_sent": 11,
+        "pre_cutoff_sent": 12,
+        "cutoff_sent": 13,
+        "wtd_reminder_sent": 14,
     }
     if not values:
         return 1, default_cols
 
-    header = [str(cell).strip().lower() for cell in values[0]]
     aliases = {
         "tele_id": ("tele id", "telegram id", "user id"),
         "tele_handle": ("tele handle", "username", "tele username", "telegram handle"),
-        "timestamp": ("timestamp", "time stamp"),
+        "timestamp": ("timestamp", "time stamp", "req to join timestamp"),
         "status": ("status",),
+        "dietary": ("dietary",),
+        "attendance": ("attendance",),
+        "cutoff_msg_id": ("cutoff msg id",),
+        "final_cutoff_msg_id": ("final cutoff msg id",),
+        "details_sent": ("details send", "details sent"),
+        "reminder_sent": ("reminder send", "reminder sent"),
+        "approval_sent": ("approval send", "approval sent"),
+        "pre_cutoff_sent": ("pre cutoff send", "pre cutoff sent"),
+        "cutoff_sent": ("cutoff send", "cutoff sent"),
+        "wtd_reminder_sent": ("wtd reminder send", "wtd reminder sent"),
     }
-    has_header = any(name in header for names in aliases.values() for name in names)
-    if not has_header:
+    all_alias_names = {name for names in aliases.values() for name in names}
+
+    header_row_idx = None
+    for i, row in enumerate(values[:6]):
+        normalized = [str(cell).strip().lower() for cell in row]
+        if any(name in normalized for name in all_alias_names):
+            header_row_idx = i
+            break
+
+    if header_row_idx is None:
         return 1, default_cols
 
+    header = [str(cell).strip().lower() for cell in values[header_row_idx]]
     cols = {}
     for key, names in aliases.items():
         cols[key] = next(
             (header.index(name) + 1 for name in names if name in header),
             default_cols[key],
         )
-    return 2, cols
+    return header_row_idx + 2, cols
 
 
 def _row_cell(row, one_based_col):
     return row[one_based_col - 1].strip() if one_based_col - 1 < len(row) else ""
 
 
-def _setting_key(label):
-    return re.sub(r"[^a-z0-9]+", "", str(label or "").strip().lower())
 
 
 def _parse_sheet_date(value):
@@ -1317,99 +1350,140 @@ def _parse_sheet_datetime(date_value, time_value, fallback_dt):
 
 
 def get_welcome_tea_settings():
-    """Read Welcome Tea settings live from the WELCOME TEA ID tab.
+    """Read Welcome Tea settings from the WELCOME TEA ID tab.
 
-    Expected settings block:
-      G = Setting, H = Value, I = Time, J = Status
+    New layout (rows 1-4 are config, row 5 is headers, row 6+ is user data):
+      Row 1, col B: Event date
+      Row 2, col B: WT group invite link
+      Row 3, col B: Main group invite link
+      Row 4, col B: Signup form link
+      Row 3, cols I-N: TIME for 6 scheduled jobs
+      Row 4, cols I-N: DATE for 6 scheduled jobs
+      Job col order: I=Details, J=Reminder, K=Approval, L=PreCutoff, M=Cutoff, N=WTDReminder
     """
-    raw = {}
     try:
-        for row_idx, row in enumerate(_welcome_tea_ws().get_all_values()):
-            actual_row_number = row_idx + 1
-            # Shifted to read Column G (7)
-            key = _setting_key(_row_cell(row, 7))
-            if not key or key in {"setting", "welcometeasettings"}:
-                continue
-            raw[key] = {
-                "value": _row_cell(row, 8),    # Col H
-                "time": _row_cell(row, 9),     # Col I
-                "status": _row_cell(row, 10),  # Col J
-                "row_number": actual_row_number
-            }
+        values = _welcome_tea_ws().get_all_values()
     except Exception as e:
         print(f"[WELCOME TEA][WARN] Failed to read sheet settings: {e}")
+        return {}
 
-    event_date = _parse_sheet_date(raw.get("eventdate", {}).get("value"))
+    def _cell(row_idx, col_1based):
+        row = values[row_idx] if row_idx < len(values) else []
+        return _row_cell(row, col_1based)
 
-    def setting_datetime(key):
-        entry = raw.get(key, {})
-        return _parse_sheet_datetime(entry.get("value"), entry.get("time"), None)
+    event_date = _parse_sheet_date(_cell(0, 2))   # B1
+    wt_join_link = _cell(1, 2).strip()             # B2
+    main_group_link = _cell(2, 2).strip()          # B3
+    signup_form_link = _cell(3, 2).strip()         # B4
 
-    def setting_text(key):
-        value = raw.get(key, {}).get("value", "")
-        return value.strip() if value else ""
+    # Job schedule: time from row 3 (index 2), date from row 4 (index 3), cols I-N (9-14)
+    job_col_map = {
+        "details_send":  9,
+        "reminder_send": 10,
+        "approval":      11,
+        "pre_cutoff":    12,
+        "cutoff":        13,
+        "wtd_reminder":  14,
+        "followup_send": 15,   # O3 = time, O4 = date
+    }
 
-    def setting_status(key):
-        return raw.get(key, {}).get("status", "").strip()
+    job_datetimes = {}
+    for job_key, col in job_col_map.items():
+        if col is None:
+            job_datetimes[job_key] = None
+            continue
+        time_val = _cell(2, col)   # row 3
+        date_val = _cell(3, col)   # row 4
+        job_datetimes[job_key] = _parse_sheet_datetime(date_val, time_val, None)
 
-    def setting_row(key):
-        return raw.get(key, {}).get("row_number")
+    # Final cleanup: WT day at 19:30 SGT by default; C1 overrides the time for testing
+    final_cleanup_at = None
+    if event_date:
+        from datetime import datetime, time as dt_time
+        override_time = _parse_sheet_time(_cell(0, 3))  # C1
+        cleanup_time = override_time if override_time else dt_time(19, 30)
+        final_cleanup_at = sg_tz.localize(datetime.combine(event_date, cleanup_time))
 
     return {
         "event_date": event_date,
-        
-        # 🕒 Parsed Datetimes
-        "details_send_at": setting_datetime("detailssend"),
-        "reminder_send_at": setting_datetime("remindersend"),
-        "approval_at": setting_datetime("approvaltime"),
-        "followup_send_at": setting_datetime("followupsend"),
-        
-        # 🛡️ Safety Statuses (Reads Column J)
-        "details_send_status": setting_status("detailssend"),
-        "reminder_send_status": setting_status("remindersend"),
-        "approval_status": setting_status("approvaltime"),
-        "followup_send_status": setting_status("followupsend"),
-        
-        # 📍 Exact Row Locations (So the bot knows where to write)
-        "details_send_row": setting_row("detailssend"),
-        "reminder_send_row": setting_row("remindersend"),
-        "approval_row": setting_row("approvaltime"),
-        "followup_send_row": setting_row("followupsend"),
-
-        # 🔗 Links
-        "welcome_tea_join_request_link": setting_text("welcometeagroupinvitelink"),
-        "main_group_welcome_tea_invite_link": setting_text("maingroupinvitelink"),
-        "signup_form_link": setting_text("welcometearegistrationform"),
+        "welcome_tea_join_request_link": wt_join_link,
+        "main_group_welcome_tea_invite_link": main_group_link,
+        "signup_form_link": signup_form_link,
+        "details_send_at":  job_datetimes["details_send"],
+        "reminder_send_at": job_datetimes["reminder_send"],
+        "approval_at":      job_datetimes["approval"],
+        "pre_cutoff_at":    job_datetimes["pre_cutoff"],
+        "cutoff_at":        job_datetimes["cutoff"],
+        "wtd_reminder_at":  job_datetimes["wtd_reminder"],
+        "followup_send_at": job_datetimes["followup_send"],
+        "final_cleanup_at": final_cleanup_at,
     }
 
 def mark_welcome_tea_setting_sent(row_number: int):
-    """Writes 'SENT' into Column J (10) for a specific setting to permanently prevent double-sending."""
+    """Legacy: writes 'SENT' into Column J (10) for a specific setting row."""
     if not row_number:
         return False
-        
     try:
         ws = _welcome_tea_ws()
-        # Update exactly that row in Column 10 (J)
         ws.update_cell(row_number, 10, "SENT")
-        
-        # We MUST invalidate the cache, otherwise the next heartbeat 
-        # will read the old RAM and think it hasn't been sent!
-        invalidate_sheet_cache(tab_name=WELCOME_TEA_ID_TAB) 
-        
+        invalidate_sheet_cache(tab_name=WELCOME_TEA_ID_TAB)
         print(f"[SYSTEM] Successfully logged 'SENT' in row {row_number}.")
         return True
     except Exception as e:
         print(f"[ERROR] Failed to mark setting as SENT on row {row_number}: {e}")
         return False
 
-def get_welcome_tea_rows():
-    """Return row dicts from WELCOME TEA ID.
 
-    The tab now has a header row:
-      Tele ID, Tele Handle, Timestamp, Status.
-    The old no-header A-D layout is still supported for backward compatibility.
-    Blank statuses are treated as Not Confirm.
-    """
+def _update_wt_user_cell(user_id: int, col_index: int, value) -> bool:
+    """Write `value` to a specific 1-based column for the given user_id row."""
+    try:
+        ws = _welcome_tea_ws()
+        values = ws.get_all_values()
+        first_data_row, cols = _welcome_tea_layout(values)
+        target = str(user_id)
+        for row_number, row in enumerate(values[first_data_row - 1:], start=first_data_row):
+            if _row_cell(row, cols["tele_id"]) == target:
+                ws.update_cell(row_number, col_index, value)
+                invalidate_sheet_cache(tab_name=WELCOME_TEA_ID_TAB)
+                return True
+        print(f"[WELCOME TEA][WARN] User {user_id} not found for col {col_index} update.")
+        return False
+    except Exception as e:
+        print(f"[WELCOME TEA][ERROR] Failed to update col {col_index} for {user_id}: {e}")
+        return False
+
+
+def get_wt_user(user_id: int):
+    """Return the full row dict for a user, or None if not found."""
+    target = str(user_id)
+    for row in get_welcome_tea_rows():
+        if str(row["user_id"]) == target:
+            row["user_id"] = int(row["user_id"])
+            return row
+    return None
+
+
+def update_wt_dietary(user_id: int, dietary: str) -> bool:
+    """Write dietary preference to col E (5) for the user."""
+    return _update_wt_user_cell(user_id, 5, dietary)
+
+
+def update_wt_attendance(user_id: int) -> bool:
+    """Write '1' to col F (6) to mark WT-day attendance."""
+    return _update_wt_user_cell(user_id, 6, "1")
+
+
+def update_wt_msg_id(user_id: int, col_index: int, msg_id: int) -> bool:
+    """Store a message ID in col G (7=Cutoff Msg) or H (8=Final Cutoff Msg)."""
+    return _update_wt_user_cell(user_id, col_index, str(msg_id))
+
+
+def mark_wt_user_col_sent(user_id: int, col_index: int) -> bool:
+    """Write 'SENT' to a per-user tracking column (I=9 through N=14)."""
+    return _update_wt_user_cell(user_id, col_index, "SENT")
+
+def get_welcome_tea_rows():
+    """Return row dicts from WELCOME TEA ID (all columns A-N)."""
     rows = []
     try:
         values = _welcome_tea_ws().get_all_values()
@@ -1418,13 +1492,22 @@ def get_welcome_tea_rows():
             tele_id = _row_cell(row, cols["tele_id"])
             if not tele_id:
                 continue
-            status = _row_cell(row, cols["status"])
             rows.append({
                 "row_number": row_number,
                 "user_id": tele_id,
                 "username": _row_cell(row, cols["tele_handle"]),
                 "timestamp": _row_cell(row, cols["timestamp"]),
-                "status": _normalize_welcome_tea_status(status),
+                "status": _normalize_welcome_tea_status(_row_cell(row, cols["status"])),
+                "dietary": _row_cell(row, cols.get("dietary", 5)),
+                "attendance": _row_cell(row, cols.get("attendance", 6)),
+                "cutoff_msg_id": _row_cell(row, cols.get("cutoff_msg_id", 7)),
+                "final_cutoff_msg_id": _row_cell(row, cols.get("final_cutoff_msg_id", 8)),
+                "details_sent": _row_cell(row, cols.get("details_sent", 9)),
+                "reminder_sent": _row_cell(row, cols.get("reminder_sent", 10)),
+                "approval_sent": _row_cell(row, cols.get("approval_sent", 11)),
+                "pre_cutoff_sent": _row_cell(row, cols.get("pre_cutoff_sent", 12)),
+                "cutoff_sent": _row_cell(row, cols.get("cutoff_sent", 13)),
+                "wtd_reminder_sent": _row_cell(row, cols.get("wtd_reminder_sent", 14)),
             })
     except Exception as e:
         print(f"[ERROR] Failed to read Welcome Tea IDs: {e}")

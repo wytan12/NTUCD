@@ -15,7 +15,8 @@ MEMBER_INFO_TAB = "MEMBER INFO AY26/27"  # holds Nickname (col B) + Tele ID (col
 # Chat Configuration
 CHAT_ID =  -1004406293828 # Main group Chat ID (AY26/27)
 #CHAT_ID = -1002614985856  # Debug group Chat ID
-WELCOME_TEA_GROUP_CHAT_ID = -1004392666592
+WELCOME_TEA_GROUP_CHAT_ID = -1004392666592 # Main group Chat ID (AY26/27)
+#WELCOME_TEA_GROUP_CHAT_ID = -1004372970207 # Debug group Chat ID
 
 # Thread Configuration
 GENERAL_TOPIC_ID = None
@@ -55,6 +56,7 @@ WELCOME_TEA_ID_TAB = "WELCOME TEA"
 WELCOME_TEA_STATUS_NOT_CONFIRM = "Not Confirm"
 WELCOME_TEA_STATUS_ATTEND = "Attend"
 WELCOME_TEA_STATUS_REJECT = "Reject"
+WELCOME_TEA_STATUS_STILL_COMING = "STILL_COMING"
 
 # Timezone
 sg_tz = pytz.timezone("Asia/Singapore")

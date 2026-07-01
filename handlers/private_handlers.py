@@ -7,7 +7,7 @@ from telegram.ext import ContextTypes, ConversationHandler
 from config import ADMIN_DM_USER_IDS, CHAT_ID, SHEET_TAB_NAME
 from handlers.conversation_handlers import build_performance_summary, publish_performance_summary
 from services.date_parser import parse_and_format_dates
-from services.google_sheets import get_gspread_sheet, get_cached_records, get_cached_values, invalidate_sheet_cache, is_main_admin
+from services.google_sheets import get_gspread_sheet, get_cached_records, get_cached_values, invalidate_sheet_cache, is_main_admin, get_all_perf_performers
 from utils.constants import (
     WAITING_TOPIC_TITLE, PERF_EVENT_NAME, PERF_REHEARSAL, PERF_DATE, PERF_LOCATION, PERF_OTHER_INFO,
 )
@@ -922,26 +922,31 @@ async def handle_dashboard_navigation(update: Update, context: ContextTypes.DEFA
             # Sort records descending (Latest date first, TBD/Blank at the bottom)
             sorted_records = sorted(records, key=get_sort_date, reverse=True)
 
+            performers_map = get_all_perf_performers()
             lines = ["📊 *Performance Status Ledger*\nQuick overview of all registered bookings\n"]
             for row in sorted_records:
                 event_name = row.get("EVENT NAME", "Unnamed Event")
                 status = row.get("STATUS", "").strip().upper() or "PENDING"
                 emoji = "⏳" if status == "PENDING" else "✅" if status == "ACCEPTED" else "❌"
-                
-                # Format the date display cleanly
+
                 perf_cell = str(row.get("PERF DATE | TIME", "")).strip()
                 if not perf_cell or perf_cell == "-":
                     date_display = "TBD"
                 else:
                     date_lines = [d.strip() for d in perf_cell.splitlines() if d.strip()]
                     first_date = date_lines[0]
-                    # If multiple dates exist, show the first one and indicate how many are hidden
                     if len(date_lines) > 1:
                         date_display = f"{first_date} (+{len(date_lines) - 1} more)"
                     else:
                         date_display = first_date
 
                 lines.append(f"{emoji} *{event_name}* | {date_display}")
+
+                tid = str(row.get("THREAD ID", "")).strip()
+                performers = performers_map.get(tid, [])
+                if performers:
+                    lines.append(f"    👤 {', '.join(performers)}")
+
             text = "\n".join(lines)
             
         keyboard = (

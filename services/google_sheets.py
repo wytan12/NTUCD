@@ -1165,6 +1165,37 @@ def commit_perf_column(col, marks_by_row: dict):
     invalidate_sheet_cache(tab_name=PERF_TAB_NAME)
 
 
+def get_all_perf_performers() -> dict:
+    """Return {thread_id_str: [name, ...]} for every member marked '1' in PERF TABULATION.
+
+    Reads the sheet once; callers can look up performers for any event by thread id.
+    Events with no column or no marks return an empty list.
+    """
+    try:
+        ws = get_perf_tab_ws()
+        values = ws.get_all_values()
+    except Exception as e:
+        print(f"[WARN] Could not read PERF TABULATION for performer list: {e}")
+        return {}
+
+    row1 = values[PERF_THREAD_ROW - 1] if len(values) >= PERF_THREAD_ROW else []
+    result = {}
+    for col in range(PERF_FIRST_EVENT_COL, len(row1) + 1):
+        tid = (row1[col - 1] or "").strip()
+        if not tid:
+            continue
+        names = []
+        for r in range(PERF_FIRST_MEMBER_ROW, len(values) + 1):
+            row = values[r - 1]
+            name = (row[PERF_NAME_COL - 1] if len(row) >= PERF_NAME_COL else "").strip()
+            if not name or name.lower() == "member":
+                continue
+            if len(row) >= col and (row[col - 1] or "").strip() == "1":
+                names.append(name)
+        result[tid] = names
+    return result
+
+
 def append_standard_topic_to_sheet(tid, name, rules_string):
     """Adds a new standard topic row to the 'STANDARD TOPIC Rules' tab."""
     try:

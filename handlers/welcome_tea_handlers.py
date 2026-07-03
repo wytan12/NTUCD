@@ -525,7 +525,9 @@ async def handle_attd_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE
     # STILL_COMING / Not Confirm: pending request still open → can approve now
     # Reject: request was already declined when they hit "Can't Make It" → skip approve
     if status != WELCOME_TEA_STATUS_REJECT:
-        await _approve_welcome_tea_join_request(context.bot, user_id, context)
+        approved = await _approve_welcome_tea_join_request(context.bot, user_id, context)
+        if approved:
+            mark_wt_user_col_sent(user_id, 11)  # K = Approval Sent
 
     await update.message.reply_text(
         "✅ Your attendance has been recorded! Welcome to NTUFD! 🎉"

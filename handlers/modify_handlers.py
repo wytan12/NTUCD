@@ -93,10 +93,12 @@ async def initiate_modify_via_dm(
     )
 
     # Build the Internal Registry Preview
+    # Try both spellings — GSheet header may say "REMUNERATION" (correct) or "REMUNATION" (legacy typo)
+    remuneration_val = row.get('REMUNATION') or row.get('REMUNERATION') or '—'
     internal_preview = (
         f"🔒 *Internal Registry (Will not be posted):*\n"
         f"🏷️ *Event Type:* {row.get('EVENT TYPE', 'EXT')}\n"
-        f"💰 *Remuneration:* {row.get('REMUNATION', 'TBD')}\n"
+        f"💰 *Remuneration:* {remuneration_val}\n"
         f"🚥 *Status:* {row.get('STATUS', 'PENDING')}\n"
     )
 

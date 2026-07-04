@@ -25,15 +25,16 @@ async def _send_main_group_verification_prompt(join_request, context):
     """Keep a main-group request pending and ask the requester to verify."""
     user = join_request.from_user
     settings = get_welcome_tea_settings()
+    signup_form_link = settings.get("signup_form_link", "")
     pending_users[user.id] = join_request
-    
+
     try:
         await context.bot.send_message(
             chat_id=getattr(join_request, "user_chat_id", None) or user.id,
             text=(
                 "🎉 <b>Welcome to the NTUFD family!</b>\n\n"
                 "Thank you for requesting to join our main group. We are so excited to have you on board! 🥁✨\n\n"
-                f"If you haven't filled out our <a href='{settings['signup_form_link']}'>Welcome Tea Registration Form</a> yet, please take a quick moment to do so first.\n\n"
+                f"If you haven't filled out our <a href='{signup_form_link}'>Welcome Tea Registration Form</a> yet, please take a quick moment to do so first.\n\n"
                 "To complete your entry, simply type /verification in this chat! I will ask for your matriculation number to quickly verify your registration, and then you'll be let right in! ✅"
             ),
             parse_mode=ParseMode.HTML, # 👈 Added so the link and bolding works!
@@ -63,8 +64,8 @@ async def join_request_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         f"in chat {request_chat_id} via link '{link_name}'"
     )
 
-    main_group_link = settings["main_group_welcome_tea_invite_link"]
-    welcome_tea_link = settings["welcome_tea_join_request_link"]
+    main_group_link = settings.get("main_group_welcome_tea_invite_link", "")
+    welcome_tea_link = settings.get("welcome_tea_join_request_link", "")
 
     if main_group_link and link_url == main_group_link:
         await _send_main_group_verification_prompt(request, context)

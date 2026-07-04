@@ -28,6 +28,10 @@ from handlers.member_handlers import handle_member_status, handle_new_member
 from handlers.private_handlers import handle_confirm_new_perf, handle_dashboard_refresh, handle_dashboard_navigation
 from handlers.welcome_tea_handlers import (
     handle_welcome_tea_confirmation,
+    handle_welcome_tea_still_coming,
+    handle_welcome_tea_cant_make_it,
+    handle_dietary_reply,
+    handle_attd_checkin,
     schedule_welcome_tea_jobs,
 )
 from services.google_sheets import get_gspread_sheet
@@ -61,8 +65,11 @@ async def global_button_security_check(update: Update, context: ContextTypes.DEF
     if update.callback_query:
         query = update.callback_query
         
-        # 🟢 VIP PASS: Let the Welcome Tea RSVP buttons bypass the admin security check
-        if query.data in ["WELCOME_TEA_CONFIRM", "WELCOME_TEA_REJECT"]:
+        # 🟢 VIP PASS: Let all Welcome Tea RSVP buttons bypass the admin security check
+        if query.data in [
+            "WELCOME_TEA_CONFIRM", "WELCOME_TEA_REJECT",
+            "WELCOME_TEA_STILL_COMING", "WELCOME_TEA_CANT_MAKE_IT",
+        ]:
             return  # Let it pass cleanly to the normal handlers!
             
         user_id = query.from_user.id
@@ -157,6 +164,15 @@ def main():
         allow_reentry=True,
     )
 
+    # /attd: must run before handle_private_command's admin gate (group -3)
+    app.add_handler(CommandHandler("attd", handle_attd_checkin), group=-3)
+
+    # Dietary reply intercept: runs before the admin gate (group -2)
+    app.add_handler(
+        MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND, handle_dietary_reply),
+        group=-2,
+    )
+
     # Core engine endpoint configurations
     app.add_handler(TypeHandler(Update, global_button_security_check), group=-1)
     app.add_handler(CommandHandler("start", start_command_router))
@@ -184,6 +200,8 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_remind_escrow_callback, pattern=r"^REMIND_ESCROW_CONFIRM\|"))
     app.add_handler(CallbackQueryHandler(execute_manual_announcement_dispatch, pattern=r"^ANNOUNCE_TARGET\|"))
     app.add_handler(CallbackQueryHandler(handle_welcome_tea_confirmation, pattern=r"^WELCOME_TEA_(CONFIRM|REJECT)$"))
+    app.add_handler(CallbackQueryHandler(handle_welcome_tea_still_coming, pattern=r"^WELCOME_TEA_STILL_COMING$"))
+    app.add_handler(CallbackQueryHandler(handle_welcome_tea_cant_make_it, pattern=r"^WELCOME_TEA_CANT_MAKE_IT$"))
     
     print("Bot is running...")
     

@@ -15,7 +15,7 @@ def build_performance_summary(
     """
     lines = ["📢 *Performance Opportunity*\n"]
 
-    lines.append(f"📍 *Event Name*: {event_name.strip()}\n")
+    lines.append(f"📍 *Event Name*\n• {event_name.strip()}\n")
 
     rehearsal = rehearsal_date.strip() if rehearsal_date else ""
     if rehearsal and rehearsal != "-":

@@ -27,7 +27,9 @@ async def check_is_authenticated_admin(user_id: int) -> bool:
     MEMBER INFO tab, plus the config ADMIN_DM_USER_IDS fallback ids.
     """
     from services.google_sheets import is_dashboard_admin
-    return is_dashboard_admin(user_id)
+    # Commands (/start, /threadid) are MAJOR entry points — verify against the
+    # live sheet so a just-granted role works immediately (throttled internally).
+    return is_dashboard_admin(user_id, force=True)
 
 def admin_only(func):
     """Decorator to restrict administrative execution to verified admin DMs only.

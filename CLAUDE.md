@@ -423,10 +423,16 @@ text from users in dietary-capture mode and stops propagation.
 
 ### Two admin tiers (role-driven from `MEMBER INFO AY26/27`)
 Resolved from `Role/Position` + `Tele ID` (case-insensitive contains-match).
-**No per-user role cache**: `_get_user_role` re-derives the role from the
-smart-cached MEMBER INFO values on every call, so a role added/removed in the
-Google Sheet web UI takes effect on the user's next interaction (~30 s worst
-case — the Drive modifiedTime window), with no ♻️ Refresh or bot write needed:
+**No per-user role cache** — `_get_user_role` re-derives the role from sheet
+data on every call, with a **major-click freshness rule**:
+- **MAJOR interactions** (`/start`, `/threadid`, every Cockpit `DASH_VIEW|`
+  navigation click, `DASH_REFRESH`) pass `force=True` → the MEMBER INFO tab is
+  re-downloaded live (bypassing the lazily-updated Drive modifiedTime), so a
+  role granted/removed in the web UI applies **on that very click**. Throttled
+  to one real download per 10 s (`_ROLE_FORCE_THROTTLE_SECONDS`).
+- **In-task actions** (attendance toggles/paging, wizard steps, modify-field
+  edits, announce picks) use the cached copy → instant; an admin mid-task is
+  never slowed down and finishes their flow.
 - **MAIN** — `chairperson` (covers Vice), `secretary`, `sde` → full dashboard,
   receive all alert/reminder DMs (`get_alert_admin_ids`), may create topics
   (wizard **and** manual in-group creation), pass `is_main_admin`.

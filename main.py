@@ -74,9 +74,15 @@ async def global_button_security_check(update: Update, context: ContextTypes.DEF
             
         user_id = query.from_user.id
         from services.google_sheets import is_dashboard_admin
-        
-        # 🔴 SECURITY CHECK: Verify if they are a Dashboard Admin
-        if not is_dashboard_admin(user_id):
+
+        # 🔴 SECURITY CHECK: Verify if they are a Dashboard Admin.
+        # MAJOR clicks (Cockpit navigation / Refresh) re-verify the role against
+        # the LIVE sheet, so a role granted/removed in the web UI applies on that
+        # very click. In-task actions (attendance toggles, wizard steps, field
+        # edits) use the cached role so an admin mid-task is never slowed down.
+        data = query.data or ""
+        force_fresh = data.startswith("DASH_VIEW|") or data == "DASH_REFRESH"
+        if not is_dashboard_admin(user_id, force=force_fresh):
             await query.answer()
             try:
                 await query.edit_message_text(

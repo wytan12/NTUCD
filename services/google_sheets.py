@@ -659,19 +659,40 @@ def get_dashboard_admin_ids(force=False):
     return role_ids if role_ids else _config_admin_ids()
 
 
-def _get_user_role(user_id: int) -> str | None:
+# Throttle for force=True role checks: at most one real MEMBER INFO download
+# per this many seconds, no matter how fast admins click through the Cockpit.
+_ROLE_FORCE_THROTTLE_SECONDS = 10
+_last_role_force_at = 0.0
+
+
+def _get_user_role(user_id: int, force: bool = False) -> str | None:
     """Return "main", "secondary", or None for this Tele ID.
 
-    Re-derived from the sheet on EVERY call (no per-user answer cache), so a
-    role edited in the Google Sheet web UI takes effect on the user's next
-    interaction once the smart cache picks up the change (~30 s worst case).
-    Still fast: it scans the smart-cached MEMBER INFO values, which live in
-    memory and are only re-downloaded when the sheet actually changed.
+    Re-derived from the sheet data on EVERY call (no per-user answer cache).
+
+    force=False (in-task actions: toggles, wizard steps, field edits) — scans
+    the smart-cached MEMBER INFO copy in memory. Instant; freshness rides on
+    the Drive modifiedTime check, which can lag a minute or two behind web-UI
+    edits because Google bumps that timestamp lazily.
+
+    force=True (MAJOR clicks: /start, /threadid, Cockpit `DASH_VIEW|` navigation,
+    ♻️ Refresh) — re-downloads the MEMBER INFO tab right now, bypassing the
+    timestamp, so a role granted/removed in the web UI takes effect on the very
+    next major click. Throttled to one real download per
+    `_ROLE_FORCE_THROTTLE_SECONDS` so rapid navigation can't spam the API; the
+    fresh copy lands in the shared cache, so in-task checks benefit too.
     """
+    global _last_role_force_at
     from config import MEMBER_INFO_TAB
     uid = int(user_id)
     try:
-        values = get_cached_values(tab_name=MEMBER_INFO_TAB)
+        do_force = False
+        if force:
+            now = time.monotonic()
+            if now - _last_role_force_at >= _ROLE_FORCE_THROTTLE_SECONDS:
+                _last_role_force_at = now
+                do_force = True
+        values = get_cached_values(tab_name=MEMBER_INFO_TAB, force=do_force)
         if not values:
             return None
         header = [h.strip().lower() for h in values[0]]
@@ -701,14 +722,15 @@ def _get_user_role(user_id: int) -> str | None:
 def is_dashboard_admin(user_id, force=False) -> bool:
     """True if `user_id` may use the admin DM dashboard (MAIN or SECONDARY tier).
 
-    The role is re-checked against the (smart-cached) sheet data on every call,
-    so removing someone's role in the Google Sheet locks them out on their next
-    interaction — no ♻️ Refresh or bot write needed (~30 s worst case).
+    The role is re-checked against the sheet data on every call. Pass
+    force=True on MAJOR interactions (/start, Cockpit navigation) to re-download
+    the sheet live so web-UI role edits apply on that very click; leave
+    force=False for in-task actions so flows stay instant (see _get_user_role).
     Falls back to config.ADMIN_DM_USER_IDS only when MEMBER INFO is unreachable.
     """
     try:
         uid = int(user_id)
-        role = _get_user_role(uid)
+        role = _get_user_role(uid, force=force)
         if role in ("main", "secondary"):
             return True
         # Emergency fallback: config ids used only when sheet is unreachable
@@ -723,7 +745,7 @@ def is_dashboard_admin(user_id, force=False) -> bool:
 def is_main_admin(user_id, force=False) -> bool:
     """True if `user_id` has a MAIN admin role."""
     try:
-        return _get_user_role(int(user_id)) == "main"
+        return _get_user_role(int(user_id), force=force) == "main"
     except (TypeError, ValueError):
         return False
 

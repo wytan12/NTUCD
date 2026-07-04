@@ -265,7 +265,7 @@ async def daily_reminder_cron_job(context: ContextTypes.DEFAULT_TYPE):
 #     except Exception as e:
 #         await status_msg.edit_text(f"❌ Error encountered: `{str(e)}`", parse_mode="Markdown")
 
-@admin_only
+# @admin_only
 # async def manual_test_reminder_trigger(update: Update, context: ContextTypes.DEFAULT_TYPE):
 #     """Direct diagnostic command hook allowing admins to run validation tests manually via private dashboard."""
 #     if update.effective_chat.type != "private":
@@ -445,7 +445,6 @@ async def execute_manual_remind_dispatch(update: Update, context: ContextTypes.D
     except Exception as e:
         await query.edit_message_text(f"❌ Critical error during dispatch runtime loop: `{e}`", parse_mode="Markdown")
 
-@admin_only
 # async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 #     """Handle standard manual chat trigger command /remind securely."""
 #     if update.effective_chat.type != "private":

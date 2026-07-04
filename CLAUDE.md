@@ -429,7 +429,8 @@ data on every call, with a **major-click freshness rule**:
   navigation click, `DASH_REFRESH`) pass `force=True` → the MEMBER INFO tab is
   re-downloaded live (bypassing the lazily-updated Drive modifiedTime), so a
   role granted/removed in the web UI applies **on that very click**. Throttled
-  to one real download per 10 s (`_ROLE_FORCE_THROTTLE_SECONDS`).
+  to one real download per 2 s (`_ROLE_FORCE_THROTTLE_SECONDS`; do not go
+  below 2 s — click bursts could exhaust the 60 reads/min API quota).
 - **In-task actions** (attendance toggles/paging, wizard steps, modify-field
   edits, announce picks) use the cached copy → instant; an admin mid-task is
   never slowed down and finishes their flow.

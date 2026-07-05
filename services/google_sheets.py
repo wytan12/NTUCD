@@ -664,7 +664,7 @@ def get_dashboard_admin_ids(force=False):
 # Lower = fresher role checks on major clicks but more ~1s download pauses
 # during navigation. 2s = max 30 forced reads/min against the 60/min API
 # limit — safe. Do NOT go below 2s: click bursts could 429 the whole bot.
-_ROLE_FORCE_THROTTLE_SECONDS = 2
+_ROLE_FORCE_THROTTLE_SECONDS = 30
 _last_role_force_at = 0.0
 
 

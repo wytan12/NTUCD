@@ -22,10 +22,6 @@ _DASHBOARD_CACHE_KEYS = (
     "attd_dates",
 )
 
-MAIN_ADMIN_TOPIC_ONLY_TEXT = (
-    "🔒 *Main-admin action only.*\n\n"
-    "Topic creation is limited to main admins. You can still use the other Cockpit tools."
-)
 
 DASHBOARD_TEXT = (
     "🥁 *NTUFD Command Centre* 🥁\n"
@@ -628,12 +624,7 @@ async def handle_confirm_new_perf(update: Update, context: ContextTypes.DEFAULT_
 
     if data.startswith(("TYPE_SELECTED|", "PERF_EVENT_TYPE|", "SKIP_PERF_FIELD|", "PERF_RESET|")) or data in {"CONFIRM_NEW_OTHERS", "CONFIRM_NEW_PERF"}:
         if not is_main_admin(update.effective_user.id):
-            await query.answer("Topic creation is limited to main admins.", show_alert=True)
-            await query.edit_message_text(
-                MAIN_ADMIN_TOPIC_ONLY_TEXT,
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🦅 Exit to Cockpit", callback_data="DASH_VIEW|HOME")]]),
-                parse_mode="Markdown",
-            )
+            await query.answer("🔒 Main-admin access only. You are not authorised to use this feature.", show_alert=True)
             return
 
     if data == "ANNOUNCE_BACK_MAPPED":
@@ -861,6 +852,9 @@ async def handle_confirm_new_perf(update: Update, context: ContextTypes.DEFAULT_
 
 async def handle_list_modify_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    if not is_main_admin(update.effective_user.id):
+        await query.answer("🔒 Main-admin access only. You are not authorised to use this feature.", show_alert=True)
+        return
     await query.answer()
     _, thread_id_str = query.data.split("|")
     thread_id = int(thread_id_str)
@@ -876,9 +870,15 @@ async def handle_list_modify_callback(update: Update, context: ContextTypes.DEFA
 
 async def handle_dashboard_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    await query.answer()
     data = query.data
     _, target_view = data.split("|")
+
+    if target_view in ("LAUNCH_NEW", "LAUNCH_MODIFY", "LAUNCH_ATTD", "LAUNCH_REMIND"):
+        if not is_main_admin(update.effective_user.id):
+            await query.answer("🔒 Main-admin access only. You are not authorised to use this feature.", show_alert=True)
+            return
+
+    await query.answer()
 
     active_dash_id = context.user_data.get("master_dash_id")
     if active_dash_id and query.message.message_id != active_dash_id:
@@ -945,7 +945,9 @@ async def handle_dashboard_navigation(update: Update, context: ContextTypes.DEFA
                 tid = str(row.get("THREAD ID", "")).strip()
                 performers = performers_map.get(tid, [])
                 if performers:
-                    lines.append(f"    👤 {', '.join(performers)}")
+                    lines.append(f"    👤 _{', '.join(performers)}_")
+
+                lines.append("")
 
             text = "\n".join(lines)
             
@@ -1026,11 +1028,7 @@ async def handle_dashboard_navigation(update: Update, context: ContextTypes.DEFA
 
     elif target_view == "LAUNCH_NEW":
         if not is_main_admin(update.effective_user.id):
-            await query.edit_message_text(
-                MAIN_ADMIN_TOPIC_ONLY_TEXT,
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🦅 Exit to Cockpit", callback_data="DASH_VIEW|HOME")]]),
-                parse_mode="Markdown",
-            )
+            await query.answer("🔒 Main-admin access only. You are not authorised to use this feature.", show_alert=True)
             return
 
         current_dash_id = context.user_data.get("master_dash_id")
@@ -1055,13 +1053,11 @@ async def handle_dashboard_navigation(update: Update, context: ContextTypes.DEFA
         await query.edit_message_text(HOME_TEXT, reply_markup=_build_home_keyboard(), parse_mode="Markdown")
         return
 
-    # 🎯 FIX: Point this to the new single-bubble portal inside admin_handlers
     elif target_view == "LAUNCH_ANNOUNCE":
         from handlers.admin_handlers import initiate_announce_portal_via_dm
         await initiate_announce_portal_via_dm(update, context)
         return
 
-    # 🎯 FIX: Point this to the new single-bubble reminder portal inside admin_handlers
     elif target_view == "LAUNCH_REMIND":
         from handlers.admin_handlers import initiate_remind_portal_via_dm
         await initiate_remind_portal_via_dm(update, context)

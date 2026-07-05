@@ -156,7 +156,17 @@ async def start_command_router(update: Update, context: ContextTypes.DEFAULT_TYP
 def main():
     print("Bot starting...")
     persistence = PicklePersistence(filepath="bot_data.pkl")
-    app = ApplicationBuilder().token(BOT_TOKEN).persistence(persistence).post_init(on_startup).build()
+    app = (
+        ApplicationBuilder()
+        .token(BOT_TOKEN)
+        .persistence(persistence)
+        .post_init(on_startup)
+        .read_timeout(30)
+        .write_timeout(30)
+        .connect_timeout(30)
+        .pool_timeout(3)
+        .build()
+    )
     
     verify_conv_handler = ConversationHandler(
         entry_points=[

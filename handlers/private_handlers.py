@@ -940,7 +940,7 @@ async def handle_dashboard_navigation(update: Update, context: ContextTypes.DEFA
                     else:
                         date_display = first_date
 
-                lines.append(f"{emoji} *{event_name}* | {date_display}")
+                lines.append(f"{emoji} *{event_name}*\n    📅 {date_display}")
 
                 tid = str(row.get("THREAD ID", "")).strip()
                 performers = performers_map.get(tid, [])

@@ -945,7 +945,7 @@ async def handle_dashboard_navigation(update: Update, context: ContextTypes.DEFA
                 tid = str(row.get("THREAD ID", "")).strip()
                 performers = performers_map.get(tid, [])
                 if performers:
-                    lines.append(f"    👤 _{', '.join(performers)}_")
+                    lines.append(f"    👤 ({len(performers)}) _{', '.join(performers)}_")
 
                 lines.append("")
 

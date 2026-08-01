@@ -38,18 +38,29 @@ WELCOME_TEA_MESSAGE = (
     "<i>Got any questions? Don't hesitate to drop a message to our friendly NTUFD Chairperson, @ma_ning (Ma Ning), or Vice-Chairperson, @jurikawazu (Juri), right here on Telegram! We'd love to help! 💬❤️</i>"
 )
 
+# WELCOME_TEA_DETAILS_TEXT = (
+#     "Hello there! We are so excited to see you soon! 🥁✨\n\n"
+#     "<b>NTU Festive Drums' Welcome Tea Session</b>\n"
+#     "📅 <b>Date:</b> {event_date}\n"
+#     "⏰ <b>Time:</b> 1830 - 2130 (GMT+8)\n"
+#     "📍 <b>Venue:</b> <a href='https://maps.app.goo.gl/VHDueGBZ6AyHNjdx5'>Nanyang House Foyer</a>\n"
+#     "👕 <b>Dress Code:</b> Comfortable & Casual! (We generally go barefoot during practice, so slippers or sandals are highly recommended—but covered shoes are totally fine too!)\n\n"
+#     "🍱 <b>Dinner is on us!</b> Time is allocated for eating, so no need to dabao. Feel free to come straight from class! 🏃💨\n\n"
+#     "<b>How to get to Nanyang House</b>\n"
+#     "▶️ <a href='https://drive.google.com/file/d/1PWvvD4kmmnYbFOL0AzE25NEiQ2983ZJl/view?usp=drive_link'>Red Bus (Hall 2) Video Guide</a>\n"
+#     "▶️ <a href='https://drive.google.com/file/d/1ZFmAQHcFQL6VpNzO87UG6KB0u0FuOAlh/view?usp=drive_link'>Blue Bus (Hall 6) Video Guide</a>\n"
+#     "📄 <a href='https://drive.google.com/file/d/1pO1GoNn4MReqFXqBUowyZPL7EJqKpmHb/view?usp=drive_link'>PDF Route Guide</a>\n\n"
+#     "<i>Please let us know if you'll be joining us by clicking one of the buttons below! 👇</i>"
+# )
+
 WELCOME_TEA_DETAILS_TEXT = (
     "Hello there! We are so excited to see you soon! 🥁✨\n\n"
     "<b>NTU Festive Drums' Welcome Tea Session</b>\n"
     "📅 <b>Date:</b> {event_date}\n"
     "⏰ <b>Time:</b> 1830 - 2130 (GMT+8)\n"
-    "📍 <b>Venue:</b> <a href='https://maps.app.goo.gl/VHDueGBZ6AyHNjdx5'>Nanyang House Foyer</a>\n"
+    "📍 <b>Venue:</b> <a href='https://maps.app.goo.gl/oM1RjKVcrUv5zCLQ8'>Nanyang Auditorium Foyer</a>\n"
     "👕 <b>Dress Code:</b> Comfortable & Casual! (We generally go barefoot during practice, so slippers or sandals are highly recommended—but covered shoes are totally fine too!)\n\n"
     "🍱 <b>Dinner is on us!</b> Time is allocated for eating, so no need to dabao. Feel free to come straight from class! 🏃💨\n\n"
-    "<b>How to get to Nanyang House</b>\n"
-    "▶️ <a href='https://drive.google.com/file/d/1PWvvD4kmmnYbFOL0AzE25NEiQ2983ZJl/view?usp=drive_link'>Red Bus (Hall 2) Video Guide</a>\n"
-    "▶️ <a href='https://drive.google.com/file/d/1ZFmAQHcFQL6VpNzO87UG6KB0u0FuOAlh/view?usp=drive_link'>Blue Bus (Hall 6) Video Guide</a>\n"
-    "📄 <a href='https://drive.google.com/file/d/1pO1GoNn4MReqFXqBUowyZPL7EJqKpmHb/view?usp=drive_link'>PDF Route Guide</a>\n\n"
     "<i>Please let us know if you'll be joining us by clicking one of the buttons below! 👇</i>"
 )
 
@@ -78,7 +89,7 @@ CUTOFF_MSG_TEXT = (
 WTD_REMINDER_TEXT = (
     "🥁 <b>Welcome Tea starts tonight!</b>\n\n"
     "Just a friendly reminder — we're kicking off at <b>6:30 PM</b> at "
-    "<b>Nanyang House Foyer</b>! 🎉\n\n"
+    "<b>Nanyang Auditorium Foyer</b>! 🎉\n\n"
     "🍱 Dinner is included — come hungry, no need to eat beforehand!\n\n"
     "See you soon! We can't wait to meet you! ❤️"
 )
@@ -86,7 +97,7 @@ WTD_REMINDER_TEXT = (
 WTD_REMINDER_PENDING_TEXT = (
     "🥁 <b>Welcome Tea starts tonight 📣📣📣</b>\n\n"
     "Just a friendly reminder — we're kicking off at <b>6:30 PM</b> at "
-    "<b>Nanyang House Foyer</b>! 🎉\n\n"
+    "<b>Nanyang Auditorium Foyer</b>! 🎉\n\n"
     "We noticed you haven't confirmed yet — if you're dropping by, we'd still love to see you! 😊 "
     "Please tap the <b>I'll Be There!!</b> or <b>Can't Make It</b> button in our earlier message to let us know.\n\n"
     "⚠️ <b>Heads up:</b> Please eat beforehand as we've already finalised our dinner headcount!"

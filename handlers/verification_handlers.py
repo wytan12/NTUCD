@@ -1,7 +1,8 @@
+import asyncio
 from html import escape
 
 from telegram import Update
-from telegram.constants import ParseMode
+from telegram.constants import ChatAction, ParseMode
 from telegram.ext import ContextTypes, ConversationHandler
 
 from config import (
@@ -13,6 +14,14 @@ from config import (
 from handlers.welcome_tea_handlers import handle_welcome_tea_join_request
 from services.google_sheets import get_welcome_tea_settings, sync_welcome_tea_member
 from utils.constants import ASK_MATRIC, pending_users
+
+# One /verification costs 5 Google Sheets reads (Form Responses lookup + MEMBER
+# INFO sync). Google allows 60 reads/min, so the ceiling is ~12 verifications a
+# minute. After the Follow-up job posts the main-group invite link, ~100 members
+# can click it at once — well past that. Since PTB runs updates one at a time
+# (max_concurrent_updates=1), pausing here throttles the whole queue and keeps
+# the sustained rate under quota.
+VERIFICATION_THROTTLE_SECONDS = 2
 
 
 def _contact_admin_id() -> int:
@@ -166,8 +175,28 @@ async def handle_matric(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return ConversationHandler.END
 
-    synced, result = sync_welcome_tea_member(matric, user_id)
-    
+    # Show "typing…" so the throttle pause below doesn't read as the bot being
+    # broken — otherwise people re-send their matric and make the burst worse.
+    try:
+        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
+    except Exception:
+        pass
+    await asyncio.sleep(VERIFICATION_THROTTLE_SECONDS)
+
+    try:
+        synced, result = sync_welcome_tea_member(matric, user_id)
+    except Exception as e:
+        # Google quota exhausted, or the sheet is unreachable. Without this the
+        # exception escapes the handler and the member gets NO reply at all.
+        print(f"[VERIFY][ERROR] Sheet lookup failed for {user_id}: {e}")
+        await update.effective_message.reply_text(
+            "Our system is a little busy right now. 😅\n\n"
+            "Please wait a minute and type /verification again — your registration is safe, "
+            "we just need a moment to catch up!",
+            parse_mode=ParseMode.HTML,
+        )
+        return ConversationHandler.END
+
     if result == "matric_not_found":
         signup_form_link = get_welcome_tea_settings()["signup_form_link"]
         await update.effective_message.reply_text(

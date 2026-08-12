@@ -1,7 +1,9 @@
+import asyncio
 from datetime import datetime
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
+from telegram.error import RetryAfter
 from telegram.ext import ApplicationHandlerStop, ContextTypes
 
 from config import (
@@ -22,6 +24,8 @@ from services.google_sheets import (
     update_wt_attendance,
     update_wt_msg_id,
     mark_wt_user_col_sent,
+    batch_update_wt_cells,
+    get_wt_write_context,
 )
 from utils.constants import welcome_tea_join_chats, welcome_tea_pending_requests
 
@@ -119,6 +123,24 @@ CANT_MAKE_IT_REPLY = (
 )
 
 WELCOME_TEA_SCHEDULER_INTERVAL_SECONDS = 30
+BROADCAST_SEND_DELAY_SECONDS = 0.05  # 50ms between sends → ~20 msg/sec (Telegram cap is 30/sec)
+
+# SENT markers are flushed to the sheet every this many cells rather than once at
+# the very end. A Heroku dyno restart mid-broadcast wipes anything still buffered
+# in memory, and because `wt_jobs_sent` is only stamped after the job finishes,
+# the scheduler would re-run the whole job and re-message everyone whose marker
+# never landed. Flushing incrementally caps that exposure: at 2 cells per user,
+# 40 cells ≈ 20 users, so a crash can duplicate at most ~20 messages instead of
+# the entire list. Still only ~5 writes per 100 members — far under the 60/min quota.
+BROADCAST_FLUSH_EVERY_CELLS = 40
+
+# Broadcasts go out in batches with a pause between them. This is not about
+# Telegram limits — it staggers when members RECEIVE the message, which staggers
+# when they tap Confirm. Each Confirm costs ~4 Google reads and the quota is 60
+# reads/min, so 100 people all receiving at once (and ~15 tapping in the same
+# minute) would breach it. Spread over 20 minutes, the taps stay well under.
+BROADCAST_BATCH_SIZE = 20
+BROADCAST_BATCH_PAUSE_SECONDS = 300  # 5 minutes
 
 # ---------------------------------------------------------------------------
 # Keyboards
@@ -157,7 +179,7 @@ def _welcome_tea_followup_text() -> str:
         "🎉 <b>Thank you for coming to our Welcome Tea!</b> We really hope you had a fantastic time with us! 🥁✨\n\n"
         "Ready to make some noise and officially join the NTUFD family? 🤩\n"
         f"👉 <a href='{settings.get('main_group_welcome_tea_invite_link', '')}'>Click here to request to join our Main Group!</a>\n\n"
-        "<i>⚠️ Important: After requesting to join, please check your private messages. The bot will send you a quick verification message to get you fully approved!</i>"
+        "<i>⚠️ Important: After requesting to join, the bot will send you a quick verification message to get you fully approved!</i>"
     )
 
 
@@ -559,38 +581,108 @@ async def handle_attd_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE
 # Scheduled job functions
 # ---------------------------------------------------------------------------
 
+def _flush_writes(writes, ctx, force=False):
+    """Push buffered SENT markers to the sheet, in place.
+
+    Called after every send; only actually writes once `BROADCAST_FLUSH_EVERY_CELLS`
+    have accumulated, or when `force=True` (end of job). Clears `writes` on success
+    so each cell is written exactly once. See BROADCAST_FLUSH_EVERY_CELLS for why
+    this is incremental rather than a single flush at the end.
+    """
+    if not writes:
+        return
+    if not force and len(writes) < BROADCAST_FLUSH_EVERY_CELLS:
+        return
+    batch_update_wt_cells(list(writes), ctx=ctx)
+    writes.clear()
+
+
+async def _pace_batch(index, total, writes, ctx):
+    """After each full batch — except the last — save markers and pause.
+
+    `index` is the 0-based position in the recipient list, `total` its length.
+    Flushing BEFORE the sleep is deliberate: a restart during a 5-minute pause
+    would otherwise lose that batch's markers and re-message everyone in it.
+    """
+    done = index + 1
+    if done % BROADCAST_BATCH_SIZE == 0 and done < total:
+        _flush_writes(writes, ctx, force=True)
+        print(f"[WELCOME TEA] {done}/{total} sent — pausing "
+              f"{BROADCAST_BATCH_PAUSE_SECONDS}s before the next batch.")
+        await asyncio.sleep(BROADCAST_BATCH_PAUSE_SECONDS)
+
+
+async def _paced_send(make_coro):
+    """Run a Telegram API call with rate-limit protection.
+
+    Accepts a zero-argument callable (lambda) that returns a fresh coroutine each
+    time it is called — this is required for retry to work correctly, because a
+    coroutine that already raised an exception cannot be awaited a second time.
+
+    Adds a 50 ms pause after every call (~20 msg/sec, well under Telegram's 30/sec cap).
+    On a 429 RetryAfter response, waits the required seconds then retries once.
+
+    Usage:
+        await _paced_send(lambda: bot.send_message(chat_id=uid, text="hi"))
+    """
+    try:
+        result = await make_coro()
+        await asyncio.sleep(BROADCAST_SEND_DELAY_SECONDS)
+        return result
+    except RetryAfter as e:
+        wait = e.retry_after + 0.5
+        print(f"[WELCOME TEA][RATE LIMIT] 429 — waiting {wait}s before retry")
+        await asyncio.sleep(wait)
+        result = await make_coro()  # fresh coroutine from the callable
+        await asyncio.sleep(BROADCAST_SEND_DELAY_SECONDS)
+        return result
+
+
 async def send_welcome_tea_details_job(context: ContextTypes.DEFAULT_TYPE):
     """Scheduled: send Details + Accept/Reject to all Not Confirm users."""
-    recipients = get_welcome_tea_recipients({WELCOME_TEA_STATUS_NOT_CONFIRM})
+    pending = [r for r in get_welcome_tea_recipients({WELCOME_TEA_STATUS_NOT_CONFIRM})
+               if r.get("details_sent") != "SENT"]
     sent = 0
-    for row in recipients:
-        if row.get("details_sent") == "SENT":
-            continue
-        user_id = row["user_id"]
-        try:
-            msg = await _send_welcome_tea_details(context.bot, user_id)
-            update_wt_msg_id(user_id, 7, msg.message_id)  # G = Cutoff Msg ID
-            mark_wt_user_col_sent(user_id, 9)              # I = Details Sent
-            sent += 1
-        except Exception as e:
-            print(f"[WELCOME TEA][WARN] Details DM failed for {user_id}: {e}")
+    writes = []
+    ctx = get_wt_write_context()  # 1 read, reused by every flush below
+    try:
+        for i, row in enumerate(pending):
+            user_id = row["user_id"]
+            try:
+                msg = await _paced_send(lambda: _send_welcome_tea_details(context.bot, user_id))
+                # Only queued after a successful send, so a failed DM is never marked SENT.
+                writes.append((user_id, 7, msg.message_id))  # G = Cutoff Msg ID
+                writes.append((user_id, 9, "SENT"))          # I = Details Sent
+                sent += 1
+            except Exception as e:
+                print(f"[WELCOME TEA][WARN] Details DM failed for {user_id}: {e}")
+            _flush_writes(writes, ctx)
+            await _pace_batch(i, len(pending), writes, ctx)
+    finally:
+        _flush_writes(writes, ctx, force=True)  # always flush the tail
     print(f"[WELCOME TEA] Details broadcast complete. Sent: {sent}")
 
 
 async def send_welcome_tea_reminder_job(context: ContextTypes.DEFAULT_TYPE):
     """Scheduled: send Reminder to all Not Confirm users."""
-    recipients = get_welcome_tea_recipients({WELCOME_TEA_STATUS_NOT_CONFIRM})
+    pending = [r for r in get_welcome_tea_recipients({WELCOME_TEA_STATUS_NOT_CONFIRM})
+               if r.get("reminder_sent") != "SENT"]
     sent = 0
-    for row in recipients:
-        if row.get("reminder_sent") == "SENT":
-            continue
-        user_id = row["user_id"]
-        try:
-            await _send_welcome_tea_reminder(context.bot, user_id)
-            mark_wt_user_col_sent(user_id, 10)  # J = Reminder Sent
-            sent += 1
-        except Exception as e:
-            print(f"[WELCOME TEA][WARN] Reminder DM failed for {user_id}: {e}")
+    writes = []
+    ctx = get_wt_write_context()
+    try:
+        for i, row in enumerate(pending):
+            user_id = row["user_id"]
+            try:
+                await _paced_send(lambda: _send_welcome_tea_reminder(context.bot, user_id))
+                writes.append((user_id, 10, "SENT"))  # J = Reminder Sent
+                sent += 1
+            except Exception as e:
+                print(f"[WELCOME TEA][WARN] Reminder DM failed for {user_id}: {e}")
+            _flush_writes(writes, ctx)
+            await _pace_batch(i, len(pending), writes, ctx)
+    finally:
+        _flush_writes(writes, ctx, force=True)
     print(f"[WELCOME TEA] Reminder broadcast complete. Sent: {sent}")
 
 
@@ -599,75 +691,96 @@ async def process_welcome_tea_join_requests_job(context: ContextTypes.DEFAULT_TY
     approve_targets = get_welcome_tea_recipients({WELCOME_TEA_STATUS_ATTEND})
     reject_targets = get_welcome_tea_recipients({WELCOME_TEA_STATUS_REJECT})
 
+    approve_pending = [r for r in approve_targets if r.get("approval_sent") != "SENT"]
+
     approved = declined = 0
-    for row in approve_targets:
-        if row.get("approval_sent") == "SENT":
-            continue
-        if await _approve_welcome_tea_join_request(context.bot, row["user_id"], context):
-            mark_wt_user_col_sent(row["user_id"], 11)  # K = Approval Sent
-            approved += 1
-    for row in reject_targets:
-        if await _decline_welcome_tea_join_request(context.bot, row["user_id"], context):
-            declined += 1
+    writes = []
+    ctx = get_wt_write_context()
+    try:
+        for i, row in enumerate(approve_pending):
+            if await _approve_welcome_tea_join_request(context.bot, row["user_id"], context):
+                writes.append((row["user_id"], 11, "SENT"))  # K = Approval Sent
+                approved += 1
+            await asyncio.sleep(BROADCAST_SEND_DELAY_SECONDS)  # approve/decline are API calls too
+            _flush_writes(writes, ctx)
+            await _pace_batch(i, len(approve_pending), writes, ctx)
+        for row in reject_targets:
+            if await _decline_welcome_tea_join_request(context.bot, row["user_id"], context):
+                declined += 1
+            await asyncio.sleep(BROADCAST_SEND_DELAY_SECONDS)
+    finally:
+        _flush_writes(writes, ctx, force=True)
 
     print(f"[WELCOME TEA] Approval job complete. Approved: {approved}, Declined: {declined}")
 
 
 async def send_pre_cutoff_nudge_job(context: ContextTypes.DEFAULT_TYPE):
     """Scheduled: pre-cutoff nudge DM to all Not Confirm users."""
-    recipients = get_welcome_tea_recipients({WELCOME_TEA_STATUS_NOT_CONFIRM})
+    pending = [r for r in get_welcome_tea_recipients({WELCOME_TEA_STATUS_NOT_CONFIRM})
+               if r.get("pre_cutoff_sent") != "SENT"]
     sent = 0
-    for row in recipients:
-        if row.get("pre_cutoff_sent") == "SENT":
-            continue
-        user_id = row["user_id"]
-        try:
-            await context.bot.send_message(
-                chat_id=user_id,
-                text=PRE_CUTOFF_NUDGE_TEXT,
-                parse_mode=ParseMode.HTML,
-            )
-            mark_wt_user_col_sent(user_id, 12)  # L = Pre-Cutoff Sent
-            sent += 1
-        except Exception as e:
-            print(f"[WELCOME TEA][WARN] Pre-cutoff nudge failed for {user_id}: {e}")
+    writes = []
+    ctx = get_wt_write_context()
+    try:
+        for i, row in enumerate(pending):
+            user_id = row["user_id"]
+            try:
+                await _paced_send(lambda: context.bot.send_message(
+                    chat_id=user_id,
+                    text=PRE_CUTOFF_NUDGE_TEXT,
+                    parse_mode=ParseMode.HTML,
+                ))
+                writes.append((user_id, 12, "SENT"))  # L = Pre-Cutoff Sent
+                sent += 1
+            except Exception as e:
+                print(f"[WELCOME TEA][WARN] Pre-cutoff nudge failed for {user_id}: {e}")
+            _flush_writes(writes, ctx)
+            await _pace_batch(i, len(pending), writes, ctx)
+    finally:
+        _flush_writes(writes, ctx, force=True)
     print(f"[WELCOME TEA] Pre-cutoff nudge complete. Sent: {sent}")
 
 
 async def send_cutoff_job(context: ContextTypes.DEFAULT_TYPE):
     """Scheduled: strip Accept/Reject buttons, send I'll Be There/Can't Make It DM."""
-    recipients = get_welcome_tea_recipients({WELCOME_TEA_STATUS_NOT_CONFIRM})
+    pending = [r for r in get_welcome_tea_recipients({WELCOME_TEA_STATUS_NOT_CONFIRM})
+               if r.get("cutoff_sent") != "SENT"]
     sent = 0
-    for row in recipients:
-        if row.get("cutoff_sent") == "SENT":
-            continue
-        user_id = row["user_id"]
+    writes = []
+    ctx = get_wt_write_context()
+    try:
+        for i, row in enumerate(pending):
+            user_id = row["user_id"]
 
-        # Strip existing details buttons via stored Cutoff Msg ID (col G)
-        cutoff_msg_id = row.get("cutoff_msg_id")
-        if cutoff_msg_id:
+            # Strip existing details buttons via stored Cutoff Msg ID (col G)
+            cutoff_msg_id = row.get("cutoff_msg_id")
+            if cutoff_msg_id:
+                try:
+                    await _paced_send(lambda: context.bot.edit_message_reply_markup(
+                        chat_id=user_id,
+                        message_id=int(cutoff_msg_id),
+                        reply_markup=None,
+                    ))
+                except Exception as e:
+                    print(f"[WELCOME TEA][WARN] Could not strip detail buttons for {user_id}: {e}")
+
+            # Send cutoff DM with I'll Be There/Can't Make It buttons
             try:
-                await context.bot.edit_message_reply_markup(
+                msg = await _paced_send(lambda: context.bot.send_message(
                     chat_id=user_id,
-                    message_id=int(cutoff_msg_id),
-                    reply_markup=None,
-                )
+                    text=CUTOFF_MSG_TEXT,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=_still_coming_keyboard(),
+                ))
+                writes.append((user_id, 8, msg.message_id))  # H = Final Cutoff Msg ID
+                writes.append((user_id, 13, "SENT"))         # M = Cutoff Sent
+                sent += 1
             except Exception as e:
-                print(f"[WELCOME TEA][WARN] Could not strip detail buttons for {user_id}: {e}")
-
-        # Send cutoff DM with I'll Be There/Can't Make It buttons
-        try:
-            msg = await context.bot.send_message(
-                chat_id=user_id,
-                text=CUTOFF_MSG_TEXT,
-                parse_mode=ParseMode.HTML,
-                reply_markup=_still_coming_keyboard(),
-            )
-            update_wt_msg_id(user_id, 8, msg.message_id)  # H = Final Cutoff Msg ID
-            mark_wt_user_col_sent(user_id, 13)             # M = Cutoff Sent
-            sent += 1
-        except Exception as e:
-            print(f"[WELCOME TEA][WARN] Cutoff DM failed for {user_id}: {e}")
+                print(f"[WELCOME TEA][WARN] Cutoff DM failed for {user_id}: {e}")
+            _flush_writes(writes, ctx)
+            await _pace_batch(i, len(pending), writes, ctx)
+    finally:
+        _flush_writes(writes, ctx, force=True)
 
     print(f"[WELCOME TEA] Cutoff broadcast complete. Sent: {sent}")
 
@@ -678,23 +791,29 @@ async def send_wtd_reminder_job(context: ContextTypes.DEFAULT_TYPE):
     pending = get_welcome_tea_recipients({WELCOME_TEA_STATUS_NOT_CONFIRM})
     sent = 0
 
-    for row, text in (
-        [(r, WTD_REMINDER_TEXT) for r in confirmed]
-        + [(r, WTD_REMINDER_PENDING_TEXT) for r in pending]
-    ):
-        if row.get("wtd_reminder_sent") == "SENT":
-            continue
-        user_id = row["user_id"]
-        try:
-            await context.bot.send_message(
-                chat_id=user_id,
-                text=text,
-                parse_mode=ParseMode.HTML,
-            )
-            mark_wt_user_col_sent(user_id, 14)  # N = WTD Reminder Sent
-            sent += 1
-        except Exception as e:
-            print(f"[WELCOME TEA][WARN] WTD reminder failed for {user_id}: {e}")
+    targets = [(r, WTD_REMINDER_TEXT) for r in confirmed]
+    targets += [(r, WTD_REMINDER_PENDING_TEXT) for r in pending]
+    targets = [(r, t) for r, t in targets if r.get("wtd_reminder_sent") != "SENT"]
+
+    writes = []
+    ctx = get_wt_write_context()
+    try:
+        for i, (row, text) in enumerate(targets):
+            user_id = row["user_id"]
+            try:
+                await _paced_send(lambda uid=user_id, t=text: context.bot.send_message(
+                    chat_id=uid,
+                    text=t,
+                    parse_mode=ParseMode.HTML,
+                ))
+                writes.append((user_id, 14, "SENT"))  # N = WTD Reminder Sent
+                sent += 1
+            except Exception as e:
+                print(f"[WELCOME TEA][WARN] WTD reminder failed for {user_id}: {e}")
+            _flush_writes(writes, ctx)
+            await _pace_batch(i, len(targets), writes, ctx)
+    finally:
+        _flush_writes(writes, ctx, force=True)
     print(f"[WELCOME TEA] WTD reminder complete. Sent: {sent}")
 
 
@@ -711,11 +830,11 @@ async def final_cleanup_job(context: ContextTypes.DEFAULT_TYPE):
         if not final_cutoff_msg_id:
             continue
         try:
-            await context.bot.edit_message_reply_markup(
+            await _paced_send(lambda: context.bot.edit_message_reply_markup(
                 chat_id=user_id,
                 message_id=int(final_cutoff_msg_id),
                 reply_markup=None,
-            )
+            ))
             stripped += 1
         except Exception as e:
             print(f"[WELCOME TEA][WARN] Could not strip final buttons for {user_id}: {e}")
@@ -723,17 +842,39 @@ async def final_cleanup_job(context: ContextTypes.DEFAULT_TYPE):
 
 
 async def send_post_welcome_tea_followup_job(context: ContextTypes.DEFAULT_TYPE):
-    """Send the thank-you + main group invite to the Welcome Tea group."""
+    """DM the thank-you + main-group invite to everyone who checked in.
+
+    Targets only members with Attendance = "1" (col F), i.e. those who ran /attd
+    on event day — not merely those who RSVP'd. Sent per-person rather than as a
+    group post so delivery can be tracked in the Followup Sent column (O), which
+    also makes the job safely re-runnable.
+    """
+    checked_in = [r for r in get_welcome_tea_recipients()
+                  if str(r.get("attendance", "")).strip() == "1"]
+    pending = [r for r in checked_in if r.get("followup_sent") != "SENT"]
+    text = _welcome_tea_followup_text()
+    sent = 0
+    writes = []
+    ctx = get_wt_write_context()
     try:
-        await context.bot.send_message(
-            chat_id=WELCOME_TEA_GROUP_CHAT_ID,
-            text=_welcome_tea_followup_text(),
-            parse_mode=ParseMode.HTML,
-            disable_web_page_preview=True,
-        )
-        print("[WELCOME TEA] Post-event main-group invitation sent.")
-    except Exception as e:
-        print(f"[WELCOME TEA][ERROR] Post-event invitation failed: {e}")
+        for i, row in enumerate(pending):
+            user_id = row["user_id"]
+            try:
+                await _paced_send(lambda uid=user_id: context.bot.send_message(
+                    chat_id=uid,
+                    text=text,
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True,
+                ))
+                writes.append((user_id, 15, "SENT"))  # O = Followup Sent
+                sent += 1
+            except Exception as e:
+                print(f"[WELCOME TEA][WARN] Follow-up DM failed for {user_id}: {e}")
+            _flush_writes(writes, ctx)
+            await _pace_batch(i, len(pending), writes, ctx)
+    finally:
+        _flush_writes(writes, ctx, force=True)
+    print(f"[WELCOME TEA] Follow-up complete. Checked in: {len(checked_in)}, sent: {sent}")
 
 
 # ---------------------------------------------------------------------------

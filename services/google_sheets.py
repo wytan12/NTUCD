@@ -1274,6 +1274,7 @@ def _welcome_tea_layout(values=None):
         "pre_cutoff_sent": 12,
         "cutoff_sent": 13,
         "wtd_reminder_sent": 14,
+        "followup_sent": 15,
     }
     if not values:
         return 1, default_cols
@@ -1293,6 +1294,7 @@ def _welcome_tea_layout(values=None):
         "pre_cutoff_sent": ("pre cutoff send", "pre cutoff sent"),
         "cutoff_sent": ("cutoff send", "cutoff sent"),
         "wtd_reminder_sent": ("wtd reminder send", "wtd reminder sent"),
+        "followup_sent": ("followup send", "followup sent", "follow up send", "follow-up send"),
     }
     all_alias_names = {name for names in aliases.values() for name in names}
 
@@ -1501,6 +1503,74 @@ def _update_wt_user_cell(user_id: int, col_index: int, value) -> bool:
         return False
 
 
+def get_wt_write_context():
+    """Return `(worksheet, {tele_id: row_number})` for batched Welcome Tea writes.
+
+    Costs one worksheet lookup + one read. Pass the result to
+    `batch_update_wt_cells(..., ctx=...)` so a broadcast that flushes several
+    times still only pays for that read once. Returns None if the sheet can't be
+    reached (callers then fall back to a self-contained write).
+    """
+    try:
+        ws = _welcome_tea_ws()
+        values = ws.get_all_values()
+        first_data_row, cols = _welcome_tea_layout(values)
+        row_by_uid = {}
+        for row_number, row in enumerate(values[first_data_row - 1:], start=first_data_row):
+            uid = _row_cell(row, cols["tele_id"])
+            if uid:
+                row_by_uid[uid] = row_number
+        return ws, row_by_uid
+    except Exception as e:
+        print(f"[WELCOME TEA][ERROR] Could not build write context: {e}")
+        return None
+
+
+def batch_update_wt_cells(updates, ctx=None) -> int:
+    """Write many per-user cells in ONE batch_update call.
+
+    `updates` is a list of `(user_id, col_index, value)` tuples. With a `ctx`
+    from `get_wt_write_context()` the call costs exactly 1 write; without one it
+    also pays for its own read. Either way it replaces the 2 reads + 2 writes
+    *per user* that `_update_wt_user_cell` in a loop would cost — a 100-member
+    broadcast would otherwise blow Google's 60-requests-per-minute quota partway
+    through and silently drop the remaining SENT markers.
+
+    Returns the number of cells actually written.
+    """
+    if not updates:
+        return 0
+    try:
+        from gspread.utils import rowcol_to_a1
+
+        if ctx is None:
+            ctx = get_wt_write_context()
+            if ctx is None:
+                return 0
+        ws, row_by_uid = ctx
+
+        batch = []
+        for user_id, col_index, value in updates:
+            row_number = row_by_uid.get(str(user_id))
+            if not row_number:
+                print(f"[WELCOME TEA][WARN] User {user_id} not found for batch update (col {col_index}).")
+                continue
+            batch.append({
+                "range": rowcol_to_a1(row_number, col_index),
+                "values": [[str(value)]],
+            })
+
+        if not batch:
+            return 0
+        ws.batch_update(batch, value_input_option="USER_ENTERED")  # 1 WRITE for the whole batch
+        invalidate_sheet_cache(tab_name=WELCOME_TEA_ID_TAB)
+        print(f"[WELCOME TEA] Batch-wrote {len(batch)} cells in 1 API call.")
+        return len(batch)
+    except Exception as e:
+        print(f"[WELCOME TEA][ERROR] Batch cell update failed: {e}")
+        return 0
+
+
 def get_wt_user(user_id: int):
     """Return the full row dict for a user, or None if not found."""
     target = str(user_id)
@@ -1556,6 +1626,7 @@ def get_welcome_tea_rows():
                 "pre_cutoff_sent": _row_cell(row, cols.get("pre_cutoff_sent", 12)),
                 "cutoff_sent": _row_cell(row, cols.get("cutoff_sent", 13)),
                 "wtd_reminder_sent": _row_cell(row, cols.get("wtd_reminder_sent", 14)),
+                "followup_sent": _row_cell(row, cols.get("followup_sent", 15)),
             })
     except Exception as e:
         print(f"[ERROR] Failed to read Welcome Tea IDs: {e}")
@@ -1610,7 +1681,7 @@ def append_welcome_tea_id(user_id: int, username: str = ""):
         from gspread.utils import rowcol_to_a1
         
         ws = _welcome_tea_ws()
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        timestamp = datetime.now(sg_tz).strftime("%Y-%m-%d %H:%M:%S")
         values = ws.get_all_values()
         first_data_row, cols = _welcome_tea_layout(values)
         target = str(user_id)

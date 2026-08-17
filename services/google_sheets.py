@@ -163,12 +163,17 @@ def _normalized_record(record):
 
 
 def get_welcome_tea_registration(matric_number: str):
-    """Return the latest 2026 Welcome Tea response matching `Matric No`."""
+    """Return the latest 2026 Welcome Tea response matching `Matric No`.
+
+    Uses the smart cache — Form Responses are stable once registration closes,
+    so concurrent verifications share a single download instead of each paying
+    a live API read.
+    """
     target = (matric_number or "").strip().upper()
     if not target:
         return None
 
-    rows = get_gspread_sheet(WELCOME_TEA_SHEET, WELCOME_TEA_TAB).get_all_records()
+    rows = get_cached_records(WELCOME_TEA_SHEET, WELCOME_TEA_TAB)
     for row in reversed(rows):
         normalized = _normalized_record(row)
         if str(normalized.get("matric no", "")).strip().upper() == target:
@@ -1410,9 +1415,14 @@ def get_welcome_tea_settings():
       Row 3, cols I-N: TIME for 6 scheduled jobs
       Row 4, cols I-N: DATE for 6 scheduled jobs
       Job col order: I=Details, J=Reminder, K=Approval, L=PreCutoff, M=Cutoff, N=WTDReminder
+
+    Uses the smart cache — B1-B4 settings are stable during the verification
+    window, so join-request bursts share a single download. The 30-second Drive
+    modifiedTime TTL still catches any admin edits to job schedule cells.
     """
     try:
-        values = _welcome_tea_ws().get_all_values()
+        from config import WELCOME_TEA_ID_TAB
+        values = get_cached_values(tab_name=WELCOME_TEA_ID_TAB)
     except Exception as e:
         print(f"[WELCOME TEA][WARN] Failed to read sheet settings: {e}")
         return {}
@@ -1673,7 +1683,7 @@ def update_welcome_tea_status(user_id: int, status: str) -> bool:
         return False
 
 
-def append_welcome_tea_id(user_id: int, username: str = ""):
+def append_welcome_tea_id(user_id: int, username: str = "", status: str = None):
     """Insert/update a Telegram user in WELCOME TEA ID with header-aware columns."""
     try:
         from config import WELCOME_TEA_STATUS_NOT_CONFIRM
@@ -1742,7 +1752,7 @@ def append_welcome_tea_id(user_id: int, username: str = ""):
         )
         ws.batch_update([{
             "range": f"{rowcol_to_a1(target_row, cols['tele_id'])}:{rowcol_to_a1(target_row, cols['status'])}",
-            "values": [[target, username or "", timestamp, WELCOME_TEA_STATUS_NOT_CONFIRM]],
+            "values": [[target, username or "", timestamp, status or WELCOME_TEA_STATUS_NOT_CONFIRM]],
         }], value_input_option="USER_ENTERED")
         invalidate_sheet_cache(tab_name=WELCOME_TEA_ID_TAB)
         print(f"[INFO] Welcome Tea ID {user_id} ({username}) logged to WELCOME TEA ID tab.")

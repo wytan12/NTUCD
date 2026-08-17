@@ -292,6 +292,19 @@ async def handle_welcome_tea_join_request(join_request, context: ContextTypes.DE
     if not success:
         print(f"[WELCOME TEA][ERROR] Failed to register join request for {user_id}.")
 
+    # If the user already checked in via /attd (F=1), approve immediately and skip
+    # all DMs — they came through the event-day flow and just need to enter the group.
+    row = get_wt_user(user_id)
+    if row and str(row.get("attendance", "")).strip() == "1":
+        try:
+            await join_request.approve()
+            print(f"[WELCOME TEA] Auto-approved attendee {user_id} via RTJ link.")
+        except Exception as e:
+            print(f"[WELCOME TEA][WARN] Auto-approve for attendee {user_id} failed: {e}")
+        welcome_tea_pending_requests.pop(user_id, None)
+        welcome_tea_join_chats.pop(user_id, None)
+        return
+
     settings = get_welcome_tea_settings()
     now = datetime.now(sg_tz)
     window = _detect_wt_window(now, settings)
@@ -500,7 +513,7 @@ async def handle_dietary_reply(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def handle_attd_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Welcome Tea day /attd check-in for non-admin members."""
-    from services.google_sheets import is_dashboard_admin, get_alert_admin_ids
+    from services.google_sheets import is_dashboard_admin
 
     user = update.effective_user
     user_id = user.id
@@ -514,78 +527,58 @@ async def handle_attd_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE
     settings = get_welcome_tea_settings()
     event_date = settings.get("event_date")
     if not event_date:
-        return  # WT not configured — silently ignore
+        return
 
     today = datetime.now(sg_tz).date()
     if today != event_date:
-        return  # Not WT day — silently ignore for non-admins
+        return
 
+    wt_link = settings.get("welcome_tea_join_request_link", "")
     row = get_wt_user(user_id)
+
     if row is None:
+        # Walk-in not in the sheet at all — register and send direct join link
+        append_welcome_tea_id(user_id, user.full_name or "", status="I'll still be Coming")
+        update_wt_attendance(user_id)
         await update.message.reply_text(
-            "Not registered yet — please scan the QR code first! 📱"
+            f"✅ Attendance lodged! Welcome, and enjoy the night! 🥁🎉\n\n"
+            f"Please join our Welcome Tea group chat, tap the link below:\n{wt_link}"
         )
         return
 
     if row.get("attendance") == "1":
         await update.message.reply_text(
-            "Your attendance has already been recorded! 🎉 See you there!"
+            "Your attendance has already been recorded! Enjoy the night! 🥁🎉"
         )
         return
 
-    update_wt_attendance(user_id)
     status = row.get("status", "")
+    update_wt_attendance(user_id)
 
-    # Strip I'll Be There / Can't Make It buttons if still showing (e.g. Not Confirm walkins)
-    final_cutoff_msg_id = row.get("final_cutoff_msg_id")
-    if final_cutoff_msg_id:
-        try:
-            await context.bot.edit_message_reply_markup(
-                chat_id=user_id,
-                message_id=int(final_cutoff_msg_id),
-                reply_markup=None,
-            )
-        except Exception:
-            pass  # Already stripped or message too old — safe to ignore
-
-    if status == WELCOME_TEA_STATUS_ATTEND:
-        # Already approved into WT group, food catered — just confirm
+    if status in ("Confirm", "I'll still be Coming", "Last Min CMI"):
         await update.message.reply_text(
-            "✅ Your attendance has been recorded! Welcome to NTUFD! 🎉"
+            "✅ Attendance lodged! Welcome, and enjoy the night! 🥁🎉"
         )
-        return
 
-    # STILL_COMING / Not Confirm: pending request still open → can approve now
-    # Reject: request was already declined when they hit "Can't Make It" → skip approve
-    if status != WELCOME_TEA_STATUS_REJECT:
+    elif status in ("Reject", "Waiting for reply"):
+        update_welcome_tea_status(user_id, "I'll still be Coming")
         approved = await _approve_welcome_tea_join_request(context.bot, user_id, context)
         if approved:
-            mark_wt_user_col_sent(user_id, 11)  # K = Approval Sent
+            await update.message.reply_text(
+                "✅ Attendance lodged! Welcome, and enjoy the night! 🥁🎉"
+            )
+        else:
+            # No pending request (kicked earlier or never submitted) — send direct join link
+            await update.message.reply_text(
+                f"✅ Attendance lodged! Welcome!\n\n"
+                f"Please join our Welcome Tea group chat, tap the link below:\n{wt_link}"
+            )
 
-    await update.message.reply_text(
-        "✅ Your attendance has been recorded! Welcome to NTUFD! 🎉"
-    )
-
-    username_str = f"@{user.username}" if user.username else (user.full_name or str(user_id))
-    if status == WELCOME_TEA_STATUS_REJECT:
-        warning_msg = (
-            f"⚠️ <b>Food heads-up + Action needed:</b> {username_str} (ID: <code>{user_id}</code>) "
-            f"checked in via /attd but had previously declined (status: <b>Reject</b>). "
-            f"Food was not catered — please take note.\n\n"
-            f"Their WT group join request was already declined. Please <b>manually add them</b> to the WT group, "
-            f"or ask them to re-scan the WT group invite QR to submit a new request."
-        )
     else:
-        warning_msg = (
-            f"⚠️ <b>Food heads-up:</b> {username_str} (ID: <code>{user_id}</code>) just checked in via "
-            f"/attd with status <b>{status or 'Unknown'}</b>. "
-            f"Food was not catered for them — please take note."
+        # Not Confirm or any unknown status — shouldn't occur but handle gracefully
+        await update.message.reply_text(
+            "✅ Attendance lodged! Welcome, and enjoy the night! 🥁🎉"
         )
-    for admin_id in get_alert_admin_ids():
-        try:
-            await context.bot.send_message(chat_id=admin_id, text=warning_msg, parse_mode=ParseMode.HTML)
-        except Exception as e:
-            print(f"[WELCOME TEA][WARN] Could not DM admin {admin_id} food warning: {e}")
 
 
 # ---------------------------------------------------------------------------

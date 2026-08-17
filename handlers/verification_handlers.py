@@ -12,15 +12,12 @@ from config import (
     WELCOME_TEA_LINK_KEYWORD,
 )
 from handlers.welcome_tea_handlers import handle_welcome_tea_join_request
-from services.google_sheets import get_welcome_tea_settings, sync_welcome_tea_member
+from services.google_sheets import get_welcome_tea_settings, sync_welcome_tea_member, get_welcome_tea_registration
 from utils.constants import ASK_MATRIC, pending_users
 
-# One /verification costs 5 Google Sheets reads (Form Responses lookup + MEMBER
-# INFO sync). Google allows 60 reads/min, so the ceiling is ~12 verifications a
-# minute. After the Follow-up job posts the main-group invite link, ~100 members
-# can click it at once — well past that. Since PTB runs updates one at a time
-# (max_concurrent_updates=1), pausing here throttles the whole queue and keeps
-# the sustained rate under quota.
+# Matric lookup uses the cached Form Responses (zero live API calls after warm-up).
+# MEMBER INFO sync is handled by drain_member_writes_job running in the background.
+# The throttle here is UX-only: shows typing while the bot works, prevents spam.
 VERIFICATION_THROTTLE_SECONDS = 2
 
 
@@ -36,6 +33,10 @@ async def _send_main_group_verification_prompt(join_request, context):
     settings = get_welcome_tea_settings()
     signup_form_link = settings.get("signup_form_link", "")
     pending_users[user.id] = join_request
+    # Persist the user ID so verification can still proceed after a bot restart.
+    # The ChatJoinRequest object itself can't be pickled, but the ID lets us
+    # fall back to bot.approve_chat_join_request() if the object is gone.
+    context.application.bot_data.setdefault("pending_verification_ids", set()).add(user.id)
 
     try:
         await context.bot.send_message(
@@ -162,12 +163,13 @@ async def start_verification(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def handle_matric(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Sync the latest registration data, then approve the pending request."""
+    """Verify matric against cached Form Responses, approve immediately, queue MEMBER INFO write."""
     user_id = update.effective_user.id
     matric = update.effective_message.text.strip()
     join_request = pending_users.get(user_id)
+    pending_ids = context.application.bot_data.get("pending_verification_ids", set())
 
-    if join_request is None:
+    if join_request is None and user_id not in pending_ids:
         await update.effective_message.reply_text(
             "Oops! 🙈 It looks like we don't have a pending main-group join request from you.\n\n"
             "Please request to join the group first, and then type /verification again so we can let you in! ✨",
@@ -175,53 +177,35 @@ async def handle_matric(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return ConversationHandler.END
 
-    # Show "typing…" so the throttle pause below doesn't read as the bot being
-    # broken — otherwise people re-send their matric and make the burst worse.
     try:
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
     except Exception:
         pass
     await asyncio.sleep(VERIFICATION_THROTTLE_SECONDS)
 
-    try:
-        synced, result = sync_welcome_tea_member(matric, user_id)
-    except Exception as e:
-        # Google quota exhausted, or the sheet is unreachable. Without this the
-        # exception escapes the handler and the member gets NO reply at all.
-        print(f"[VERIFY][ERROR] Sheet lookup failed for {user_id}: {e}")
-        await update.effective_message.reply_text(
-            "Our system is a little busy right now. 😅\n\n"
-            "Please wait a minute and type /verification again — your registration is safe, "
-            "we just need a moment to catch up!",
-            parse_mode=ParseMode.HTML,
-        )
-        return ConversationHandler.END
+    # Cached lookup — no live API call after the first warm-up read.
+    registration = get_welcome_tea_registration(matric)
 
-    if result == "matric_not_found":
-        signup_form_link = get_welcome_tea_settings()["signup_form_link"]
+    if registration is None:
+        signup_form_link = get_welcome_tea_settings().get("signup_form_link", "")
         await update.effective_message.reply_text(
             "Hmm, we couldn't find that matriculation number in our records. 🤔\n\n"
             "If you haven't filled out our registration form yet, please do so here:\n"
             f"👉 <a href='{escape(signup_form_link, quote=True)}'>Welcome Tea Registration Form</a> 📝\n\n"
-            "Once submitted, just type /verification again to retry!\n\n"
+            "Once submitted, please <b>wait about 2 minutes</b> before typing /verification again so our system can pick up your entry!\n\n"
             "<i>(If you've already filled it out, please double-check your matriculation number for any typos. Still stuck? Just drop a message to our Chairpersons @ma_ning or @jurikawazu for help! ❤️)</i>",
             parse_mode=ParseMode.HTML,
             disable_web_page_preview=True,
         )
         return ConversationHandler.END
 
-    if not synced:
-        print(f"[VERIFY][ERROR] MEMBER INFO sync failed for {user_id}: {result}")
-        await update.effective_message.reply_text(
-            "Good news: We found your registration! 🎉\n"
-            "Bad news: Our database is taking a little nap right now and couldn't sync your profile. 💤\n\n"
-            "Please contact our friendly admins so we can help you out, and try /verification again a bit later!",
-            parse_mode=ParseMode.HTML
-        )
-        return ConversationHandler.END
-
+    # Matric found — approve into main group immediately (zero Sheets API).
+    # If the bot restarted and the join_request object is gone, fall back to the API call.
     try:
-        await join_request.approve()
+        if join_request is not None:
+            await join_request.approve()
+        else:
+            await context.bot.approve_chat_join_request(chat_id=CHAT_ID, user_id=user_id)
     except Exception as e:
         print(f"[VERIFY][ERROR] Join approval failed for {user_id}: {e}")
         await update.effective_message.reply_text(
@@ -231,13 +215,43 @@ async def handle_matric(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode=ParseMode.HTML
         )
         pending_users.pop(user_id, None)
+        pending_ids.discard(user_id)
         return ConversationHandler.END
 
-    # Success!
+    # Queue the MEMBER INFO write — drain_member_writes_job handles it in the background.
+    context.application.bot_data.setdefault("pending_member_writes", {})[user_id] = matric
     pending_users.pop(user_id, None)
+    pending_ids.discard(user_id)
+
     await update.effective_message.reply_text(
         "Woohoo! 🎉 Your matriculation number is fully verified and your join request has been approved.\n\n"
         "<b>Officially welcome to the NTUFD family! We are absolutely thrilled to have you here!</b> 🥁🔥",
         parse_mode=ParseMode.HTML
     )
     return ConversationHandler.END
+
+
+async def drain_member_writes_job(context: ContextTypes.DEFAULT_TYPE):
+    """Background job: write one queued verification to MEMBER INFO per tick.
+
+    Runs every 7 seconds. Processes one user at a time to stay well under the
+    Google Sheets API quota (~2 API calls per user × ~8 users/min = 16 calls/min).
+    Retries automatically on transient failures; drops entries on permanent ones.
+    """
+    queue = context.bot_data.get("pending_member_writes", {})
+    if not queue:
+        return
+    tele_id, matric = next(iter(queue.items()))
+    try:
+        synced, result = sync_welcome_tea_member(matric, tele_id)
+        if synced:
+            queue.pop(tele_id, None)
+            print(f"[DRAIN] Synced {tele_id} ({matric}): {result}")
+        elif result in ("matric_not_found", "header_mismatch",
+                        "no_empty_member_row", "member_info_missing_required_columns"):
+            queue.pop(tele_id, None)
+            print(f"[DRAIN][WARN] Dropped {tele_id} ({matric}): {result} — manual check needed")
+        else:
+            print(f"[DRAIN] Will retry {tele_id} ({matric}): {result}")
+    except Exception as e:
+        print(f"[DRAIN] Error for {tele_id} ({matric}): {e} — will retry next tick")

@@ -21,7 +21,7 @@ from handlers.message_handlers import handle_message
 from handlers.private_handlers import handle_private_command
 from handlers.poll_handlers import handle_poll_answer, auto_poll_check
 from handlers.attendance_handlers import attendance_callback
-from handlers.verification_handlers import start_verification, handle_matric, join_request_handler
+from handlers.verification_handlers import start_verification, handle_matric, join_request_handler, drain_member_writes_job
 from handlers.modify_handlers import start_modify, get_modify_field_callback
 from handlers.modify_handlers import handle_modify_status_selection, handle_modify_date_selection
 from handlers.member_handlers import handle_member_status, handle_new_member
@@ -148,6 +148,7 @@ async def on_startup(application):
     # application.job_queue.run_once(daily_reminder_cron_job, when=10)  
     print(f"[AUTOMATION] Background automated checker established for daily execution at: {target_time}")
     schedule_welcome_tea_jobs(application)
+    application.job_queue.run_repeating(drain_member_writes_job, interval=7, first=10)
 
 async def start_command_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Route /start to the admin dashboard."""

@@ -147,7 +147,9 @@ async def on_startup(application):
     application.job_queue.run_daily(daily_reminder_cron_job, time=target_time)
     # application.job_queue.run_once(daily_reminder_cron_job, when=10)  
     print(f"[AUTOMATION] Background automated checker established for daily execution at: {target_time}")
-    schedule_welcome_tea_jobs(application)
+    # Welcome Tea automation is run manually — the 30s sheet-polling tick is
+    # disabled. /attd and /verification read settings directly and are unaffected.
+    # schedule_welcome_tea_jobs(application)
     application.job_queue.run_repeating(drain_member_writes_job, interval=7, first=10)
 
 async def start_command_router(update: Update, context: ContextTypes.DEFAULT_TYPE):

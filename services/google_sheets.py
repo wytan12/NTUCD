@@ -64,6 +64,14 @@ _values_cache = {}
 _modified_time_cache = {}
 _MODIFIED_TIME_TTL_SECONDS = 30
 
+# Separate time-based cache for the Form Responses sheet.
+# Google Form submissions are written by Google's infrastructure, not a user account,
+# so the linked sheet's Drive modifiedTime may lag by several minutes after a submission.
+# The modifiedTime-based cache would never detect new entries until modifiedTime catches up.
+# This dedicated cache forces a re-download every 60 seconds regardless of modifiedTime.
+_wt_form_cache: dict = {"records": None, "downloaded_at": 0.0}
+_WT_FORM_CACHE_TTL = 60  # seconds
+
 def _spreadsheet_modified_time(sheet_name, force=False):
     """Return the spreadsheet's Drive modifiedTime string, or None on error."""
     now = time.monotonic()
@@ -165,16 +173,27 @@ def _normalized_record(record):
 def get_welcome_tea_registration(matric_number: str):
     """Return the latest 2026 Welcome Tea response matching `Matric No`.
 
-    Uses the smart cache — Form Responses are stable once registration closes,
-    so concurrent verifications share a single download instead of each paying
-    a live API read.
+    Uses a 60-second time-based cache instead of the modifiedTime cache.
+    Google Form submissions are written by Google's infrastructure so the
+    linked sheet's Drive modifiedTime can lag by several minutes; a pure
+    modifiedTime check would serve stale data indefinitely. With a 60-second
+    TTL, new submissions are visible within one minute, and concurrent
+    verifications still share a single download (≤ 1 API read/minute).
     """
     target = (matric_number or "").strip().upper()
     if not target:
         return None
 
-    rows = get_cached_records(WELCOME_TEA_SHEET, WELCOME_TEA_TAB)
-    for row in reversed(rows):
+    now = time.monotonic()
+    if (
+        _wt_form_cache["records"] is None
+        or now - _wt_form_cache["downloaded_at"] > _WT_FORM_CACHE_TTL
+    ):
+        _wt_form_cache["records"] = get_gspread_sheet(WELCOME_TEA_SHEET, WELCOME_TEA_TAB).get_all_records()
+        _wt_form_cache["downloaded_at"] = now
+        print(f"[WT FORM] Re-downloaded Form Responses ({len(_wt_form_cache['records'])} rows)")
+
+    for row in reversed(_wt_form_cache["records"]):
         normalized = _normalized_record(row)
         if str(normalized.get("matric no", "")).strip().upper() == target:
             return row

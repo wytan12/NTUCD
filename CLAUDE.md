@@ -19,11 +19,17 @@ University. It manages:
 | Layer | Technology |
 |---|---|
 | Bot framework | `python-telegram-bot` v21.5 (async, polling) |
-| Persistence | `PicklePersistence` → `bot_data.pkl` (WT job tracking, dietary-capture state, group chat data survive restarts) |
+| Persistence | `PicklePersistence` → `bot_data.pkl` (WT job tracking, dietary-capture state, pending verification / member-write queues, group chat data survive restarts) |
 | Database | Google Sheets via `gspread` + `oauth2client` |
 | Timezone | Asia/Singapore (`pytz`) |
-| Scheduler | `JobQueue` (APScheduler): daily 7-day performance reminder scan (09:00 SGT), daily auto-poll (09:00 SGT), and a **30-second Welcome Tea heartbeat** (`welcome_tea_scheduler_tick`) that reads job datetimes from the sheet and fires each WT job once when due. Per-admin DM menus registered as a detached `asyncio.create_task` on startup |
+| Scheduler | `JobQueue` (APScheduler): daily 7-day performance reminder scan (09:00 SGT), daily auto-poll (09:00 SGT), and a **7-second MEMBER INFO write drain** (`drain_member_writes_job`). The Welcome Tea 30-second heartbeat exists but is **currently disabled** (see below). Per-admin DM menus registered as a detached `asyncio.create_task` on startup |
 | Deployment | Heroku worker dyno (`Procfile`: `worker: python main.py`) |
+
+> ⚠️ **The Welcome Tea scheduler is switched off.** `schedule_welcome_tea_jobs(application)`
+> is commented out in `on_startup` (main.py) — WT broadcast jobs are run manually.
+> `welcome_tea_scheduler_tick`, the eight job callbacks, and all sheet-driven
+> datetimes still exist and work; nothing fires them automatically right now.
+> `/attd` and `/verification` read the WT settings directly and are unaffected.
 
 ---
 
@@ -35,7 +41,7 @@ telegram-bot/
 ├── config.py                # Env-loaded token/creds, sheet names, chat/thread IDs, admin role keywords
 ├── requirements.txt
 ├── Procfile                 # Heroku worker: python main.py
-├── bot_data.pkl             # PicklePersistence store (created at runtime)
+├── bot_data.pkl             # PicklePersistence store (created at runtime; gitignored via *.pkl)
 ├── handlers/
 │   ├── admin_handlers.py        # /start (Cockpit open), /threadid (DM directory), 7-day reminder scan,
 │   │                            #   manual remind portal + REMIND_ESCROW approve-and-broadcast,
@@ -52,12 +58,13 @@ telegram-bot/
 │   ├── poll_handlers.py         # auto_poll_check (daily), handle_poll_answer → attendance, send_interest_poll
 │   ├── private_handlers.py      # Cockpit dashboard, DM dispatcher (only /start), PERF/OTHERS creation wizard,
 │   │                            #   Performance Ledger (+performers), Thread Index, Member Roster
-│   ├── verification_handlers.py # join-request router; ACTIVE /verify | /verification matric conversation
-│   └── welcome_tea_handlers.py  # Welcome Tea automation — sheet-driven scheduler, RSVP buttons,
-│                                #   dietary capture, /attd event-day check-in, 8 scheduled jobs
+│   ├── verification_handlers.py # join-request router; ACTIVE /verify | /verification matric conversation;
+│   │                            #   drain_member_writes_job (background MEMBER INFO write queue)
+│   └── welcome_tea_handlers.py  # Welcome Tea automation — RSVP buttons, dietary capture, /attd event-day
+│                                #   check-in, 8 job callbacks + paced/batched broadcasting helpers
 ├── services/
 │   ├── google_sheets.py         # All Sheets ops; cached client + Drive-modifiedTime smart cache;
-│   │                            #   role tiers; WT settings/rows; PERF TABULATION; member info upserts
+│   │                            #   role tiers; WT settings/rows/batch writes; PERF TABULATION; member upserts
 │   └── date_parser.py           # Date/time parser → `DD Mon YYYY  H:MM AM/PM`; supports ranges
 └── utils/
     ├── constants.py             # Conversation states, in-memory sets and dicts
@@ -91,12 +98,12 @@ telegram-bot/
 | `JOIN_CONTACT_ADMIN_ID` | Last-resort "contact our admin" Tele ID for the join flow |
 | `WELCOME_TEA_LINK_KEYWORD` | `"tea"` — still defined, but the keyword route in `join_request_handler` is **commented out**; routing now uses chat id + links stored in the WELCOME TEA sheet settings |
 | `sg_tz` | Singapore timezone object |
-| `SHEET_COLUMNS` | **10 columns** — includes `SUMMARY MSG ID` (the old "known divergence" is fixed; the pinned-summary message id is now persisted and used to delete/replace the old pin) |
+| `SHEET_COLUMNS` | **10 columns** — includes `SUMMARY MSG ID`, the pinned-summary message id used to delete/replace the old pin |
 
 > There is **no** `WELCOME_TEA_EVENT_DATE` / `*_DAYS_BEFORE` / `*_TIME` config any
-> more — every Welcome Tea date/time lives in the WELCOME TEA sheet tab and is
-> re-read every 30 s, so admins reschedule jobs by editing the sheet, no deploy
-> needed. `EXEMPTED_THREAD_IDS` is also gone (per-thread access control removed).
+> more — every Welcome Tea date/time lives in the WELCOME TEA sheet tab, so admins
+> reschedule jobs by editing the sheet, no deploy needed. `EXEMPTED_THREAD_IDS` is
+> also gone (per-thread access control removed).
 
 ---
 
@@ -117,12 +124,12 @@ Grid layout (names resolved from `MEMBER INFO AY26/27`):
 
 | | A | B | C | D, E, F… |
 |---|---|---|---|---|
-| **Row 1** | | | `POLL ID` | `poll_id\|message_id` per date |
+| **Row 1** | | | `POLL ID` | `poll_id|message_id` per date |
 | **Row 2** | `NAME` | `Tabulation` | `TRAINING DATE [REG]` | one training date per column |
 | **Rows 3+** | nickname | `=SUM(D3:3)` | | `1` / blank per member |
 
 - **Col B** `Tabulation` is a sheet-side formula — the bot only *reads* it (to sort members most-frequent-first).
-- **Row 1** now stores **`poll_id|message_id`** (`format_training_poll_ref`), so the
+- **Row 1** stores **`poll_id|message_id`** (`format_training_poll_ref`), so the
   Modify-a-Date flow can delete or close the superseded poll message in the Voting topic.
 - New date columns go into the **first empty slot from col D** (a `Tabulation`/analysis
   column may safely live to the right of the date region).
@@ -151,12 +158,22 @@ Active roster: `Full Name (as per Matric Card)`, `Nickname`, `Gender`,
 `Date of Birth`, … `Role/Position`, `Status`, `Join Date`, `Leave Date`, `Tele ID`.
 All lookups are header-based and case-insensitive, so column order can change.
 - `get_nickname_by_user_id`: Tele ID → Nickname (falls back to full name)
-- `sync_welcome_tea_member(matric, tele_id)`: header-matched **upsert** of the
-  latest Welcome Tea form response into this tab (used by `/verification`);
-  dedupes rows sharing the same Tele ID / Matric No
+- `sync_welcome_tea_members(pairs)`: header-matched **upsert of many members in
+  one `batch_update`** (~3 API calls for the whole batch, vs ~4 each). Dedupes
+  rows sharing a Tele ID / Matric No, and tracks `claimed_rows` so two new
+  members in the same batch can't be assigned the same blank row — `values` is a
+  pre-write snapshot, so without that guard one would overwrite the other.
+  Returns `{tele_id: (ok, info)}`; `info` separates permanent failures
+  (`matric_not_found`, `header_mismatch`, `no_empty_member_row`,
+  `member_info_missing_required_columns`) from retryable ones
+  (`form_lookup_unavailable`, `member_info_read_failed`,
+  `member_info_write_failed`)
+- `sync_welcome_tea_member(matric, tele_id)`: single-member wrapper over the
+  batch function, so the two can never drift apart. Returns `(ok, info)`
 - `update_member_join_in_info` / `update_member_leave_in_info`: join/leave stamps
   (Join → Join Date now + Leave Date cleared; Leave → Leave Date + Status Left);
   new members get a minimal row in the first empty slot inside the formula region
+- `get_active_members()` treats a `Status` of **`Active` or `Join`** as active
 - Role tiers are read from `Role/Position` + `Tele ID` (see Admin tiers below)
 
 ### `MEMBER INFO AY25/26` tab
@@ -164,18 +181,37 @@ Read-only Tele-ID lookup (`is_member_in_ay2526`) for the returning-member
 auto-approve gate.
 
 ### `NTUFD Welcome Tea Registration 2026 (Responses)` sheet
-Google Form responses; matched by `Matric No` (latest response wins). Read by the
-**active** `/verification` flow (`matric_valid` / `get_welcome_tea_registration`).
+Google Form responses; matched by `Matric No` (latest response wins, since
+`_find_matric_in_records` scans in reverse). Read by the **active**
+`/verification` flow via `lookup_welcome_tea_registration`, which is
+**cache-first with a miss-driven refresh** — it does *not* use the shared
+modifiedTime cache, because Google writes Form submissions with its own
+infrastructure and the linked sheet's `modifiedTime` can lag several minutes
+behind a new response.
+
+| Lookup outcome | Google calls | Meaning |
+|---|---|---|
+| `WT_LOOKUP_FOUND` from cache | **0** | matric already known — immune to a Google outage |
+| `WT_LOOKUP_FOUND` after refresh | 1 | form was submitted since the last download |
+| `WT_LOOKUP_NOT_FOUND` | 1 | re-read the sheet and it genuinely isn't there |
+| `WT_LOOKUP_UNAVAILABLE` | 1 (failed) | Google wouldn't answer — **never** report this as "not found" |
+
+A time-based TTL was tried first (60 s, commit `eb1a117`) and replaced: because
+verifications arrive minutes-to-hours apart, the cache was always expired, so
+**every** verification hit the network and was exposed to Google's sporadic
+503s. That caused two silent onboarding failures for the same member on
+19–20 Aug 2026. `refresh_welcome_tea_form_cache()` raises on API failure; the
+caller decides what to do.
 
 ### `WELCOME TEA` tab (config `WELCOME_TEA_ID_TAB`) — settings + user grid
-**Top settings block** (read every 30 s by `get_welcome_tea_settings`):
+**Top settings block** (read via `get_welcome_tea_settings`, smart-cached):
 - `B1` event date · `B2` WT group invite link · `B3` main-group invite link · `B4` signup-form link
 - `C1` optional final-cleanup time override (default 19:30 on event day)
 - Job schedule: **row 3 = time, row 4 = date**, columns `I..O` in order:
-  I=Details, J=Reminder, K=Approval, L=Pre-Cutoff, M=Cutoff, N=WTD Reminder, O=Follow-up
+  I=Details, J=Reminder, K=Approval, L=Pre-Cutoff, M=Cutoff, N=WTD Reminder, **O=Follow-up**
 
 **User grid** (header row auto-detected within the first 6 rows via
-`_welcome_tea_layout`; data typically starts row 6; falls back to fixed A–N):
+`_welcome_tea_layout`; data typically starts row 6; falls back to fixed A–O):
 
 | Col | Field |
 |---|---|
@@ -187,12 +223,18 @@ Google Form responses; matched by `Matric No` (latest response wins). Read by th
 | F | Attendance (`1` = checked in on event day) |
 | G | Cutoff Msg ID (the Details message, for button stripping) |
 | H | Final Cutoff Msg ID (the "I'll Be There / Can't Make It" message) |
-| I–N | `SENT` markers: Details / Reminder / Approval / Pre-Cutoff / Cutoff / WTD Reminder |
+| I–O | `SENT` markers: Details / Reminder / Approval / Pre-Cutoff / Cutoff / WTD Reminder / **Follow-up** |
 
-`append_welcome_tea_id` upserts by Tele ID (existing status preserved);
-`update_welcome_tea_status`, `update_wt_dietary`, `update_wt_attendance`,
-`update_wt_msg_id`, `mark_wt_user_col_sent` write single cells;
-`get_welcome_tea_recipients(statuses)` filters rows (non-numeric Tele IDs skipped).
+Single-cell writes: `append_welcome_tea_id` (upsert by Tele ID; existing status
+preserved), `update_welcome_tea_status`, `update_wt_dietary`,
+`update_wt_attendance`, `update_wt_msg_id`, `mark_wt_user_col_sent`.
+**Bulk writes** (used by every broadcast job): `get_wt_write_context()` returns
+`(worksheet, {tele_id: row_number})` for one read, and
+`batch_update_wt_cells(updates, ctx=…)` writes many `(user_id, col, value)` cells
+in a **single** `batch_update` call — this is what keeps a 100-member broadcast
+inside Google's 60-requests-per-minute quota. `get_welcome_tea_recipients(statuses)`
+filters rows (non-numeric Tele IDs skipped); calling it with no argument returns
+every row.
 
 ---
 
@@ -202,7 +244,9 @@ Google Form responses; matched by `Matric No` (latest response wins). Read by th
 Routing order for an incoming join request (all invite links need
 "Request Admin Approval" enabled):
 1. **Main-group post-Welcome-Tea link** (`link url == B3` of the WT sheet) →
-   verification prompt: request stays pending in `pending_users`, user is DM'd to
+   verification prompt: the request stays pending in `pending_users`, the user id
+   is also persisted to `bot_data["pending_verification_ids"]` (the
+   `ChatJoinRequest` object itself cannot be pickled), and the user is DM'd to
    type **`/verification`** (or `/verify`).
 2. **Welcome Tea request** (`chat id == WELCOME_TEA_GROUP_CHAT_ID` or
    `link url == B2`) → Welcome Tea automation flow (below). *(The old link-NAME
@@ -217,23 +261,68 @@ Routing order for an incoming join request (all invite links need
    `get_join_contact_admin_id`, `JOIN_CONTACT_ADMIN_ID` fallback) + alert DM to
    all MAIN admins.
 
-**`/verification` matric flow** (ACTIVE, not legacy): asks for the matric number,
-looks it up in the Welcome Tea form responses, **copies the full registration
-into MEMBER INFO AY26/27** (`sync_welcome_tea_member` — header-matched upsert +
-duplicate-row cleanup + Status=Join/Join Date), then approves the pending
-request. Friendly retry messages on matric-not-found / sheet failure.
+**`/verification` matric flow** (ACTIVE, not legacy) — **approve first, write later**:
+1. Asks for the matric number, shows a typing indicator and pauses
+   `VERIFICATION_THROTTLE_SECONDS` (2 s) purely for UX.
+2. `lookup_welcome_tea_registration(matric)` — **cache first**: a matric already
+   in the cached Form Responses costs zero API calls; only a **miss** re-reads
+   the sheet (so a form submitted seconds ago is picked up). Three outcomes:
+   - **UNAVAILABLE** (Google unreachable, typically a transient 503) → sleeps
+     `VERIFICATION_RETRY_DELAY_SECONDS` (2 s) and retries **once**. Still
+     unavailable → tells the member the *system* is busy and to send the number
+     again shortly, and **stays in `ASK_MATRIC`** so re-sending just works.
+     Never says "matric not found" here — we never got to check.
+   - **NOT_FOUND** (fresh read, genuinely absent) → typo/registration-form
+     message; also stays in `ASK_MATRIC`.
+   - **FOUND** → continue to step 3.
+   The retry sleeps in this async handler, never inside the sync sheets layer,
+   so the event loop is never blocked.
+3. Found → **approves the join request immediately** (falling back to
+   `bot.approve_chat_join_request(CHAT_ID, user_id)` when the request object is
+   gone after a restart), so the member never waits on Sheets.
+4. Replies "welcome!" **first**, then writes MEMBER INFO **inline** via
+   `asyncio.to_thread(sync_welcome_tea_member, …)` — the member is already
+   approved and in the group, so the write never keeps them waiting, and it runs
+   off the event loop because gspread is synchronous.
+   The queue is only a **fallback**, entered in two cases:
+   - the inline write failed (503, read/write error) → queued for retry;
+   - `bot_data["pending_member_writes"]` is already non-empty → a burst is in
+     progress, so join it and let the drain job batch everyone together.
+
+   This ordering matters: the queue is an in-memory dict backed by
+   `bot_data.pkl`, which Heroku's ephemeral filesystem discards on every dyno
+   restart. Writing inline means the common case is confirmed immediately
+   instead of sitting somewhere a restart would silently erase.
+
+**`drain_member_writes_job`** (every 7 s) takes the **whole queue at once** and
+passes it to `sync_welcome_tea_members`, which upserts every member in a
+**single `batch_update`** — ~3 API calls for the entire batch instead of ~4 per
+member. Results come back per member (`{tele_id: (ok, info)}`), so one bad
+matric never sinks the rest: codes in `MEMBER_WRITE_DROP_CODES` are dropped with
+a warning, everything else is retried on the next tick.
+
+> Two failure modes this design deliberately avoids. **Head-of-line blocking**:
+> the old one-entry-per-tick loop always took `next(iter(queue.items()))`, so a
+> single stuck entry starved everyone behind it forever. **Silent data loss**:
+> `sync_welcome_tea_members` returns `form_lookup_unavailable` /
+> `member_info_read_failed` / `member_info_write_failed` — none of which are drop
+> codes — so a transient Google 503 can never be mistaken for "this matric isn't
+> registered" and throw a verified member's form data away.
 
 **Join/leave tracking** (`handle_member_status` + `handle_new_member` safety
 net): join → Join Date stamped, Leave Date cleared, Status=Join; leave/kick →
-Leave Date, Status=Left. **The Welcome Tea group is excluded** from tracking.
-Both paths invalidate the sheet cache.
+Leave Date, Status=Left. Bot accounts are skipped. **The Welcome Tea group is
+excluded** from tracking. Both paths invalidate the sheet cache.
 
 ### Welcome Tea Automation (`welcome_tea_handlers.py`)
-Entirely **sheet-driven**: a 30-second `run_repeating` heartbeat
-(`welcome_tea_scheduler_tick`) reads the settings block and fires each job
-**once per scheduled datetime** (tracked in `bot_data["wt_jobs_sent"]`, persisted
-via PicklePersistence; changing a time in the sheet re-arms that job; a new
-event date in B1 resets all tracking).
+Entirely **sheet-driven**: `welcome_tea_scheduler_tick` reads the settings block
+and fires each job **once per scheduled datetime** (tracked in
+`bot_data["wt_jobs_sent"]`, persisted via PicklePersistence; changing a time in
+the sheet re-arms that job; a new event date in B1 resets all tracking).
+
+> ⚠️ The tick is **not currently registered** — `schedule_welcome_tea_jobs` is
+> commented out in `on_startup`. Re-enable it (or invoke the job callbacks
+> manually) to run the timeline.
 
 Jobs, in timeline order:
 1. **Details** — DM event details + ✅ Confirm / ❌ Reject buttons to `Not Confirm`
@@ -245,33 +334,57 @@ Jobs, in timeline order:
 5. **Cutoff** — strip the Details buttons (via col G), DM the "RSVP closed"
    message with 🎉 I'll Be There!! / 😔 Can't Make It buttons (msg id → col H,
    `SENT` → col M)
-6. **WTD Reminder** — event-day reminder: confirmed (`Attend`+`STILL_COMING`) get
-   dinner-included text; `Not Confirm` get eat-beforehand text (col N)
-7. **Follow-up** — post the thank-you + main-group invite link into the WT group
+6. **WTD Reminder** — event-day reminder: confirmed (`Attend` + `STILL_COMING`)
+   get dinner-included text; `Not Confirm` get eat-beforehand text (col N)
+7. **Follow-up** — **per-person DM** of the thank-you + main-group invite link to
+   everyone with `Attendance = 1` (i.e. who actually ran `/attd` on event day),
+   tracked in col O so the job is safely re-runnable. *(This used to be a single
+   post into the WT group; it is now individually tracked DMs.)*
 8. **Final cleanup** (event day 19:30, or C1 override) — silently strip the
    still-coming buttons for `Not Confirm`/`STILL_COMING` users
 
+**Broadcast pacing and crash safety** (shared by every job above):
+- `_paced_send(lambda: …)` wraps each Telegram call: a 50 ms gap after every send
+  (`BROADCAST_SEND_DELAY_SECONDS`, ≈20 msg/s vs Telegram's 30/s cap) and one
+  automatic retry after the stated wait on a `RetryAfter` 429. It takes a
+  **callable**, not a coroutine, because a coroutine that already raised cannot
+  be awaited twice.
+- `_flush_writes(writes, ctx)` pushes buffered `SENT` markers to the sheet every
+  `BROADCAST_FLUSH_EVERY_CELLS` (40) cells rather than once at the end, and the
+  `finally` block always force-flushes the tail. A dyno restart mid-broadcast can
+  therefore duplicate at most ~20 members' messages instead of the whole list
+  (`wt_jobs_sent` is only stamped after the job completes).
+- `_pace_batch(...)` sends in batches of `BROADCAST_BATCH_SIZE` (20) with a
+  `BROADCAST_BATCH_PAUSE_SECONDS` (300 s) pause between them — **not** a Telegram
+  limit, but a way to stagger when members *receive* the DM and therefore when
+  they tap Confirm (each Confirm costs ~4 Google reads against a 60 reads/min
+  quota). Markers are flushed *before* the sleep so a restart during the pause
+  does not lose them.
+- Every job skips rows whose `SENT` marker is already set, and only queues a
+  marker **after** a successful send.
+
 **Join-request catch-up**: `handle_welcome_tea_join_request` registers the user
-(status `Not Confirm`), DMs the "Yay!" message, then — based on where "now" falls
-in the schedule (`_detect_wt_window`: before-details / W1 / W2_W3 / W4) — also
-sends whatever the user missed (Details, Details+Reminder, or the Cutoff DM).
+(status `Not Confirm`), then:
+- if their row already has `Attendance = 1` (they checked in via `/attd` first),
+  it approves them immediately and sends nothing else;
+- otherwise it DMs the "Yay!" message and — based on where "now" falls in the
+  schedule (`_detect_wt_window`: before-details / W1 / W2_W3 / W4) — also sends
+  whatever they missed (Details, Details + Reminder, or the Cutoff DM).
+
 The request stays pending until the Approval job (or an event-day check-in).
 
 **Buttons**: ✅ Confirm → status `Attend` (+ immediate approve if the approval
-time already passed) + **dietary question** (reply captured by
+time has already passed) + **dietary question** (reply captured by
 `handle_dietary_reply`, a group -2 private-message intercept keyed on
-`bot_data["wt_pending_dietary"]`, written to col E). ❌ Reject → status `Reject`
-+ join request declined immediately. 🎉 I'll Be There!! → `STILL_COMING`.
-😔 Can't Make It → `Reject` + decline.
+`bot_data["wt_pending_dietary"]`, written to col E; skipped when dietary is
+already filled). ❌ Reject → status `Reject` + join request declined immediately.
+🎉 I'll Be There!! → `STILL_COMING`. 😔 Can't Make It → `Reject` + decline.
 
 **`/attd` event-day check-in** (registered at group -3, for **non-admins**;
-admins are redirected to `/start`): only works on the event date; marks col F,
-approves the still-pending WT join request (unless status `Reject`), strips
-leftover buttons, and DMs every MAIN admin a food heads-up for walk-ins whose
-meal wasn't catered.
-
-`handle_welcome_tea_qr` (`/start welcome_tea` deep-link) still exists but is not
-wired to any handler.
+admins are redirected to `/start`): only works on the event date. It marks col F,
+approves the still-pending WT join request, and DMs the WT group link when there
+is no pending request left to approve. A walk-in with no row at all is registered
+on the spot and sent the link.
 
 ### Performance Topic Lifecycle
 1. **Create** (MAIN admins only — both the Cockpit button and every creation
@@ -300,7 +413,7 @@ wired to any handler.
      (`REMIND_ESCROW_CONFIRM|YES/NO`): "Approve & Broadcast" flips STATUS to
      ACCEPTED in the sheet and immediately broadcasts the checklist.
 4. **Modify** (Cockpit → 🛠️ Edit Performance → tappable event list, sorted latest
-   first): field menu shows a **public summary preview + internal registry
+   first): the field menu shows a **public summary preview + internal registry
    preview** (Event Type / Remuneration / Status). Edits are **staged in
    `user_data` ("pending edits")** — nothing is written until 💾 **Save & Push
    Updates**, which batch-writes the changed cells, then:
@@ -362,7 +475,8 @@ the thread id is in `initialized_topics` (bot-created; PERF + OTHERS ids are
 loaded into it at startup) **or the creator is a MAIN admin** (their manual topic
 is permitted and cached). All other group traffic is completely untouched — no
 command-word matching, no per-thread permission rules (the old rule cache is
-gone).
+gone). A superseded inline role-lookup block survives behind `if False and …` and
+never executes.
 
 ---
 
@@ -380,9 +494,17 @@ gone).
 | `welcome_tea_pending_requests` / `welcome_tea_join_chats` | dicts | WT join requests awaiting the approval job (chat id also mirrored into `bot_data`) |
 | `pending_questions` | `dict` | legacy prompt-cleanup tracking |
 
-`bot_data` (persisted in `bot_data.pkl`): `wt_jobs_sent` (job → fired-at
-datetime string), `wt_last_event_date`, `wt_pending_dietary`,
-`welcome_tea_group_chat_id`, `group_chat_data`.
+`bot_data` (persisted in `bot_data.pkl`):
+
+| Key | Purpose |
+|---|---|
+| `wt_jobs_sent` | WT job name → fired-at datetime string |
+| `wt_last_event_date` | resets `wt_jobs_sent` when B1 changes |
+| `wt_pending_dietary` | `{str(user_id): True}` — users currently in dietary-capture mode |
+| `welcome_tea_group_chat_id` | last-seen WT group id, for approve/decline fallbacks |
+| `pending_verification_ids` | `set` of user ids with a pending main-group request — survives a restart, since the `ChatJoinRequest` object cannot be pickled |
+| `pending_member_writes` | `{tele_id: matric}` queue drained by `drain_member_writes_job` |
+| `group_chat_data` | per-group scratch store used by the pinned-summary publisher |
 
 ---
 
@@ -404,7 +526,8 @@ the Cockpit. There is **no `/confirmation` handler** any more.
 at group -1): every callback query from a non-dashboard-admin is answered with
 "Access Denied" and killed via `ApplicationHandlerStop` — **except** the four
 Welcome Tea RSVP callbacks (`WELCOME_TEA_CONFIRM/REJECT/STILL_COMING/CANT_MAKE_IT`),
-which pass through for regular users.
+which pass through for regular users. `DASH_VIEW|` and `DASH_REFRESH` clicks are
+verified with `force=True` (live sheet read, throttled).
 
 Other pre-gate handlers: `handle_dietary_reply` (group -2) intercepts private
 text from users in dietary-capture mode and stops propagation.
@@ -412,7 +535,12 @@ text from users in dietary-capture mode and stops propagation.
 ### Scheduled jobs
 - **`daily_reminder_cron_job`** — 09:00 SGT daily; 7-day PERF scan (checklist / admin nudge).
 - **`auto_poll_check`** — 09:00 SGT daily; training-poll window check.
-- **`welcome_tea_scheduler_tick`** — every 30 s; fires the 8 WT jobs from sheet-defined datetimes.
+- **`drain_member_writes_job`** — every 7 s (first run at +10 s); drains the
+  **entire** pending-write queue in one batched MEMBER INFO write. Only does
+  anything when the queue is non-empty, i.e. when an inline write failed or a
+  burst is in progress.
+- **`welcome_tea_scheduler_tick`** — every 30 s **when enabled**; fires the 8 WT jobs
+  from sheet-defined datetimes. Its registration is currently commented out.
 
 > Testing: commented `run_once`/`run_repeating` lines sit next to both daily
 > registrations in `main.py`/`on_startup` for quick local testing.
@@ -423,14 +551,13 @@ text from users in dietary-capture mode and stops propagation.
 
 ### Two admin tiers (role-driven from `MEMBER INFO AY26/27`)
 Resolved from `Role/Position` + `Tele ID` (case-insensitive contains-match).
-**No per-user role cache** — `_get_user_role` re-derives the role from sheet
-data on every call, with a **major-click freshness rule**:
+**No per-user role cache** — `_get_user_role` re-derives the role from sheet data
+on every call, with a **major-click freshness rule**:
 - **MAJOR interactions** (`/start`, `/threadid`, every Cockpit `DASH_VIEW|`
   navigation click, `DASH_REFRESH`) pass `force=True` → the MEMBER INFO tab is
-  re-downloaded live (bypassing the lazily-updated Drive modifiedTime), so a
-  role granted/removed in the web UI applies **on that very click**. Throttled
-  to one real download per 2 s (`_ROLE_FORCE_THROTTLE_SECONDS`; do not go
-  below 2 s — click bursts could exhaust the 60 reads/min API quota).
+  re-downloaded live (bypassing the lazily-updated Drive modifiedTime), so a role
+  granted/removed in the web UI applies on that click. Throttled to one real
+  download per **30 s** (`_ROLE_FORCE_THROTTLE_SECONDS`).
 - **In-task actions** (attendance toggles/paging, wizard steps, modify-field
   edits, announce picks) use the cached copy → instant; an admin mid-task is
   never slowed down and finishes their flow.
@@ -438,8 +565,11 @@ data on every call, with a **major-click freshness rule**:
   receive all alert/reminder DMs (`get_alert_admin_ids`), may create topics
   (wizard **and** manual in-group creation), pass `is_main_admin`.
 - **SECONDARY** — `treasurer`, `logistic`, `business`, `publications`, `coach` →
-  dashboard access only; **topic creation is blocked** for them
-  (`MAIN_ADMIN_TOPIC_ONLY_TEXT`); no alert DMs.
+  **read/broadcast access only**. `handle_dashboard_navigation` blocks
+  `LAUNCH_NEW`, `LAUNCH_MODIFY`, `LAUNCH_ATTD` and `LAUNCH_REMIND` for them (and
+  `handle_list_modify_callback` plus the creation callbacks re-check), so a
+  SECONDARY admin can use 📣 Broadcast, 📊 Performance Ledger, 🧵 Thread Index and
+  👥 Member Roster, and nothing else. No alert DMs.
 - `ADMIN_DM_USER_IDS` is an emergency fallback used **only** when the role lookup
   yields nothing (sheet unreachable / Role column wiped).
 - Join-flow contact admin: first MAIN admin in priority order chairperson →
@@ -458,16 +588,16 @@ Data. Buttons emit `DASH_VIEW|<target>` → `handle_dashboard_navigation`;
 `DASH_REFRESH` → `handle_dashboard_refresh`. Everything renders as a single
 edited bubble with success banners and 🦅 Exit to Cockpit buttons.
 
-| Button | `DASH_VIEW\|…` | Action |
-|---|---|---|
-| 🎪 New Topic | `LAUNCH_NEW` | PERF/OTHERS picker (**MAIN admins only**) |
-| 🛠️ Edit Performance | `LAUNCH_MODIFY` | tappable event list → staged-edit field menu |
-| ✅ Take Attendance | `LAUNCH_ATTD` | attendance category menu |
-| ⏰ Reminders | `LAUNCH_REMIND` | manual remind portal (with escrow) |
-| 📣 Broadcast | `LAUNCH_ANNOUNCE` | announce portal (General + PERF + OTHERS targets) |
-| 📊 Performance Ledger | `LEDGER` | status list (✅/⏳/❌, latest first, `+n more` date collapsing) **with a 👤 performers line per event** from PERF TABULATION |
-| 🧵 Thread Index | `THREADS` | thread-id directory (General 0, Voting 53 hardcoded, PERF, OTHERS) |
-| 👥 Member Roster | `MEMBERS` | grouped member menu: 🎩 Graduates (`Year == "-"`, top) → 🌏 Exchange (98) → 🎓 Year N → other named groups → ❓ Unassigned; counts on buttons, drill-down per group |
+| Button | `DASH_VIEW\|…` | Action | Tier |
+|---|---|---|---|
+| 🎪 New Topic | `LAUNCH_NEW` | PERF/OTHERS picker | MAIN |
+| 🛠️ Edit Performance | `LAUNCH_MODIFY` | tappable event list → staged-edit field menu | MAIN |
+| ✅ Take Attendance | `LAUNCH_ATTD` | attendance category menu | MAIN |
+| ⏰ Reminders | `LAUNCH_REMIND` | manual remind portal (with escrow) | MAIN |
+| 📣 Broadcast | `LAUNCH_ANNOUNCE` | announce portal (General + PERF + OTHERS targets) | MAIN + SECONDARY |
+| 📊 Performance Ledger | `LEDGER` | status list (✅/⏳/❌, latest first, `+n more` date collapsing) **with a 👤 performers line per event** from PERF TABULATION | MAIN + SECONDARY |
+| 🧵 Thread Index | `THREADS` | thread-id directory (General 0, Voting 53 hardcoded, PERF, OTHERS) | MAIN + SECONDARY |
+| 👥 Member Roster | `MEMBERS` | grouped member menu: 🎩 Graduates (`Year == "-"`, top) → 🌏 Exchange (98) → 🎓 Year N → other named groups → ❓ Unassigned; counts on buttons, drill-down per group | MAIN + SECONDARY |
 
 **Only the latest panel is live**, enforced two ways:
 1. **Neutralise-on-open**: `/start` edits the previous `master_dash_id` bubble to
@@ -480,7 +610,8 @@ edited bubble with success banners and 🦅 Exit to Cockpit buttons.
 List/menu reads go through `get_cached_records()` / `get_cached_values()`:
 a Drive `modifiedTime` check (itself cached 30 s, `_MODIFIED_TIME_TTL_SECONDS`)
 decides whether to serve the snapshot or re-download. Keyed by
-`(sheet_name, tab_name)`, shared across admins.
+`(sheet_name, tab_name)`, shared across admins. `modifiedTime` is a per-FILE
+property, so an edit to any tab refreshes every tab's cache for that spreadsheet.
 - Every bot write calls `invalidate_sheet_cache()` → next read re-pulls fresh.
 - Manual web-UI edits are caught when Drive's `modifiedTime` catches up, or
   instantly via ♻️ Refresh Data.
@@ -533,21 +664,46 @@ Each line = **one date**, comma-separated from its time(s):
   Vars). Nothing is hardcoded in `config.py` any more.
 - The **main group config is active**; the debug group lines are commented out
   in `config.py` (CHAT_ID, WELCOME_TEA_GROUP_CHAT_ID, TOPIC_VOTING_ID, SHEET_NAME).
-- `bot_data.pkl` is created/updated at runtime by PicklePersistence (it is
-  currently committed to the repo — consider gitignoring it).
-- The `venv/` directory is in the repo root but should be in `.gitignore`.
+- `.gitignore` covers `/venv`, `/.venv`, `__pycache__/`, `*.pyc` and `*.pkl`, so
+  `bot_data.pkl` and the local virtualenv are no longer tracked.
 - All handlers are `async` — do not introduce synchronous blocking calls in
   handler code (the one existing exception is the `threading.Timer` night-before
   reminder in `auto_poll_check`).
+- The Google Sheets quota (60 reads/min, 60 writes/min per user) is the binding
+  constraint on every bulk operation. New broadcast or bulk-write paths should
+  reuse `get_wt_write_context` + `batch_update_wt_cells` (or an equivalent single
+  `batch_update`) instead of looping single-cell writes.
 
 ### ⚠️ Known code issues
-- **Orphaned `@admin_only` decorator in `admin_handlers.py` (~line 268)**: the
-  function it originally decorated (`manual_test_reminder_trigger`) is commented
-  out, so Python attaches it to the next `def`, `initiate_remind_portal_via_dm`.
-  Harmless in practice (always called from admin DM contexts) but unintended —
-  safe to delete. (A second orphaned decorator that broke the 10 PM
-  night-before training reminder by wrapping `send_reminder` was removed on
-  4 Jul 2026.)
-- A stale comment in `replace_training_date_column` (google_sheets.py) says the
+- **`/attd` status strings don't match the canonical statuses.**
+  `handle_attd_checkin` branches on `"Confirm"`, `"I'll still be Coming"`,
+  `"Last Min CMI"`, `"Reject"` and `"Waiting for reply"`, and writes
+  `"I'll still be Coming"` (also the status it registers walk-ins with) — but
+  `config.WELCOME_TEA_STATUS_*`, and everything else in the codebase, uses
+  `Attend` / `Reject` / `Not Confirm` / `STILL_COMING`. Attendance is still
+  marked (the fall-through `else` handles the mismatch, and
+  `_normalize_welcome_tea_status` passes unknown strings through verbatim), but a
+  user checked in this way ends up with a status no other flow recognises.
+- **Orphaned `@admin_only` decorator in `admin_handlers.py`**: the function it
+  originally decorated (`manual_test_reminder_trigger`) is commented out, so
+  Python attaches it to the next `def`, `initiate_remind_portal_via_dm`. Harmless
+  in practice (always called from admin DM contexts) but unintended — safe to delete.
+- **Stale docstring**: `_get_user_role` still says the force throttle is 2 s;
+  `_ROLE_FORCE_THROTTLE_SECONDS` is 30.
+- **Stale comment** in `replace_training_date_column` (google_sheets.py) says the
   auto-poll fires at "2 days away"; the actual window everywhere is ≤ 4 days.
-- `handle_welcome_tea_qr` and `mark_welcome_tea_setting_sent` are unwired/legacy.
+- **Dead branches in `handle_confirm_new_perf`** (private_handlers): its
+  `MANUAL_REMIND_TID|` and `ANNOUNCE_TARGET|` branches are unreachable — neither
+  prefix appears in the handler's registered pattern, and both callbacks are
+  routed to `admin_handlers` instead. `private_handlers.initiate_announce_portal_via_dm`
+  is likewise shadowed by the `admin_handlers` version everywhere except the
+  `ANNOUNCE_BACK_MAPPED` path.
+- **Dead code block** in `message_handlers.handle_message`: an inline role lookup
+  guarded by `if False and …`, superseded by the `is_main_admin()` check above it.
+- **Unwired / legacy functions**: `handle_welcome_tea_qr`,
+  `mark_welcome_tea_setting_sent`, `append_standard_topic_to_sheet`,
+  `send_interest_poll`, `record_training_poll`, `ensure_attendance_headers`,
+  `matric_valid`, `update_user_id_in_sheet`, `copy_user_to_timeline`,
+  `user_already_in_timeline`, `mark_user_left_in_sheet`, `get_next_monday_8pm`,
+  `_date_label_from_display`, `utils.decorators.is_admin`, and
+  `handle_modify_date_selection` (a stub that only answers "no longer available").

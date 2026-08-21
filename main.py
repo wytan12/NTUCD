@@ -14,8 +14,10 @@ from telegram.ext import (
     ContextTypes,
     PicklePersistence,
 )
+from telegram.error import BadRequest, Forbidden, NetworkError, TimedOut
 import datetime
 import asyncio
+import traceback
 from handlers.admin_handlers import handle_remind_escrow_callback, start, thread_id_command, daily_reminder_cron_job, execute_manual_remind_dispatch, execute_manual_announcement_dispatch
 from handlers.message_handlers import handle_message
 from handlers.private_handlers import handle_private_command
@@ -59,6 +61,59 @@ admin_commands = [
     # BotCommand("threadid", "🧵 Print the entire group topic directory chart"),
     # BotCommand("info", "Preview summary card details in DM")
 ]
+
+async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    """Catch every exception that escapes a handler.
+
+    Without this, PTB logs 'No error handlers are registered' and dumps a raw
+    traceback, and — worse — the user who triggered it gets NOTHING back. That is
+    how a transient Google 503 silently stranded a member mid-verification on
+    19-20 Aug 2026: the handler died at the failing line and the approve/reply
+    steps after it never ran.
+
+    Two classes of error are treated differently:
+      • transient network noise -> one log line (PTB retries these itself)
+      • anything else           -> full traceback + a reply to the user
+    """
+    err = context.error
+
+    # Telegram's polling loop drops connections routinely (httpx.ReadError surfaces
+    # as a plain NetworkError) and users who never opened a DM raise Forbidden.
+    # Both are expected and self-healing, so log one line instead of 40.
+    # NOTE: BadRequest subclasses NetworkError in PTB but usually means a REAL bug
+    # (bad Markdown, stale message id), so it is deliberately excluded here.
+    is_transient = isinstance(err, (TimedOut, Forbidden)) or (
+        isinstance(err, NetworkError) and not isinstance(err, BadRequest)
+    )
+    if is_transient:
+        print(f"[ERROR][transient] {type(err).__name__}: {err}")
+        return
+
+    print(f"[ERROR] Unhandled exception while processing an update: {type(err).__name__}: {err}")
+    traceback.print_exception(type(err), err, err.__traceback__)
+
+    # Tell the user something went wrong — but ONLY in a private chat. The bot is
+    # deliberately silent inside group topics, and an error must not break that.
+    if not isinstance(update, Update):
+        return
+    chat = update.effective_chat
+    if chat is None or chat.type != "private":
+        return
+
+    notice = (
+        "😵‍💫 <b>Oops, something went wrong on our side.</b>\n\n"
+        "Please try that again in a moment. If it keeps happening, drop a message "
+        "to our Chairpersons @ma_ning or @jurikawazu and we'll sort it out! ❤️"
+    )
+    try:
+        if update.callback_query:
+            # May fail if the query was already answered — harmless, caught below.
+            await update.callback_query.answer("Something went wrong. Please try again.", show_alert=True)
+        elif update.effective_message:
+            await update.effective_message.reply_text(notice, parse_mode="HTML")
+    except Exception as notify_err:
+        print(f"[ERROR] Could not notify user about the failure: {notify_err}")
+
 
 async def global_button_security_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Intercepts EVERY button click globally before it reaches any handler."""
@@ -191,6 +246,9 @@ def main():
         MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND, handle_dietary_reply),
         group=-2,
     )
+
+    # Catches anything that escapes a handler, so a failure is never silent.
+    app.add_error_handler(global_error_handler)
 
     # Core engine endpoint configurations
     app.add_handler(TypeHandler(Update, global_button_security_check), group=-1)

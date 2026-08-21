@@ -12,13 +12,39 @@ from config import (
     WELCOME_TEA_LINK_KEYWORD,
 )
 from handlers.welcome_tea_handlers import handle_welcome_tea_join_request
-from services.google_sheets import get_welcome_tea_settings, sync_welcome_tea_member, get_welcome_tea_registration
+from services.google_sheets import (
+    get_welcome_tea_settings,
+    sync_welcome_tea_member,
+    sync_welcome_tea_members,
+    lookup_welcome_tea_registration,
+    WT_LOOKUP_FOUND,
+    WT_LOOKUP_UNAVAILABLE,
+)
 from utils.constants import ASK_MATRIC, pending_users
 
-# Matric lookup uses the cached Form Responses (zero live API calls after warm-up).
+# Matric lookup is cache-first: a matric already in the cached Form Responses costs
+# zero API calls. Only a cache MISS goes back to Google.
 # MEMBER INFO sync is handled by drain_member_writes_job running in the background.
 # The throttle here is UX-only: shows typing while the bot works, prevents spam.
 VERIFICATION_THROTTLE_SECONDS = 2
+
+# Google returns a transient 503 every so often (roughly 1-2% of calls). It is a
+# "come back in a moment" error that Google's own docs expect clients to retry, so
+# one retry turns most of them into a success the member never notices. The sleep is
+# awaited in this async handler rather than inside the sync sheets layer, so it never
+# blocks the event loop.
+VERIFICATION_RETRY_DELAY_SECONDS = 2
+
+# Failures that retrying can never fix, so the queued write is dropped instead of
+# looping forever. Everything NOT listed here (a 503, a read/write failure) is
+# treated as transient and retried on the next tick — getting this list wrong in
+# the "too broad" direction silently throws away a verified member's form data.
+MEMBER_WRITE_DROP_CODES = (
+    "matric_not_found",
+    "header_mismatch",
+    "no_empty_member_row",
+    "member_info_missing_required_columns",
+)
 
 
 def _contact_admin_id() -> int:
@@ -183,21 +209,41 @@ async def handle_matric(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pass
     await asyncio.sleep(VERIFICATION_THROTTLE_SECONDS)
 
-    # Cached lookup — no live API call after the first warm-up read.
-    registration = get_welcome_tea_registration(matric)
+    # Cache-first lookup. A matric already in the cache costs no API call at all;
+    # a miss re-reads the sheet once so a just-submitted form is picked up.
+    registration, status = lookup_welcome_tea_registration(matric)
 
-    if registration is None:
+    # Google was unreachable (typically a transient 503) — retry once before giving up.
+    if status == WT_LOOKUP_UNAVAILABLE:
+        await asyncio.sleep(VERIFICATION_RETRY_DELAY_SECONDS)
+        registration, status = lookup_welcome_tea_registration(matric)
+
+    if status == WT_LOOKUP_UNAVAILABLE:
+        # NOT "matric not found" — we never managed to check. Saying the wrong thing
+        # here would send a legitimately registered member off to re-fill the form.
+        # Stay in ASK_MATRIC so they can simply send the number again.
+        print(f"[VERIFY][WARN] Lookup unavailable for {user_id} ({matric}) — asked them to retry.")
+        await update.effective_message.reply_text(
+            "😵‍💫 <b>Oops, our system is a little busy right now!</b>\n\n"
+            "Please <b>send your matriculation number again in about a minute</b> and we'll get you right in! ✨",
+            parse_mode=ParseMode.HTML,
+        )
+        return ASK_MATRIC
+
+    if status != WT_LOOKUP_FOUND:
         signup_form_link = get_welcome_tea_settings().get("signup_form_link", "")
+        # We just re-read the sheet, so this answer is fresh — no point telling them
+        # to wait for our system to catch up. Either there's a typo, or no form yet.
         await update.effective_message.reply_text(
             "Hmm, we couldn't find that matriculation number in our records. 🤔\n\n"
             "If you haven't filled out our registration form yet, please do so here:\n"
-            f"👉 <a href='{escape(signup_form_link, quote=True)}'>Welcome Tea Registration Form</a> 📝\n\n"
-            "Once submitted, please <b>wait about 2 minutes</b> before typing /verification again so our system can pick up your entry!\n\n"
-            "<i>(If you've already filled it out, please double-check your matriculation number for any typos. Still stuck? Just drop a message to our Chairpersons @ma_ning or @jurikawazu for help! ❤️)</i>",
+            f"👉 <a href='{escape(signup_form_link, quote=True)}'>Welcome Tea Registration Form</a> 📝\n"
+            "Once you've submitted it, just send your matriculation number here again. ✅\n\n"
+            "<i>(Still stuck? Just drop a message to our Chairpersons @ma_ning or @jurikawazu for help! ❤️)</i>",
             parse_mode=ParseMode.HTML,
             disable_web_page_preview=True,
         )
-        return ConversationHandler.END
+        return ASK_MATRIC
 
     # Matric found — approve into main group immediately (zero Sheets API).
     # If the bot restarted and the join_request object is gone, fall back to the API call.
@@ -218,16 +264,37 @@ async def handle_matric(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pending_ids.discard(user_id)
         return ConversationHandler.END
 
-    # Queue the MEMBER INFO write — drain_member_writes_job handles it in the background.
-    context.application.bot_data.setdefault("pending_member_writes", {})[user_id] = matric
     pending_users.pop(user_id, None)
     pending_ids.discard(user_id)
 
+    # Tell the member FIRST — they are already approved and in the group, so the
+    # MEMBER INFO write below never keeps them waiting.
     await update.effective_message.reply_text(
         "Woohoo! 🎉 Your matriculation number is fully verified and your join request has been approved.\n\n"
         "<b>Officially welcome to the NTUFD family! We are absolutely thrilled to have you here!</b> 🥁🔥",
         parse_mode=ParseMode.HTML
     )
+
+    # Write to MEMBER INFO right now, and only fall back to the queue if that fails.
+    # Doing it inline means the common case is confirmed immediately instead of
+    # sitting in an in-memory queue that a dyno restart would silently discard.
+    #
+    # If a queue already exists we are mid-burst: join it rather than writing
+    # inline, so the drain job can batch everyone into a single write and keep
+    # the ordering. gspread is synchronous, so the call goes to a worker thread
+    # and never blocks the event loop.
+    queue = context.application.bot_data.setdefault("pending_member_writes", {})
+    written_now = False
+    if not queue:
+        try:
+            written_now, info = await asyncio.to_thread(sync_welcome_tea_member, matric, user_id)
+            if not written_now:
+                print(f"[VERIFY] Inline write deferred for {user_id} ({matric}): {info}")
+        except Exception as e:
+            print(f"[VERIFY] Inline write errored for {user_id} ({matric}): {e}")
+    if not written_now:
+        queue[user_id] = matric
+
     return ConversationHandler.END
 
 
@@ -241,17 +308,34 @@ async def drain_member_writes_job(context: ContextTypes.DEFAULT_TYPE):
     queue = context.bot_data.get("pending_member_writes", {})
     if not queue:
         return
-    tele_id, matric = next(iter(queue.items()))
+
+    # Take the whole queue in one go. Batching costs ~3 API calls no matter how
+    # many members are waiting (vs ~4 EACH), and it removes the head-of-line
+    # blocking the old one-per-tick loop had: a single stuck entry used to starve
+    # everybody queued behind it forever.
+    batch = list(queue.items())          # [(tele_id, matric), ...]
     try:
-        synced, result = sync_welcome_tea_member(matric, tele_id)
-        if synced:
-            queue.pop(tele_id, None)
-            print(f"[DRAIN] Synced {tele_id} ({matric}): {result}")
-        elif result in ("matric_not_found", "header_mismatch",
-                        "no_empty_member_row", "member_info_missing_required_columns"):
-            queue.pop(tele_id, None)
-            print(f"[DRAIN][WARN] Dropped {tele_id} ({matric}): {result} — manual check needed")
-        else:
-            print(f"[DRAIN] Will retry {tele_id} ({matric}): {result}")
+        results = await asyncio.to_thread(
+            sync_welcome_tea_members, [(matric, tele_id) for tele_id, matric in batch]
+        )
     except Exception as e:
-        print(f"[DRAIN] Error for {tele_id} ({matric}): {e} — will retry next tick")
+        print(f"[DRAIN] Batch of {len(batch)} errored: {e} — will retry next tick")
+        return
+
+    synced = dropped = retrying = 0
+    for tele_id, matric in batch:
+        ok, info = results.get(tele_id, (False, "unknown_error"))
+        if ok:
+            queue.pop(tele_id, None)
+            synced += 1
+        elif info in MEMBER_WRITE_DROP_CODES:
+            # Permanent failure — retrying can never fix it, so stop burning quota.
+            queue.pop(tele_id, None)
+            dropped += 1
+            print(f"[DRAIN][WARN] Dropped {tele_id} ({matric}): {info} — manual check needed")
+        else:
+            retrying += 1
+            print(f"[DRAIN] Will retry {tele_id} ({matric}): {info}")
+
+    if synced or dropped:
+        print(f"[DRAIN] Batch of {len(batch)}: synced={synced} dropped={dropped} retrying={retrying}")

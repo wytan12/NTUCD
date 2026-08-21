@@ -64,13 +64,25 @@ _values_cache = {}
 _modified_time_cache = {}
 _MODIFIED_TIME_TTL_SECONDS = 30
 
-# Separate time-based cache for the Form Responses sheet.
+# Separate cache for the Form Responses sheet.
 # Google Form submissions are written by Google's infrastructure, not a user account,
 # so the linked sheet's Drive modifiedTime may lag by several minutes after a submission.
 # The modifiedTime-based cache would never detect new entries until modifiedTime catches up.
-# This dedicated cache forces a re-download every 60 seconds regardless of modifiedTime.
+#
+# Refresh strategy is MISS-DRIVEN, not time-driven (see lookup_welcome_tea_registration):
+# a matric found in the cache is served straight from memory with NO API call, and we only
+# go back to Google when the matric is absent — which is exactly the case where a newly
+# submitted form could change the answer. A time-based TTL was tried first, but with
+# verifications arriving minutes-to-hours apart the cache was always expired, so EVERY
+# verification hit the network and was exposed to Google 503s (see the 19-20 Aug incidents).
 _wt_form_cache: dict = {"records": None, "downloaded_at": 0.0}
-_WT_FORM_CACHE_TTL = 60  # seconds
+
+# Lookup outcomes. "unavailable" is distinct from "not_found" on purpose: one means
+# "Google would not answer us", the other means "we asked and this matric really isn't
+# registered". They need different messages to the user.
+WT_LOOKUP_FOUND = "found"
+WT_LOOKUP_NOT_FOUND = "not_found"
+WT_LOOKUP_UNAVAILABLE = "unavailable"
 
 def _spreadsheet_modified_time(sheet_name, force=False):
     """Return the spreadsheet's Drive modifiedTime string, or None on error."""
@@ -170,34 +182,78 @@ def _normalized_record(record):
     return {str(key).strip().lower(): value for key, value in record.items()}
 
 
-def get_welcome_tea_registration(matric_number: str):
-    """Return the latest 2026 Welcome Tea response matching `Matric No`.
+def _find_matric_in_records(records, target: str):
+    """Return the LAST row whose `Matric No` equals `target`, or None.
 
-    Uses a 60-second time-based cache instead of the modifiedTime cache.
-    Google Form submissions are written by Google's infrastructure so the
-    linked sheet's Drive modifiedTime can lag by several minutes; a pure
-    modifiedTime check would serve stale data indefinitely. With a 60-second
-    TTL, new submissions are visible within one minute, and concurrent
-    verifications still share a single download (≤ 1 API read/minute).
+    Scans in reverse so the most recent form response wins when someone
+    submitted the form more than once.
     """
-    target = (matric_number or "").strip().upper()
-    if not target:
-        return None
-
-    now = time.monotonic()
-    if (
-        _wt_form_cache["records"] is None
-        or now - _wt_form_cache["downloaded_at"] > _WT_FORM_CACHE_TTL
-    ):
-        _wt_form_cache["records"] = get_gspread_sheet(WELCOME_TEA_SHEET, WELCOME_TEA_TAB).get_all_records()
-        _wt_form_cache["downloaded_at"] = now
-        print(f"[WT FORM] Re-downloaded Form Responses ({len(_wt_form_cache['records'])} rows)")
-
-    for row in reversed(_wt_form_cache["records"]):
+    for row in reversed(records or []):
         normalized = _normalized_record(row)
         if str(normalized.get("matric no", "")).strip().upper() == target:
             return row
     return None
+
+
+def refresh_welcome_tea_form_cache():
+    """Re-download the Form Responses sheet into the cache. Returns the rows.
+
+    Raises whatever gspread raises (e.g. APIError 503) — callers decide how to
+    handle an unreachable Google.
+    """
+    records = get_gspread_sheet(WELCOME_TEA_SHEET, WELCOME_TEA_TAB).get_all_records()
+    _wt_form_cache["records"] = records
+    _wt_form_cache["downloaded_at"] = time.monotonic()
+    print(f"[WT FORM] Re-downloaded Form Responses ({len(records)} rows)")
+    return records
+
+
+def lookup_welcome_tea_registration(matric_number: str):
+    """Cache-first matric lookup. Returns `(row_or_None, status)`.
+
+    1. **Cache hit** -> return immediately. No API call is made, so a Google
+       outage cannot break verification for anyone already in the cache.
+    2. **Cache miss** -> re-download the sheet once. A miss is the only case
+       where stale data could be wrong: the member may have submitted the form
+       seconds ago and simply isn't in our copy yet.
+    3. **Still missing after a fresh read** -> genuinely not registered.
+
+    `status` is one of WT_LOOKUP_FOUND / WT_LOOKUP_NOT_FOUND /
+    WT_LOOKUP_UNAVAILABLE. Never tell a member "matric not found" on
+    UNAVAILABLE — we did not actually get to check.
+    """
+    target = (matric_number or "").strip().upper()
+    if not target:
+        return None, WT_LOOKUP_NOT_FOUND
+
+    # 1. Serve from the cached copy — the common case, and it cannot fail.
+    hit = _find_matric_in_records(_wt_form_cache["records"], target)
+    if hit is not None:
+        return hit, WT_LOOKUP_FOUND
+
+    # 2. Miss: the form may have been submitted since our last download.
+    try:
+        records = refresh_welcome_tea_form_cache()
+    except Exception as e:
+        print(f"[WT FORM][ERROR] Could not refresh Form Responses: {e}")
+        return None, WT_LOOKUP_UNAVAILABLE
+
+    # 3. Fresh data still has no match — this matric really isn't registered.
+    hit = _find_matric_in_records(records, target)
+    if hit is not None:
+        return hit, WT_LOOKUP_FOUND
+    return None, WT_LOOKUP_NOT_FOUND
+
+
+def get_welcome_tea_registration(matric_number: str):
+    """Return the matching Welcome Tea response row, or None.
+
+    Thin wrapper over `lookup_welcome_tea_registration` for callers that don't
+    need to tell "not registered" apart from "Google unreachable" (both give
+    None here). The verification flow should use the richer function instead.
+    """
+    row, _status = lookup_welcome_tea_registration(matric_number)
+    return row
 
 
 def matric_valid(matric_number: str) -> bool:
@@ -205,104 +261,173 @@ def matric_valid(matric_number: str) -> bool:
     return get_welcome_tea_registration(matric_number) is not None
 
 
-def sync_welcome_tea_member(matric_number: str, telegram_user_id: int):
-    """Upsert the latest Welcome Tea response into MEMBER INFO by Tele ID.
+def _member_info_cols_from_values(values):
+    """Header map from an ALREADY-fetched get_all_values(), costing no API call.
 
-    All named fields are matched by header, so column order may differ between
-    the two sheets. If multiple MEMBER INFO rows contain the same Tele ID, the
-    first is refreshed and duplicate rows are cleared of the copied data and
-    Tele ID so verification leaves one authoritative member row.
-    Returns (ok, info).
+    `_member_info_cols(ws)` does its own `ws.row_values(1)`; when the caller has
+    already pulled the whole tab, row 1 is right there in `values`.
+    """
+    header = values[0] if values else []
+    return header, {str(h).strip().lower(): i for i, h in enumerate(header, start=1)}
+
+
+def sync_welcome_tea_members(pairs):
+    """Upsert MANY verified members into MEMBER INFO in ONE batch_update.
+
+    `pairs` is an iterable of `(matric_number, telegram_user_id)`.
+    Returns `{telegram_user_id: (ok, info)}` so the caller can decide per member
+    whether to drop or retry — one bad matric never sinks the rest of the batch.
+
+    Cost is ~3 API calls for the WHOLE batch (worksheet lookup + get_all_values +
+    one batch_update) instead of ~4 per member, which is what makes a burst of
+    verifications survivable inside the 60-requests/minute quota.
+
+    Names are matched by header, so column order may differ between the two
+    sheets. Rows sharing a Tele ID / Matric No are consolidated: the first is
+    refreshed and the duplicates are cleared of the copied data.
     """
     from config import MEMBER_INFO_TAB
     from datetime import datetime
     from gspread.utils import rowcol_to_a1
 
-    source = get_welcome_tea_registration(matric_number)
-    if source is None:
-        return False, "matric_not_found"
+    pairs = [(str(m or "").strip(), int(t)) for m, t in pairs]
+    results = {}
+    if not pairs:
+        return results
 
-    source_by_header = _normalized_record(source)
-    ws = get_gspread_sheet(tab_name=MEMBER_INFO_TAB)
-    values = ws.get_all_values()
-    _, cols = _member_info_cols(ws)
+    # 1. Resolve every form response first — cache-first, so usually zero API calls.
+    #    "Google would not answer" must stay distinct from "this matric isn't
+    #    registered": the caller DROPS on matric_not_found but RETRIES on the rest.
+    resolved = []
+    for matric, tele_id in pairs:
+        source, lookup_status = lookup_welcome_tea_registration(matric)
+        if lookup_status == WT_LOOKUP_UNAVAILABLE:
+            results[tele_id] = (False, "form_lookup_unavailable")   # retryable
+            continue
+        if source is None:
+            results[tele_id] = (False, "matric_not_found")
+            continue
+        resolved.append((matric, tele_id, _normalized_record(source)))
 
+    if not resolved:
+        return results
+
+    # 2. Read MEMBER INFO once for the entire batch.
+    try:
+        ws = get_gspread_sheet(tab_name=MEMBER_INFO_TAB)
+        values = ws.get_all_values()
+    except Exception as e:
+        print(f"[VERIFY][ERROR] Could not read MEMBER INFO: {e}")
+        for _m, tele_id, _s in resolved:
+            results[tele_id] = (False, "member_info_read_failed")   # retryable
+        return results
+
+    _, cols = _member_info_cols_from_values(values)
     tele_c = cols.get("tele id")
     name_c = cols.get("full name (as per matric card)")
     matric_c = cols.get("matric no")
     if not tele_c or not name_c or not matric_c:
-        return False, "member_info_missing_required_columns"
+        for _m, tele_id, _s in resolved:
+            results[tele_id] = (False, "member_info_missing_required_columns")
+        return results
 
-    missing_fields = [field for field in WELCOME_TEA_MEMBER_FIELDS
-                      if field.lower() not in source_by_header or field.lower() not in cols]
-    if missing_fields:
-        print(f"[VERIFY][WARN] Header mismatch for fields: {missing_fields}")
-        return False, "header_mismatch"
+    status_c = cols.get("status")
+    join_c = cols.get("join date")
+    leave_c = cols.get("leave date")
+    now_stamp = datetime.now(sg_tz).strftime("%d %b %Y %H:%M")
 
     def cell(row_number, col_number):
         row = values[row_number - 1] if row_number - 1 < len(values) else []
         return row[col_number - 1].strip() if col_number - 1 < len(row) else ""
 
-    matching_rows = [
-        row_number for row_number in range(2, len(values) + 1)
-        if cell(row_number, tele_c) == str(telegram_user_id)
-    ]
-    matric_rows = [
-        row_number for row_number in range(2, len(values) + 1)
-        if cell(row_number, matric_c).upper() == (matric_number or "").strip().upper()
-    ]
-    if matching_rows:
-        target_row = matching_rows[0]
-    elif matric_rows:
-        target_row = matric_rows[0]
-    else:
-        target_row = next(
-            (row_number for row_number in range(2, max(len(values) + 1, 101))
-             if not cell(row_number, name_c) and not cell(row_number, tele_c)),
-            None,
-        )
-    if target_row is None:
-        return False, "no_empty_member_row"
-
     updates = []
-    for field in WELCOME_TEA_MEMBER_FIELDS:
-        updates.append({
-            "range": rowcol_to_a1(target_row, cols[field.lower()]),
-            "values": [[source_by_header[field.lower()]]],
-        })
-    updates.append({"range": rowcol_to_a1(target_row, tele_c), "values": [[str(telegram_user_id)]]})
+    claimed_rows = set()   # rows already assigned within THIS batch
+    written = []
 
-    status_c = cols.get("status")
-    join_c = cols.get("join date")
-    leave_c = cols.get("leave date")
-    if status_c:
-        updates.append({"range": rowcol_to_a1(target_row, status_c), "values": [["Join"]]})
-    if join_c:
-        today = datetime.now(sg_tz).strftime("%d %b %Y %H:%M")
-        updates.append({"range": rowcol_to_a1(target_row, join_c), "values": [[today]]})
-    if leave_c:
-        updates.append({"range": rowcol_to_a1(target_row, leave_c), "values": [[""]]})
+    for matric, tele_id, source_by_header in resolved:
+        missing_fields = [field for field in WELCOME_TEA_MEMBER_FIELDS
+                          if field.lower() not in source_by_header or field.lower() not in cols]
+        if missing_fields:
+            print(f"[VERIFY][WARN] Header mismatch for fields: {missing_fields}")
+            results[tele_id] = (False, "header_mismatch")
+            continue
 
-    # Consolidate duplicate Tele ID rows without touching formulas or unrelated columns.
-    duplicate_rows = sorted(set(matching_rows + matric_rows) - {target_row})
-    for duplicate_row in duplicate_rows:
+        matching_rows = [r for r in range(2, len(values) + 1) if cell(r, tele_c) == str(tele_id)]
+        matric_rows = [r for r in range(2, len(values) + 1)
+                       if cell(r, matric_c).upper() == matric.upper()]
+        if matching_rows:
+            target_row = matching_rows[0]
+        elif matric_rows:
+            target_row = matric_rows[0]
+        else:
+            # First empty row NOT already claimed earlier in this batch. `values` is a
+            # snapshot taken before any write, so without this guard two new members
+            # would both look at the same blank row and one would overwrite the other.
+            target_row = next(
+                (r for r in range(2, max(len(values) + 1, 101))
+                 if r not in claimed_rows and not cell(r, name_c) and not cell(r, tele_c)),
+                None,
+            )
+        if target_row is None:
+            results[tele_id] = (False, "no_empty_member_row")
+            continue
+        claimed_rows.add(target_row)
+
         for field in WELCOME_TEA_MEMBER_FIELDS:
             updates.append({
-                "range": rowcol_to_a1(duplicate_row, cols[field.lower()]),
-                "values": [[""]],
+                "range": rowcol_to_a1(target_row, cols[field.lower()]),
+                "values": [[source_by_header[field.lower()]]],
             })
-        updates.append({"range": rowcol_to_a1(duplicate_row, tele_c), "values": [[""]]})
+        updates.append({"range": rowcol_to_a1(target_row, tele_c), "values": [[str(tele_id)]]})
         if status_c:
-            updates.append({"range": rowcol_to_a1(duplicate_row, status_c), "values": [[""]]})
+            updates.append({"range": rowcol_to_a1(target_row, status_c), "values": [["Join"]]})
         if join_c:
-            updates.append({"range": rowcol_to_a1(duplicate_row, join_c), "values": [[""]]})
+            updates.append({"range": rowcol_to_a1(target_row, join_c), "values": [[now_stamp]]})
         if leave_c:
-            updates.append({"range": rowcol_to_a1(duplicate_row, leave_c), "values": [[""]]})
+            updates.append({"range": rowcol_to_a1(target_row, leave_c), "values": [[""]]})
 
-    ws.batch_update(updates, value_input_option="USER_ENTERED")
+        # Consolidate duplicates without touching formulas or unrelated columns.
+        for duplicate_row in sorted(set(matching_rows + matric_rows) - {target_row}):
+            for field in WELCOME_TEA_MEMBER_FIELDS:
+                updates.append({
+                    "range": rowcol_to_a1(duplicate_row, cols[field.lower()]),
+                    "values": [[""]],
+                })
+            updates.append({"range": rowcol_to_a1(duplicate_row, tele_c), "values": [[""]]})
+            for dup_col in (status_c, join_c, leave_c):
+                if dup_col:
+                    updates.append({"range": rowcol_to_a1(duplicate_row, dup_col), "values": [[""]]})
+
+        written.append((tele_id, matric, target_row,
+                        "updated_existing" if (matching_rows or matric_rows) else "created"))
+
+    if not updates:
+        return results
+
+    # 3. One write for the whole batch.
+    try:
+        ws.batch_update(updates, value_input_option="USER_ENTERED")
+    except Exception as e:
+        print(f"[VERIFY][ERROR] MEMBER INFO batch write failed: {e}")
+        for tele_id, _matric, _row, _info in written:
+            results[tele_id] = (False, "member_info_write_failed")   # retryable
+        return results
+
     invalidate_sheet_cache(tab_name=MEMBER_INFO_TAB)
-    print(f"[VERIFY] Synced {matric_number} / Tele ID {telegram_user_id} into MEMBER INFO row {target_row}.")
-    return True, "updated_existing" if (matching_rows or matric_rows) else "created"
+    for tele_id, matric, target_row, info in written:
+        results[tele_id] = (True, info)
+        print(f"[VERIFY] Synced {matric} / Tele ID {tele_id} into MEMBER INFO row {target_row}.")
+    return results
+
+
+def sync_welcome_tea_member(matric_number: str, telegram_user_id: int):
+    """Upsert ONE verified member into MEMBER INFO. Returns `(ok, info)`.
+
+    Thin wrapper over `sync_welcome_tea_members` so single and batch writes can
+    never drift apart.
+    """
+    results = sync_welcome_tea_members([(matric_number, telegram_user_id)])
+    return results.get(int(telegram_user_id), (False, "unknown_error"))
 
 
 def update_user_id_in_sheet(matric_number: str, telegram_user_id: int):

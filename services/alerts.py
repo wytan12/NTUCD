@@ -22,6 +22,7 @@ Self-test:
     python -m services.alerts
 """
 
+import html
 import re
 import time
 from collections import deque
@@ -127,3 +128,66 @@ class Throttle:
             return None
         self._pending_report = (self._muted_sent, self._muted_suppressed)
         return self._pending_report
+
+
+TELEGRAM_MAX_CHARS = 4096
+_TRUNCATION_MARKER = "\n\n… truncated"
+
+# Colour-coded circles beat text prefixes for at-a-glance triage in a scrolling
+# DM thread, which is how these are actually read.
+_LEVEL_EMOJI = {"ERROR": "\U0001F534", "WARN": "\U0001F7E0", "INFO": "\U0001F535"}
+
+
+def who(update):
+    """Identify the user behind an update, for 'who hit this?' in an alert.
+
+    Duck-typed on purpose: this module never imports `telegram`, so it stays
+    portable. Returns "unknown user" rather than raising, because an alerter
+    that crashes while describing a crash is worse than a vague alert.
+    """
+    try:
+        user = getattr(update, "effective_user", None)
+        if user is None:
+            return "unknown user"
+        uid = getattr(user, "id", None)
+        if uid is None:
+            return "unknown user"
+        handle = getattr(user, "username", None)
+        return "@{} ({})".format(handle, uid) if handle else str(uid)
+    except Exception:
+        return "unknown user"
+
+
+def _clip(text, limit):
+    if len(text) <= limit:
+        return text
+    return text[: limit - len(_TRUNCATION_MARKER)] + _TRUNCATION_MARKER
+
+
+def format_alert(level, source, message, when, count=0, context=None, frames=None):
+    """Build the Telegram HTML body for one alert.
+
+    The first line carries level, source and time so the alert is triageable
+    straight from a lock-screen notification, without opening the chat.
+    """
+    emoji = _LEVEL_EMOJI.get(level, "\u26A0\uFE0F")
+    head = "{} <b>{}</b> \u00b7 {} \u00b7 {}".format(
+        emoji, html.escape(level), html.escape(source), when.strftime("%H:%M")
+    )
+    parts = [head, "<code>{}</code>".format(html.escape(message.strip()))]
+    if count:
+        parts.append("\u21b3 <b>{} more</b> in the last 15 min".format(count))
+    if frames:
+        parts.append("<pre>{}</pre>".format(html.escape(frames)))
+    if context:
+        parts.append(html.escape(context))
+    return _clip("\n".join(parts), TELEGRAM_MAX_CHARS)
+
+
+def format_mute_notice(source, sent, suppressed, when):
+    """Deliberately blunt: says both that something is wrong AND that the alert
+    stream can no longer be trusted, so go read the real logs."""
+    return (
+        "\U0001F507 <b>{} muted</b> \u2014 {} alerts sent this hour, "
+        "<b>{} suppressed</b>.\nCheck the server logs for the full picture."
+    ).format(html.escape(source), sent, suppressed)

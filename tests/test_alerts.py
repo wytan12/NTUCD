@@ -105,3 +105,86 @@ def test_cap_resets_after_an_hour():
     assert th.admit("s3", "x") == "MUTE"
     clock.advance(3601)
     assert th.admit("s4", "x") == "SEND"
+
+
+import datetime
+
+from services.alerts import (
+    TELEGRAM_MAX_CHARS,
+    format_alert,
+    format_mute_notice,
+    who,
+)
+
+WHEN = datetime.datetime(2026, 8, 22, 9, 14)
+
+
+def test_format_puts_level_source_and_time_on_the_first_line():
+    out = format_alert("ERROR", "NTUFD", "[ERROR] boom", WHEN)
+    first = out.splitlines()[0]
+    assert "ERROR" in first
+    assert "NTUFD" in first
+    assert "09:14" in first
+
+
+def test_format_uses_distinct_emoji_per_level():
+    assert format_alert("ERROR", "N", "x", WHEN).startswith("\U0001F534")
+    assert format_alert("WARN", "N", "x", WHEN).startswith("\U0001F7E0")
+
+
+def test_format_includes_the_message_body():
+    out = format_alert("ERROR", "NTUFD", "[ERROR] Sheet write failed", WHEN)
+    assert "Sheet write failed" in out
+
+
+def test_format_escapes_html_so_telegram_does_not_reject_it():
+    out = format_alert("ERROR", "NTUFD", "[ERROR] <b>x</b> & co", WHEN)
+    assert "&lt;b&gt;" in out
+    assert "&amp;" in out
+
+
+def test_format_adds_a_count_line_only_when_suppressed():
+    assert "47 more" in format_alert("ERROR", "N", "x", WHEN, count=47)
+    assert "more" not in format_alert("ERROR", "N", "x", WHEN, count=0)
+
+
+def test_format_includes_context_and_frames_when_given():
+    out = format_alert("ERROR", "N", "x", WHEN,
+                       context="user 123", frames="a.py:1 in f")
+    assert "user 123" in out
+    assert "a.py:1 in f" in out
+
+
+def test_format_truncates_to_the_telegram_limit():
+    out = format_alert("ERROR", "N", "y" * 9000, WHEN)
+    assert len(out) <= TELEGRAM_MAX_CHARS
+    assert "truncated" in out
+
+
+def test_mute_notice_names_both_counts():
+    out = format_mute_notice("NTUFD", 20, 312, WHEN)
+    assert "20" in out and "312" in out and "NTUFD" in out
+
+
+class FakeUser:
+    def __init__(self, uid, username=None):
+        self.id = uid
+        self.username = username
+
+
+class FakeUpdate:
+    def __init__(self, user):
+        self.effective_user = user
+
+
+def test_who_renders_handle_and_id():
+    assert who(FakeUpdate(FakeUser(1505249420, "weiyin"))) == "@weiyin (1505249420)"
+
+
+def test_who_falls_back_to_the_bare_id():
+    assert who(FakeUpdate(FakeUser(1505249420))) == "1505249420"
+
+
+def test_who_never_raises_on_a_junk_update():
+    assert who(None) == "unknown user"
+    assert who(object()) == "unknown user"

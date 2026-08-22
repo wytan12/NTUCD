@@ -357,6 +357,31 @@ def alert(message, level="ERROR", context=None, frames=None):
     _enqueue(level, message, context, frames)
 
 
+def _pick_richest(batch):
+    """Collapse a batch to one entry per signature, keeping the richest.
+
+    A crash is reported twice on purpose: the tee sees the printed line, and
+    `global_error_handler` re-raises it via alert() carrying the user and the
+    traceback. Both share a signature, so without this the plain one — enqueued
+    first, because print() runs first — would win and the context would be
+    silently dropped. Order of first appearance is preserved.
+    """
+    def richness(entry):
+        _level, _line, context, frames = entry
+        return (1 if frames else 0) + (1 if context else 0)
+
+    best = {}
+    order = []
+    for entry in batch:
+        sig = _signature(entry[1])
+        if sig not in best:
+            best[sig] = entry
+            order.append(sig)
+        elif richness(entry) > richness(best[sig]):
+            best[sig] = entry
+    return [best[sig] for sig in order]
+
+
 def _worker():
     """Drain the queue forever: coalesce a burst, throttle, then send."""
     while True:
@@ -369,7 +394,7 @@ def _worker():
                 except queue.Empty:
                     break
 
-            for level, line, context, frames in batch:
+            for level, line, context, frames in _pick_richest(batch):
                 if _disabled:
                     break
                 decision = _throttle.admit(_signature(line), line)

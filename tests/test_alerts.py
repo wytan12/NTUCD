@@ -328,3 +328,36 @@ def test_install_noops_without_any_token(monkeypatch):
 
 def test_alert_before_install_is_a_silent_noop():
     alerts_mod.alert("[ERROR] nobody is listening")
+
+
+from services.alerts import _pick_richest
+
+
+def test_pick_richest_prefers_the_entry_carrying_context_and_frames():
+    plain = ("ERROR", "[ERROR] boom", None, None)
+    rich = ("ERROR", "[ERROR] boom", "user 1", "a.py:1")
+    assert _pick_richest([plain, rich]) == [rich]
+
+
+def test_pick_richest_keeps_first_seen_order():
+    a = ("ERROR", "[ERROR] a", None, None)
+    b = ("WARN", "[WARN] b", None, None)
+    assert _pick_richest([a, b]) == [a, b]
+
+
+def test_pick_richest_prefers_context_over_nothing():
+    plain = ("ERROR", "[ERROR] boom", None, None)
+    ctx = ("ERROR", "[ERROR] boom", "user 1", None)
+    assert _pick_richest([plain, ctx]) == [ctx]
+
+
+def test_pick_richest_leaves_distinct_signatures_alone():
+    a = ("ERROR", "[ERROR] row 1 failed", None, None)
+    b = ("ERROR", "[ERROR] totally different", "user 1", None)
+    assert _pick_richest([a, b]) == [a, b]
+
+
+def test_pick_richest_groups_by_signature_not_exact_text():
+    a = ("ERROR", "[ERROR] row 1 failed", None, None)
+    b = ("ERROR", "[ERROR] row 2 failed", "user 1", None)
+    assert _pick_richest([a, b]) == [b]

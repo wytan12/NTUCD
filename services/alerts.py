@@ -22,8 +22,12 @@ Self-test:
     python -m services.alerts
 """
 
+import datetime
 import html
+import os
+import queue
 import re
+import sys
 import threading
 import time
 from collections import deque
@@ -261,3 +265,189 @@ class AlertTee:
 
     def fileno(self):
         return self._stream.fileno()
+
+
+COALESCE_SECONDS = 3.0
+QUEUE_MAX = 1000
+_RETRY_DELAYS = (1.0, 3.0)
+_HTTP_TIMEOUT = 10.0
+_SGT = datetime.timezone(datetime.timedelta(hours=8))
+
+_queue = None
+_throttle = None
+_installed = False
+_disabled = False
+_real_stdout = sys.__stdout__
+_token = None
+_chat_id = None
+_source = "BOT"
+
+
+def _log(text):
+    """Write to the ORIGINAL stdout, bypassing the tee entirely."""
+    try:
+        _real_stdout.write(text + "\n")
+        _real_stdout.flush()
+    except Exception:
+        pass
+
+
+def _deliver(token, chat_id, text, session=None):
+    """POST one message. Returns (ok, permanent_failure).
+
+    A permanent failure (bad token, or the user never pressed Start) is never
+    worth retrying, so the caller disables alerting entirely instead of
+    hammering Telegram for the life of the process.
+    """
+    if session is None:
+        import requests
+
+        session = requests
+    url = "https://api.telegram.org/bot{}/sendMessage".format(token)
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }
+    try:
+        response = session.post(url, json=payload, timeout=_HTTP_TIMEOUT)
+    except Exception:
+        return (False, False)
+    if response.status_code == 200:
+        return (True, False)
+    if response.status_code in (400, 401, 403, 404):
+        return (False, True)
+    return (False, False)
+
+
+def _send_with_retry(text):
+    """Send, retrying only transient failures. Sets the recursion guard."""
+    global _disabled
+    _SENDING.active = True
+    try:
+        for delay in (0.0,) + _RETRY_DELAYS:
+            if delay:
+                time.sleep(delay)
+            ok, permanent = _deliver(_token, _chat_id, text)
+            if ok:
+                return True
+            if permanent:
+                _disabled = True
+                _log("[alerts] permanent send failure (bad token, or you have "
+                     "never pressed Start on the alert bot). Alerting disabled.")
+                return False
+        return False
+    finally:
+        _SENDING.active = False
+
+
+def _enqueue(level, line, context=None, frames=None):
+    if _queue is None or _disabled:
+        return
+    try:
+        _queue.put_nowait((level, line, context, frames))
+    except queue.Full:
+        # Dropping a diagnostic beats blocking a handler mid-request.
+        pass
+
+
+def alert(message, level="ERROR", context=None, frames=None):
+    """Explicitly raise an alert with richer context than a bare log line."""
+    _enqueue(level, message, context, frames)
+
+
+def _worker():
+    """Drain the queue forever: coalesce a burst, throttle, then send."""
+    while True:
+        try:
+            batch = [_queue.get()]
+            time.sleep(COALESCE_SECONDS)
+            while True:
+                try:
+                    batch.append(_queue.get_nowait())
+                except queue.Empty:
+                    break
+
+            for level, line, context, frames in batch:
+                if _disabled:
+                    break
+                decision = _throttle.admit(_signature(line), line)
+                if decision == "SUPPRESS":
+                    continue
+                if decision == "MUTE":
+                    report = _throttle.muted_report()
+                    if report:
+                        _send_with_retry(
+                            format_mute_notice(_source, report[0], report[1],
+                                               datetime.datetime.now(_SGT))
+                        )
+                    continue
+                _send_with_retry(
+                    format_alert(level, _source, line,
+                                 datetime.datetime.now(_SGT),
+                                 context=context, frames=frames)
+                )
+
+            for sample, count in _throttle.due_summaries():
+                if _disabled:
+                    break
+                _send_with_retry(
+                    format_alert("ERROR", _source, sample,
+                                 datetime.datetime.now(_SGT), count=count)
+                )
+        except Exception as exc:
+            # The worker must survive anything; a dead thread means silent
+            # blindness, the exact failure this feature exists to fix.
+            _log("[alerts] worker error: {}: {}".format(type(exc).__name__, exc))
+            time.sleep(1.0)
+
+
+def install_alerts():
+    """Swap in the tee and start the worker. Safe to call more than once.
+
+    Returns True when alerting is active, False when it deliberately no-opped
+    (missing configuration), which is the normal case for local development.
+    """
+    global _queue, _throttle, _installed, _token, _chat_id, _source
+
+    if _installed:
+        return True
+
+    _token = os.environ.get("ALERT_BOT_TOKEN") or os.environ.get("BOT_TOKEN")
+    _chat_id = os.environ.get("ALERT_CHAT_ID")
+    _source = os.environ.get("ALERT_SOURCE", "BOT")
+
+    if not _chat_id or not _token:
+        _log("[alerts] ALERT_CHAT_ID or a bot token is unset - alerting is off.")
+        return False
+
+    levels = tuple(
+        part.strip().upper()
+        for part in os.environ.get("ALERT_LEVELS", "ERROR,WARN").split(",")
+        if part.strip()
+    )
+    ignore = tuple(
+        part.strip()
+        for part in os.environ.get("ALERT_IGNORE", "[transient]").split(",")
+        if part.strip()
+    )
+
+    _queue = queue.Queue(maxsize=QUEUE_MAX)
+    _throttle = Throttle()
+
+    sys.stdout = AlertTee(sys.stdout, levels, ignore, _enqueue)
+    sys.stderr = AlertTee(sys.stderr, levels, ignore, _enqueue)
+
+    threading.Thread(target=_worker, name="alert-worker", daemon=True).start()
+    _installed = True
+    _log("[alerts] active - levels={} source={}".format(",".join(levels), _source))
+    return True
+
+
+if __name__ == "__main__":
+    # Self-test: verifies the token and chat id WITHOUT deploying anything.
+    if install_alerts():
+        print("[ERROR] alerts self-test - if you can read this in Telegram, it works.")
+        time.sleep(COALESCE_SECONDS + 5.0)
+        print("[alerts] self-test finished.")

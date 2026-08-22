@@ -262,3 +262,69 @@ def test_tee_never_lets_an_emit_failure_escape():
     tee = AlertTee(sink, ("ERROR",), (), exploding_emit)
     tee.write("[ERROR] boom\n")
     assert sink.getvalue() == "[ERROR] boom\n"
+
+
+import services.alerts as alerts_mod
+from services.alerts import _deliver
+
+
+class FakeResponse:
+    def __init__(self, status_code):
+        self.status_code = status_code
+        self.text = "body"
+
+
+class FakeSession:
+    def __init__(self, status_code):
+        self._status_code = status_code
+        self.calls = []
+
+    def post(self, url, json=None, timeout=None):
+        self.calls.append((url, json))
+        return FakeResponse(self._status_code)
+
+
+def test_deliver_reports_success():
+    session = FakeSession(200)
+    assert _deliver("tok", "42", "hi", session=session) == (True, False)
+    assert "tok" in session.calls[0][0]
+    assert session.calls[0][1]["chat_id"] == "42"
+
+
+def test_deliver_marks_403_as_permanent():
+    assert _deliver("tok", "42", "hi", session=FakeSession(403)) == (False, True)
+
+
+def test_deliver_marks_401_as_permanent():
+    assert _deliver("tok", "42", "hi", session=FakeSession(401)) == (False, True)
+
+
+def test_deliver_marks_500_as_retryable():
+    assert _deliver("tok", "42", "hi", session=FakeSession(500)) == (False, False)
+
+
+def test_deliver_survives_a_thrown_transport_error():
+    class Exploding:
+        def post(self, url, json=None, timeout=None):
+            raise OSError("network down")
+
+    assert _deliver("tok", "42", "hi", session=Exploding()) == (False, False)
+
+
+def test_install_noops_without_a_chat_id(monkeypatch):
+    monkeypatch.delenv("ALERT_CHAT_ID", raising=False)
+    monkeypatch.setenv("BOT_TOKEN", "tok")
+    monkeypatch.setattr(alerts_mod, "_installed", False)
+    assert alerts_mod.install_alerts() is False
+
+
+def test_install_noops_without_any_token(monkeypatch):
+    monkeypatch.setenv("ALERT_CHAT_ID", "42")
+    monkeypatch.delenv("ALERT_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("BOT_TOKEN", raising=False)
+    monkeypatch.setattr(alerts_mod, "_installed", False)
+    assert alerts_mod.install_alerts() is False
+
+
+def test_alert_before_install_is_a_silent_noop():
+    alerts_mod.alert("[ERROR] nobody is listening")

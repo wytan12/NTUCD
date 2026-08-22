@@ -8,6 +8,7 @@ from config import ADMIN_DM_USER_IDS, CHAT_ID, SHEET_TAB_NAME
 from handlers.conversation_handlers import build_performance_summary, publish_performance_summary
 from services.date_parser import parse_and_format_dates
 from services.google_sheets import get_gspread_sheet, get_cached_records, get_cached_values, invalidate_sheet_cache, is_main_admin, get_all_perf_performers
+from services.alerts import who
 from utils.constants import (
     WAITING_TOPIC_TITLE, PERF_EVENT_NAME, PERF_REHEARSAL, PERF_DATE, PERF_LOCATION, PERF_OTHER_INFO,
 )
@@ -327,6 +328,7 @@ async def handle_private_command(update: Update, context: ContextTypes.DEFAULT_T
             if current_dash_id:
                 await context.bot.edit_message_text(chat_id=message.chat.id, message_id=current_dash_id, text=DASHBOARD_TEXT, reply_markup=_dashboard_keyboard(), parse_mode="Markdown")
         except Exception as e:
+            print(f"[ERROR] announce: failed to dispatch announcement - {who(update)}: {e}")
             await message.reply_text(f"❌ Failed to dispatch announcement: {e}")
         return
 
@@ -794,6 +796,7 @@ async def handle_confirm_new_perf(update: Update, context: ContextTypes.DEFAULT_
             if current_dash_id: context.user_data["master_dash_id"] = current_dash_id
             await query.edit_message_text(DASHBOARD_TEXT, reply_markup=_dashboard_keyboard(), parse_mode="Markdown")
         except Exception as e:
+            print(f"[ERROR] perf: failed to create topic - {who(update)}: {e}")
             await query.message.reply_text(f"❌ Failed to create topic: {e}")
         return
 
@@ -820,6 +823,7 @@ async def handle_confirm_new_perf(update: Update, context: ContextTypes.DEFAULT_
             from utils.constants import initialized_topics
             initialized_topics.add(thread_id)
         except Exception as e:
+            print(f"[ERROR] perf: forum topic setup failed - {who(update)}: {e}")
             await query.edit_message_text(f"❌ Forum setup failed: {e}")
             return
 
@@ -828,6 +832,7 @@ async def handle_confirm_new_perf(update: Update, context: ContextTypes.DEFAULT_
             sheet.append_row([thread_id, event_type, event_name, rehearsal_date, perf_date, location, other_info, "", "", ""], value_input_option="USER_ENTERED")
             invalidate_sheet_cache(tab_name=SHEET_TAB_NAME)
         except Exception as e:
+            print(f"[ERROR] perf: sheet write failed - {who(update)}: {e}")
             await query.edit_message_text(f"❌ Sheet Write failure: {e}")
             return
 

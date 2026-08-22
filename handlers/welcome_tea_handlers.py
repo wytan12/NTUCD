@@ -28,6 +28,7 @@ from services.google_sheets import (
     get_wt_write_context,
 )
 from utils.constants import welcome_tea_join_chats, welcome_tea_pending_requests
+from services.alerts import who
 
 # ---------------------------------------------------------------------------
 # Message constants
@@ -389,6 +390,7 @@ async def handle_welcome_tea_confirmation(update: Update, context: ContextTypes.
             await context.bot.send_message(chat_id=query.message.chat.id, text=REJECTED_REPLY)
             await query.answer("Response recorded.")
         except Exception as e:
+            print(f"[WARN] welcome tea: reject reply fell back to popup - {who(update)}: {e}")
             await query.answer(REJECTED_REPLY, show_alert=True)
         print(f"[WELCOME TEA] {user_id} rejected.")
         return
@@ -407,6 +409,7 @@ async def handle_welcome_tea_confirmation(update: Update, context: ContextTypes.
         await context.bot.send_message(chat_id=query.message.chat.id, text=CONFIRMED_REPLY)
         await query.answer("Response recorded.")
     except Exception as e:
+        print(f"[WARN] welcome tea: confirm reply fell back to popup - {who(update)}: {e}")
         await query.answer(CONFIRMED_REPLY, show_alert=True)
 
     # Trigger dietary question flow
@@ -450,6 +453,7 @@ async def handle_welcome_tea_still_coming(update: Update, context: ContextTypes.
         )
         await query.answer("Response recorded.")
     except Exception as e:
+        print(f"[WARN] welcome tea: still-coming reply fell back to popup - {who(update)}: {e}")
         await query.answer(STILL_COMING_REPLY, show_alert=True)
 
     print(f"[WELCOME TEA] {user_id} marked STILL_COMING.")
@@ -472,6 +476,7 @@ async def handle_welcome_tea_cant_make_it(update: Update, context: ContextTypes.
         await context.bot.send_message(chat_id=query.message.chat.id, text=CANT_MAKE_IT_REPLY)
         await query.answer("Response recorded.")
     except Exception as e:
+        print(f"[WARN] welcome tea: can't-make-it reply fell back to popup - {who(update)}: {e}")
         await query.answer(CANT_MAKE_IT_REPLY, show_alert=True)
 
     print(f"[WELCOME TEA] {user_id} can't make it — declined.")

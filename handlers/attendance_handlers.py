@@ -25,6 +25,7 @@ from services.google_sheets import (
     get_training_poll_ref, is_dashboard_admin,
 )
 from services.date_parser import parse_date_line
+from services.alerts import who
 
 HOME_TEXT = "✅ *Take Attendance*\nChoose a category:"
 PAGE_SIZE = 10
@@ -345,6 +346,7 @@ async def attendance_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             col = get_perf_event_column(tid, create=True, event_name=name)
             attendees = get_perf_attendees(col)
         except Exception as e:
+            print(f"[ERROR] attendance: failed to load perf attendees - {who(update)}: {e}")
             await query.edit_message_text(f"❌ Failed to load attendees: {e}")
             return
 
@@ -377,6 +379,7 @@ async def attendance_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         try:
             attendees = get_attendees_for_date(col)
         except Exception as e:
+            print(f"[ERROR] attendance: failed to load attendees for date - {who(update)}: {e}")
             await query.edit_message_text(f"❌ Failed to load attendees: {e}")
             return
 
@@ -412,6 +415,7 @@ async def attendance_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         try:
             dates = _future_dates(_load_dates(context))
         except Exception as e:
+            print(f"[ERROR] attendance: failed to read Attendance sheet - {who(update)}: {e}")
             # 🎯 THIS IS THE FIX: Use _update_attendance_bubble instead of reply_text
             await _update_attendance_bubble(
                 query, 
@@ -514,6 +518,7 @@ async def attendance_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             # poll_id=None clears row 1, so auto_poll_check will pick it up later.
             replace_training_date_column(col, new_str, poll_id, poll_message_id)
         except Exception as e:
+            print(f"[ERROR] attendance: failed to modify training date - {who(update)}: {e}")
             await query.edit_message_text(f"❌ Failed to modify the date: {e}")
             _clear_moddate(context)
             return
@@ -546,6 +551,7 @@ async def attendance_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             else:
                 await _show_reg_dates(query, context)
         except Exception as e:
+            print(f"[ERROR] attendance: failed to read sheet - {who(update)}: {e}")
             await query.edit_message_text(f"❌ Failed to read sheet: {e}")
         return
 
@@ -596,6 +602,7 @@ async def attendance_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             else:
                 commit_attendance_column(col, marks)
         except Exception as e:
+            print(f"[ERROR] attendance: failed to save attendance column - {who(update)}: {e}")
             await query.edit_message_text(f"❌ Failed to save: {e}")
             _clear(context)
             return

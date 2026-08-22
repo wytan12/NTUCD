@@ -6,6 +6,7 @@ from config import sg_tz, CHAT_ID, ADMIN_DM_USER_IDS, SHEET_COLUMNS, SHEET_TAB_N
 from datetime import datetime, timedelta
 from handlers.private_handlers import DASHBOARD_TEXT, _dashboard_keyboard, _dashboard_back_keyboard
 import re
+from services.alerts import who
 
 @admin_only
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -373,6 +374,7 @@ async def execute_manual_remind_dispatch(update: Update, context: ContextTypes.D
         callback_data = query.data 
         thread_id = int(callback_data.split("|")[1])
     except (IndexError, ValueError) as parse_err:
+        print(f"[ERROR] remind: bad callback metadata - {who(update)}: {parse_err}")
         await query.edit_message_text(f"❌ Error parsing callback metadata parameters: `{parse_err}`")
         return
     
@@ -443,6 +445,7 @@ async def execute_manual_remind_dispatch(update: Update, context: ContextTypes.D
         await initiate_remind_portal_via_dm(update, context, success_banner=banner)
         
     except Exception as e:
+        print(f"[ERROR] remind: dispatch loop failed - {who(update)}: {e}")
         await query.edit_message_text(f"❌ Critical error during dispatch runtime loop: `{e}`", parse_mode="Markdown")
 
 # async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -632,6 +635,7 @@ async def execute_manual_announcement_dispatch(update: Update, context: ContextT
         callback_data = query.data  
         target_tid = int(callback_data.split("|")[1])
     except (IndexError, ValueError) as parse_err:
+        print(f"[ERROR] announce: bad callback metadata - {who(update)}: {parse_err}")
         await query.edit_message_text(f"❌ Error parsing callback metadata parameters: `{parse_err}`")
         return
 

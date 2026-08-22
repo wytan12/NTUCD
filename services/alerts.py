@@ -24,6 +24,7 @@ Self-test:
 
 import html
 import re
+import threading
 import time
 from collections import deque
 
@@ -191,3 +192,72 @@ def format_mute_notice(source, sent, suppressed, when):
         "\U0001F507 <b>{} muted</b> \u2014 {} alerts sent this hour, "
         "<b>{} suppressed</b>.\nCheck the server logs for the full picture."
     ).format(html.escape(source), sent, suppressed)
+
+
+# Set while the worker is sending. Anything printed inside that window bypasses
+# capture entirely, so a failing alert can never trigger another alert.
+_SENDING = threading.local()
+
+
+class AlertTee:
+    """Passthrough stream wrapper that also reports matching log lines.
+
+    Every byte still reaches the wrapped stream, so server logs are unchanged.
+    Lines are buffered because print() issues the text and the newline as two
+    separate write() calls.
+
+    Methods are declared explicitly rather than proxied via __getattr__, so a
+    missing attribute fails loudly here instead of recursing.
+    """
+
+    def __init__(self, stream, prefixes, ignore, emit):
+        self._stream = stream
+        self._prefixes = tuple(prefixes)
+        self._ignore = tuple(ignore)
+        self._emit = emit
+        self._buffer = ""
+
+    def write(self, text):
+        written = self._stream.write(text)
+        if getattr(_SENDING, "active", False):
+            return written
+        try:
+            self._buffer += text
+            while "\n" in self._buffer:
+                line, self._buffer = self._buffer.split("\n", 1)
+                self._consider(line)
+        except Exception:
+            # A broken alerter must never break the program it is watching.
+            self._buffer = ""
+        return written
+
+    def _consider(self, line):
+        stripped = line.strip()
+        if not stripped:
+            return
+        for needle in self._ignore:
+            if needle in stripped:
+                return
+        for prefix in self._prefixes:
+            if stripped.startswith("[{}]".format(prefix)):
+                try:
+                    self._emit(prefix, stripped)
+                except Exception:
+                    pass
+                return
+
+    def flush(self):
+        self._stream.flush()
+
+    def writelines(self, lines):
+        for line in lines:
+            self.write(line)
+
+    def isatty(self):
+        try:
+            return self._stream.isatty()
+        except Exception:
+            return False
+
+    def fileno(self):
+        return self._stream.fileno()

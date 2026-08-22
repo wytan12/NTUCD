@@ -188,3 +188,77 @@ def test_who_falls_back_to_the_bare_id():
 def test_who_never_raises_on_a_junk_update():
     assert who(None) == "unknown user"
     assert who(object()) == "unknown user"
+
+
+import io
+
+from services.alerts import _SENDING, AlertTee
+
+
+def make_tee():
+    sink = io.StringIO()
+    seen = []
+    tee = AlertTee(sink, ("ERROR", "WARN"), ("[transient]",),
+                   lambda level, line: seen.append((level, line)))
+    return tee, sink, seen
+
+
+def test_tee_passes_everything_through_unchanged():
+    tee, sink, _ = make_tee()
+    tee.write("[ERROR] boom\n")
+    tee.write("ordinary output\n")
+    assert sink.getvalue() == "[ERROR] boom\nordinary output\n"
+
+
+def test_tee_emits_matching_lines():
+    tee, _, seen = make_tee()
+    tee.write("[ERROR] boom\n")
+    assert seen == [("ERROR", "[ERROR] boom")]
+
+
+def test_tee_ignores_non_matching_lines():
+    tee, _, seen = make_tee()
+    tee.write("[INFO] hello\n")
+    tee.write("bare line\n")
+    assert seen == []
+
+
+def test_tee_honours_the_ignore_list():
+    tee, _, seen = make_tee()
+    tee.write("[ERROR][transient] NetworkError: read timeout\n")
+    assert seen == []
+
+
+def test_tee_reassembles_lines_split_across_writes():
+    tee, _, seen = make_tee()
+    tee.write("[WARN] split ")
+    tee.write("message\n")
+    assert seen == [("WARN", "[WARN] split message")]
+
+
+def test_tee_handles_several_lines_in_one_write():
+    tee, _, seen = make_tee()
+    tee.write("[ERROR] one\n[WARN] two\n")
+    assert seen == [("ERROR", "[ERROR] one"), ("WARN", "[WARN] two")]
+
+
+def test_tee_does_not_capture_while_the_sending_guard_is_set():
+    tee, sink, seen = make_tee()
+    _SENDING.active = True
+    try:
+        tee.write("[ERROR] boom\n")
+    finally:
+        _SENDING.active = False
+    assert seen == []
+    assert sink.getvalue() == "[ERROR] boom\n"
+
+
+def test_tee_never_lets_an_emit_failure_escape():
+    sink = io.StringIO()
+
+    def exploding_emit(level, line):
+        raise RuntimeError("emit is broken")
+
+    tee = AlertTee(sink, ("ERROR",), (), exploding_emit)
+    tee.write("[ERROR] boom\n")
+    assert sink.getvalue() == "[ERROR] boom\n"

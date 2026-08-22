@@ -40,6 +40,7 @@ from services.google_sheets import get_gspread_sheet
 from handlers.private_handlers import handle_list_modify_callback
 from handlers.modify_handlers import handle_modify_type_selection
 from config import BOT_TOKEN, SHEET_NAME, CHAT_ID, sg_tz, ADMIN_DM_USER_IDS
+from services.alerts import alert, install_alerts, who
 from datetime import time as dt_time
 from utils.constants import (
     initialized_topics,
@@ -89,8 +90,21 @@ async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYP
         print(f"[ERROR][transient] {type(err).__name__}: {err}")
         return
 
-    print(f"[ERROR] Unhandled exception while processing an update: {type(err).__name__}: {err}")
+    summary = f"[ERROR] Unhandled exception while processing an update: {type(err).__name__}: {err}"
+    print(summary)
     traceback.print_exception(type(err), err, err.__traceback__)
+
+    # The tee already alerted on the printed line above, but without the who and
+    # the what. Re-raising it here with the update context is what turns
+    # "something broke" into "I can go reproduce it". The throttle's signature
+    # dedupe collapses the two into one DM.
+    frames = None
+    if err.__traceback__:
+        frames = "".join(traceback.format_tb(err.__traceback__)[-3:]).strip()
+    bits = [f"👤 {who(update)}"]
+    if isinstance(update, Update) and update.callback_query and update.callback_query.data:
+        bits.append(f"🧩 {update.callback_query.data}")
+    alert(summary, level="ERROR", context=" · ".join(bits), frames=frames)
 
     # Tell the user something went wrong — but ONLY in a private chat. The bot is
     # deliberately silent inside group topics, and an error must not break that.
@@ -212,6 +226,9 @@ async def start_command_router(update: Update, context: ContextTypes.DEFAULT_TYP
     await start(update, context)
 
 def main():
+    # Route [ERROR]/[WARN] log lines to the maintainer's DM. No-ops without
+    # ALERT_CHAT_ID, so local runs are unaffected. See services/alerts.py.
+    install_alerts()
     print("Bot starting...")
     persistence = PicklePersistence(filepath="bot_data.pkl")
     app = (

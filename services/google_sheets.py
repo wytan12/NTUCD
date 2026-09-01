@@ -542,6 +542,51 @@ def get_training_date_columns():
     return out
 
 
+def get_training_attendance_rates():
+    """Return [(nickname, attended, polls), ...] for every active member.
+
+    `polls` is the number of polled regular-training date columns — columns with
+    BOTH a poll id (row 1) and a date (row 2), i.e. the same set the attendance
+    menus list. It is identical for every member.
+
+    `attended` is the member's col B `Tabulation` value (the sheet's own COUNTIF
+    of "1"s across the date region); an active member with no row in the
+    ATTENDANCE tab counts as 0.
+
+    Sorted by attendance rate descending, then nickname A-Z. All reads go through
+    the smart cache (MEMBER INFO via get_active_members + one ATTENDANCE read),
+    so a warm cache costs zero API calls.
+    """
+    names = [m[3] for m in get_active_members()]
+
+    values = get_cached_values(tab_name=ATTENDANCE_TAB)
+    row1 = values[ATT_POLL_ROW - 1] if len(values) >= ATT_POLL_ROW else []
+    row2 = values[ATT_DATE_ROW - 1] if len(values) >= ATT_DATE_ROW else []
+
+    polls = 0
+    for col in range(ATT_FIRST_DATE_COL, max(len(row1), len(row2)) + 1):
+        poll_val = row1[col - 1].strip() if col - 1 < len(row1) else ""
+        date_val = row2[col - 1].strip() if col - 1 < len(row2) else ""
+        if poll_val and date_val:
+            polls += 1
+
+    totals = {}
+    for r in range(ATT_FIRST_MEMBER_ROW, len(values) + 1):
+        row = values[r - 1]
+        nm = row[ATT_NAME_COL - 1].strip() if len(row) >= ATT_NAME_COL else ""
+        if not nm:
+            continue
+        raw = row[ATT_TOTAL_COL - 1].strip() if len(row) >= ATT_TOTAL_COL else ""
+        try:
+            totals[nm.lower()] = int(raw)
+        except ValueError:
+            totals[nm.lower()] = 0
+
+    out = [(nm, totals.get(nm.strip().lower(), 0), polls) for nm in names]
+    out.sort(key=lambda it: (-(it[1] / it[2]) if it[2] else 0, it[0].lower()))
+    return out
+
+
 def format_training_poll_ref(poll_id, message_id=None):
     if not poll_id:
         return ""

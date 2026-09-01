@@ -52,11 +52,11 @@ def _dashboard_keyboard() -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton("📣 Broadcast", callback_data="DASH_VIEW|LAUNCH_ANNOUNCE"),
-            InlineKeyboardButton("📊 Performance Ledger", callback_data="DASH_VIEW|LEDGER")
+            InlineKeyboardButton("🎭 Events Overview", callback_data="DASH_VIEW|EVENTS")
         ],
         [
-            InlineKeyboardButton("🧵 Thread Index", callback_data="DASH_VIEW|THREADS"),
-            InlineKeyboardButton("👥 Member Roster", callback_data="DASH_VIEW|MEMBERS")
+            InlineKeyboardButton("📦 Logistics", callback_data="DASH_VIEW|LOGISTICS"),
+            InlineKeyboardButton("👥 Members", callback_data="DASH_VIEW|PEOPLE")
         ],
         [
             InlineKeyboardButton("♻️ Refresh Data", callback_data="DASH_REFRESH")
@@ -901,6 +901,102 @@ async def handle_dashboard_navigation(update: Update, context: ContextTypes.DEFA
         await query.edit_message_text(DASHBOARD_TEXT, reply_markup=_dashboard_keyboard(), parse_mode="Markdown")
         return
 
+    elif target_view == "EVENTS":
+        text = "🎭 *Events*\n_Performance reference views — pick one:_"
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📊 Performance Ledger", callback_data="DASH_VIEW|LEDGER")],
+            [InlineKeyboardButton("🧵 Thread Index", callback_data="DASH_VIEW|THREADS")],
+            [InlineKeyboardButton("🦅 Exit to Cockpit", callback_data="DASH_VIEW|HOME")],
+        ])
+        await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
+        return
+
+    elif target_view == "PEOPLE":
+        text = "👥 *Members*\n_Member reference views — pick one:_"
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("👥 Member Roster", callback_data="DASH_VIEW|MEMBERS")],
+            [InlineKeyboardButton("📈 Attendance Rate", callback_data="DASH_VIEW|ATTD_RATE")],
+            [InlineKeyboardButton("🦅 Exit to Cockpit", callback_data="DASH_VIEW|HOME")],
+        ])
+        await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
+        return
+
+    elif target_view == "LOGISTICS":
+        text = (
+            "📦 *Logistics*\n\n"
+            "🚧 Nothing here yet — this hub is reserved for logistics tracking "
+            "(equipment, transport, per-event checklists)."
+        )
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🦅 Exit to Cockpit", callback_data="DASH_VIEW|HOME")],
+        ])
+        await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
+        return
+
+    elif target_view == "ATTD_RATE" or target_view.startswith("ATTD_RATE_"):
+        from services.google_sheets import get_training_attendance_rates
+        page = 1
+        if target_view != "ATTD_RATE":
+            try:
+                page = max(1, int(target_view[len("ATTD_RATE_"):]))
+            except ValueError:
+                page = 1
+
+        back_row = [InlineKeyboardButton("🔙 Back", callback_data="DASH_VIEW|PEOPLE")]
+        try:
+            rows = get_training_attendance_rates()
+        except Exception as e:
+            await query.edit_message_text(
+                f"❌ Failed to read attendance data: `{e}`",
+                reply_markup=InlineKeyboardMarkup([back_row]), parse_mode="Markdown",
+            )
+            return
+
+        polls = rows[0][2] if rows else 0
+        if not rows:
+            await query.edit_message_text(
+                "📈 *Training Attendance Rate*\n\n📭 No active members found in the MEMBER INFO sheet yet.",
+                reply_markup=InlineKeyboardMarkup([back_row]), parse_mode="Markdown",
+            )
+            return
+        if polls == 0:
+            await query.edit_message_text(
+                "📈 *Training Attendance Rate*\n\n🗳️ No trainings have been polled this semester yet.",
+                reply_markup=InlineKeyboardMarkup([back_row]), parse_mode="Markdown",
+            )
+            return
+
+        per_page = 10
+        total_pages = (len(rows) + per_page - 1) // per_page
+        page = min(page, total_pages)
+        start = (page - 1) * per_page
+        chunk = rows[start:start + per_page]
+
+        subhead = f"_{polls} training{'s' if polls != 1 else ''} this semester · {len(rows)} active members_"
+        body = []
+        for nm, attended, pol in chunk:
+            pct = min(100, round(attended / pol * 100))
+            dot = "🟢" if pct >= 80 else "🟡" if pct >= 50 else "🔴"
+            body.append(f"{dot} *{f'{pct}%':>4}*  {nm}  ({attended}/{pol})")
+        text = "📈 *Training Attendance Rate*\n" + subhead + "\n\n" + "\n".join(body)
+
+        def _rate_page_cb(p):
+            return "DASH_VIEW|ATTD_RATE" if p == 1 else f"DASH_VIEW|ATTD_RATE_{p}"
+
+        rows_kb = []
+        if total_pages > 1:
+            nav = []
+            if page > 1:
+                nav.append(InlineKeyboardButton("◀ Prev", callback_data=_rate_page_cb(page - 1)))
+            nav.append(InlineKeyboardButton(f"Page {page}/{total_pages}", callback_data=_rate_page_cb(page)))
+            if page < total_pages:
+                nav.append(InlineKeyboardButton("Next ▶", callback_data=_rate_page_cb(page + 1)))
+            rows_kb.append(nav)
+        rows_kb.append(back_row)
+        keyboard = InlineKeyboardMarkup(rows_kb)
+        await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
+        return
+
     elif target_view == "LEDGER":
         records = get_cached_records()
         if not records: 
@@ -956,11 +1052,10 @@ async def handle_dashboard_navigation(update: Update, context: ContextTypes.DEFA
 
             text = "\n".join(lines)
             
-        keyboard = (
-            _dashboard_back_keyboard()
-            if not records
-            else InlineKeyboardMarkup([[InlineKeyboardButton("🦅 Exit to Cockpit", callback_data="DASH_VIEW|HOME")]])
-        )
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔙 Back", callback_data="DASH_VIEW|EVENTS")],
+            [InlineKeyboardButton("🦅 Exit to Cockpit", callback_data="DASH_VIEW|HOME")],
+        ])
         await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
         return
 
@@ -977,7 +1072,10 @@ async def handle_dashboard_navigation(update: Update, context: ContextTypes.DEFA
                 if o_row and str(o_row[0]).isdigit(): lines.append(f"• `{o_row[0]}` | ☕ *OTHERS:* *{o_row[1] if len(o_row) > 1 and o_row[1] else 'Unnamed'}*")
         except Exception: pass
         text = "\n".join(lines)
-        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🦅 Exit to Cockpit", callback_data="DASH_VIEW|HOME")]])
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔙 Back", callback_data="DASH_VIEW|EVENTS")],
+            [InlineKeyboardButton("🦅 Exit to Cockpit", callback_data="DASH_VIEW|HOME")],
+        ])
         await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
         return
 
@@ -986,7 +1084,10 @@ async def handle_dashboard_navigation(update: Update, context: ContextTypes.DEFA
         try:
             members = get_active_members()  # [(sort_key, token, label, name), ...] sorted
         except Exception as e:
-            keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🦅 Exit to Cockpit", callback_data="DASH_VIEW|HOME")]])
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Back", callback_data="DASH_VIEW|PEOPLE")],
+                [InlineKeyboardButton("🦅 Exit to Cockpit", callback_data="DASH_VIEW|HOME")],
+            ])
             await query.edit_message_text(f"❌ Failed to read the member info sheet: `{e}`", reply_markup=keyboard, parse_mode="Markdown")
             return
 
@@ -1007,7 +1108,10 @@ async def handle_dashboard_navigation(update: Update, context: ContextTypes.DEFA
         # --- Group menu: groups in seniority order (Graduates → years → named → —) ---
         if not members:
             text = "👥 *Active Member Roster Listing*\n\n📭 No members marked *Active* in the MEMBER INFO sheet yet."
-            keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🦅 Exit to Cockpit", callback_data="DASH_VIEW|HOME")]])
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Back", callback_data="DASH_VIEW|PEOPLE")],
+                [InlineKeyboardButton("🦅 Exit to Cockpit", callback_data="DASH_VIEW|HOME")],
+            ])
         else:
             order, meta = [], {}
             for _sk, tok, lbl, _nm in members:  # already sorted
@@ -1026,6 +1130,7 @@ async def handle_dashboard_navigation(update: Update, context: ContextTypes.DEFA
                 )]
                 for tok in order
             ]
+            buttons.append([InlineKeyboardButton("🔙 Back", callback_data="DASH_VIEW|PEOPLE")])
             buttons.append([InlineKeyboardButton("🦅 Exit to Cockpit", callback_data="DASH_VIEW|HOME")])
             keyboard = InlineKeyboardMarkup(buttons)
         await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")

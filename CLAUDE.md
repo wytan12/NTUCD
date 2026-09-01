@@ -568,8 +568,9 @@ on every call, with a **major-click freshness rule**:
   **read/broadcast access only**. `handle_dashboard_navigation` blocks
   `LAUNCH_NEW`, `LAUNCH_MODIFY`, `LAUNCH_ATTD` and `LAUNCH_REMIND` for them (and
   `handle_list_modify_callback` plus the creation callbacks re-check), so a
-  SECONDARY admin can use 📣 Broadcast, 📊 Performance Ledger, 🧵 Thread Index and
-  👥 Member Roster, and nothing else. No alert DMs.
+  SECONDARY admin can use 📣 Broadcast and the 🎭 Events / 👥 Members / 📦 Logistics
+  hubs (Performance Ledger, Thread Index, Member Roster, Attendance Rate), and
+  nothing else. No alert DMs.
 - `ADMIN_DM_USER_IDS` is an emergency fallback used **only** when the role lookup
   yields nothing (sheet unreachable / Role column wiped).
 - Join-flow contact admin: first MAIN admin in priority order chairperson →
@@ -583,7 +584,7 @@ flow); all other text is flow input (wizard steps, modify values, announcement
 text, modify-date entry) or ignored.
 
 ### The Cockpit (`/start` dashboard)
-`/start` opens the **"NTUFD Command Centre"** — an 8-button grid + ♻️ Refresh
+`/start` opens the **"NTUFD Command Centre"** — a 7-button grid + ♻️ Refresh
 Data. Buttons emit `DASH_VIEW|<target>` → `handle_dashboard_navigation`;
 `DASH_REFRESH` → `handle_dashboard_refresh`. Everything renders as a single
 edited bubble with success banners and 🦅 Exit to Cockpit buttons.
@@ -595,9 +596,19 @@ edited bubble with success banners and 🦅 Exit to Cockpit buttons.
 | ✅ Take Attendance | `LAUNCH_ATTD` | attendance category menu | MAIN |
 | ⏰ Reminders | `LAUNCH_REMIND` | manual remind portal (with escrow) | MAIN |
 | 📣 Broadcast | `LAUNCH_ANNOUNCE` | announce portal (General + PERF + OTHERS targets) | MAIN + SECONDARY |
-| 📊 Performance Ledger | `LEDGER` | status list (✅/⏳/❌, latest first, `+n more` date collapsing) **with a 👤 performers line per event** from PERF TABULATION | MAIN + SECONDARY |
-| 🧵 Thread Index | `THREADS` | thread-id directory (General 0, Voting 53 hardcoded, PERF, OTHERS) | MAIN + SECONDARY |
-| 👥 Member Roster | `MEMBERS` | grouped member menu: 🎩 Graduates (`Year == "-"`, top) → 🌏 Exchange (98) → 🎓 Year N → other named groups → ❓ Unassigned; counts on buttons, drill-down per group | MAIN + SECONDARY |
+| 🎭 Events | `EVENTS` | hub → 📊 Performance Ledger (`LEDGER`) · 🧵 Thread Index (`THREADS`) | MAIN + SECONDARY |
+| 👥 Members | `PEOPLE` | hub → 👥 Member Roster (`MEMBERS`) · 📈 Attendance Rate (`ATTD_RATE`) | MAIN + SECONDARY |
+| 📦 Logistics | `LOGISTICS` | placeholder screen — no contents yet (reserved for equipment / transport / per-event checklists) | MAIN + SECONDARY |
+
+**Hub sub-views** (reached from the two hubs above; each renders in the same
+bubble with a 🔙 Back to its hub + 🦅 Exit to Cockpit):
+
+| Sub-view | `DASH_VIEW\|…` | Action |
+|---|---|---|
+| 📊 Performance Ledger | `LEDGER` | status list (✅/⏳/❌, latest first, `+n more` date collapsing) **with a 👤 performers line per event** from PERF TABULATION |
+| 🧵 Thread Index | `THREADS` | thread-id directory (General 0, Voting 53 hardcoded, PERF, OTHERS) |
+| 👥 Member Roster | `MEMBERS` / `MEMBERS_<tok>` | grouped member menu: 🎩 Graduates (`Year == "-"`, top) → 🌏 Exchange (98) → 🎓 Year N → other named groups → ❓ Unassigned; counts on buttons, drill-down per group |
+| 📈 Attendance Rate | `ATTD_RATE` / `ATTD_RATE_<n>` | per-member regular-training attendance rate = ATTENDANCE col B `Tabulation` ÷ polled-REG-date count. Active members only, sorted rate-desc then nickname A–Z, paginated 10/page as `Wei Yin — 12/15 (80%)`. `%` clamped at 100. Banner when there are no polls yet / no active members. Data from `get_training_attendance_rates()` (smart-cached, 0 API calls warm) |
 
 **Only the latest panel is live**, enforced two ways:
 1. **Neutralise-on-open**: `/start` edits the previous `master_dash_id` bubble to

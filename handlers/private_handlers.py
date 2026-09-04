@@ -883,6 +883,12 @@ async def handle_dashboard_navigation(update: Update, context: ContextTypes.DEFA
             await query.answer("🔒 Main-admin access only. You are not authorised to use this feature.", show_alert=True)
             return
 
+    if target_view == "LOGISTICS":
+        from services.google_sheets import is_logistics_admin
+        if not is_logistics_admin(update.effective_user.id):
+            await query.answer("🔒 Costume Tracker is for Logistics & Main admins only.", show_alert=True)
+            return
+
     await query.answer()
 
     active_dash_id = context.user_data.get("master_dash_id")
@@ -922,6 +928,9 @@ async def handle_dashboard_navigation(update: Update, context: ContextTypes.DEFA
         return
 
     elif target_view == "LOGISTICS":
+        # from handlers.logistics_handlers import render_logistics_home
+        # await render_logistics_home(update, context)
+        # return
         text = (
             "📦 *Logistics*\n\n"
             "🚧 Nothing here yet — this hub is reserved for logistics tracking "
@@ -966,7 +975,7 @@ async def handle_dashboard_navigation(update: Update, context: ContextTypes.DEFA
             )
             return
 
-        per_page = 10
+        per_page = 20
         total_pages = (len(rows) + per_page - 1) // per_page
         page = min(page, total_pages)
         start = (page - 1) * per_page
@@ -974,10 +983,11 @@ async def handle_dashboard_navigation(update: Update, context: ContextTypes.DEFA
 
         subhead = f"_{polls} training{'s' if polls != 1 else ''} this semester · {len(rows)} active members_"
         body = []
-        for nm, attended, pol in chunk:
+        for nm, attended, pol, sen in chunk:
             pct = min(100, round(attended / pol * 100))
             dot = "🟢" if pct >= 80 else "🟡" if pct >= 50 else "🔴"
-            body.append(f"{dot} *{f'{pct}%':>4}*  {nm}  ({attended}/{pol})")
+            tag = "(S) " if sen == "S" else "(J) " if sen == "J" else ""
+            body.append(f"{dot} *{f'{pct}%':>4}*  {tag}{nm}  ({attended}/{pol})")
         text = "📈 *Training Attendance Rate*\n" + subhead + "\n\n" + "\n".join(body)
 
         def _rate_page_cb(p):

@@ -542,8 +542,42 @@ def get_training_date_columns():
     return out
 
 
+def _member_seniority_map():
+    """{nickname.lower(): "S" | "J"} from the MEMBER INFO `Seniority` column
+    (header-matched, case-insensitive; falls back to column Q). Anything that
+    isn't clearly senior/junior is left out of the map."""
+    from config import MEMBER_INFO_TAB
+    out = {}
+    try:
+        values = get_cached_values(tab_name=MEMBER_INFO_TAB)
+        if not values:
+            return out
+        header = [h.strip().lower() for h in values[0]]
+        try:
+            sen_i = header.index("seniority")
+        except ValueError:
+            sen_i = 16  # column Q
+        try:
+            name_i = header.index("nickname")
+        except ValueError:
+            name_i = 1  # column B
+        for row in values[1:]:
+            nm = row[name_i].strip().lower() if name_i < len(row) else ""
+            val = row[sen_i].strip().lower() if sen_i < len(row) else ""
+            if not nm or not val:
+                continue
+            if val.startswith("s"):
+                out[nm] = "S"
+            elif val.startswith("j"):
+                out[nm] = "J"
+    except Exception as e:
+        print(f"[WARN] seniority lookup failed: {e}")
+    return out
+
+
 def get_training_attendance_rates():
-    """Return [(nickname, attended, polls), ...] for every active member.
+    """Return [(nickname, attended, polls, seniority), ...] for every active
+    member. `seniority` is "S", "J", or None.
 
     `polls` is the number of polled regular-training date columns — columns with
     BOTH a poll id (row 1) and a date (row 2), i.e. the same set the attendance
@@ -553,11 +587,13 @@ def get_training_attendance_rates():
     of "1"s across the date region); an active member with no row in the
     ATTENDANCE tab counts as 0.
 
-    Sorted by attendance rate descending, then nickname A-Z. All reads go through
-    the smart cache (MEMBER INFO via get_active_members + one ATTENDANCE read),
-    so a warm cache costs zero API calls.
+    Sorted: Seniors first, then Juniors, then unknown; within each block by
+    attendance rate descending, then nickname A-Z. All reads go through the smart
+    cache (MEMBER INFO + one ATTENDANCE read), so a warm cache costs zero API
+    calls.
     """
     names = [m[3] for m in get_active_members()]
+    seniority = _member_seniority_map()
 
     values = get_cached_values(tab_name=ATTENDANCE_TAB)
     row1 = values[ATT_POLL_ROW - 1] if len(values) >= ATT_POLL_ROW else []
@@ -582,8 +618,10 @@ def get_training_attendance_rates():
         except ValueError:
             totals[nm.lower()] = 0
 
-    out = [(nm, totals.get(nm.strip().lower(), 0), polls) for nm in names]
-    out.sort(key=lambda it: (-(it[1] / it[2]) if it[2] else 0, it[0].lower()))
+    _rank = {"S": 0, "J": 1, None: 2}
+    out = [(nm, totals.get(nm.strip().lower(), 0), polls, seniority.get(nm.strip().lower()))
+           for nm in names]
+    out.sort(key=lambda it: (_rank[it[3]], -(it[1] / it[2]) if it[2] else 0, it[0].lower()))
     return out
 
 
@@ -947,6 +985,35 @@ def is_main_admin(user_id, force=False) -> bool:
         return False
 
 
+def is_logistics_admin(user_id, force=False) -> bool:
+    """True if `user_id` is a MAIN admin OR their Role/Position contains
+    "logistic". Gates the 📦 Logistics / Costume Tracker panel — tighter than
+    the Events / Members hubs, which allow every SECONDARY role."""
+    from config import MEMBER_INFO_TAB
+    try:
+        uid = int(user_id)
+    except (TypeError, ValueError):
+        return False
+    if is_main_admin(uid, force=force):
+        return True
+    try:
+        values = get_cached_values(tab_name=MEMBER_INFO_TAB)
+        if not values:
+            return False
+        header = [h.strip().lower() for h in values[0]]
+        role_i = header.index("role/position")
+        tele_i = header.index("tele id")
+        for row in values[1:]:
+            tid = row[tele_i].strip() if tele_i < len(row) else ""
+            if tid.isdigit() and int(tid) == uid:
+                role = row[role_i].strip().lower() if role_i < len(row) else ""
+                return "logistic" in role
+        return False
+    except Exception as e:
+        print(f"[ADMIN][WARN] Logistics role lookup failed for {user_id}: {e}")
+        return False
+
+
 def get_join_contact_admin_id():
     """Tele ID of the preferred "contact our admin" person for join issues.
 
@@ -1185,9 +1252,16 @@ def set_attendance(poll_id, user_id, present: bool):
 
 
 def get_attendees_for_date(col):
-    """Return [(member_row, name, total, marked_bool), ...] sorted by TOTAL desc."""
+    """Return [(member_row, name, total, marked_bool), ...].
+
+    Sorted Seniors → Juniors → unknown (MEMBER INFO `Seniority`), each block by
+    TOTAL desc then name A-Z. `name` is display-only here (the toggle UI writes
+    by row) and is prefixed `(S) ` / `(J) ` accordingly.
+    """
     ws = get_attendance_ws()
     values = ws.get_all_values()
+    seniority = _member_seniority_map()
+    _rank = {"S": 0, "J": 1, None: 2}
     attendees = []
     for r in range(ATT_FIRST_MEMBER_ROW, len(values) + 1):
         row = values[r - 1]
@@ -1200,9 +1274,11 @@ def get_attendees_for_date(col):
         except ValueError:
             total = 0
         marked = len(row) >= col and (row[col - 1] or "").strip() == "1"
-        attendees.append((r, name, total, marked))
-    attendees.sort(key=lambda x: (-x[2], x[1].lower()))
-    return attendees
+        sen = seniority.get(name.lower())
+        tag = "(S) " if sen == "S" else "(J) " if sen == "J" else ""
+        attendees.append((r, tag + name, total, marked, _rank[sen]))
+    attendees.sort(key=lambda x: (x[4], -x[2], x[1].lower()))
+    return [(r, name, total, marked) for r, name, total, marked, _rk in attendees]
 
 
 def commit_attendance_column(col, marks_by_row: dict):

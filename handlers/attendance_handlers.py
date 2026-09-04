@@ -28,7 +28,7 @@ from services.date_parser import parse_date_line
 from services.alerts import who
 
 HOME_TEXT = "✅ *Take Attendance*\nChoose a category:"
-PAGE_SIZE = 10
+PAGE_SIZE = 20
 
 
 def _render_attendance_keyboard(context: ContextTypes.DEFAULT_TYPE) -> InlineKeyboardMarkup:

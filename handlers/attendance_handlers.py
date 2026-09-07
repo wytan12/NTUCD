@@ -32,6 +32,16 @@ HOME_TEXT = "✅ *Take Attendance*\nChoose a category:"
 PAGE_SIZE = 20
 
 
+def _attd_group(name: str) -> str:
+    """"(SU3) Wei Yin" → "SU"; "(JEG) X" → "JEG"; no-prefix name → ""."""
+    if not name.startswith("("):
+        return ""
+    end = name.find(")")
+    if end < 0:
+        return ""
+    return name[1:end].rstrip("0123456789")
+
+
 def _render_attendance_keyboard(context: ContextTypes.DEFAULT_TYPE) -> InlineKeyboardMarkup:
     marks = context.user_data.get("attd_marks", {})
     names = context.user_data.get("attd_names", {})
@@ -41,8 +51,17 @@ def _render_attendance_keyboard(context: ContextTypes.DEFAULT_TYPE) -> InlineKey
     page_order, page, total_pages = paginate(order, page, PAGE_SIZE)
 
     keyboard, buf = [], []
+    prev_group = None
     for row in page_order:
-        label = ("✅ " if marks.get(row) else "⬜ ") + names.get(row, str(row))
+        name = names.get(row, str(row))
+        group = _attd_group(name)
+        if prev_group is not None and group != prev_group:
+            if buf:
+                keyboard.append(buf)
+                buf = []
+            keyboard.append([InlineKeyboardButton(f"─── {group or '—'} ───", callback_data="ATTD_NOOP")])
+        prev_group = group
+        label = ("✅ " if marks.get(row) else "⬜ ") + name
         buf.append(InlineKeyboardButton(label, callback_data=f"ATTD_TOGGLE|{row}"))
         if len(buf) == 2:
             keyboard.append(buf)

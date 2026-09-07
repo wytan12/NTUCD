@@ -601,15 +601,19 @@ def _parse_year_category(year_raw: str):
     return ("", 9, 0)
 
 
+_SEN_RANK = {"S": 0, "J": 1, "": 2}
+
+
 def _member_tag_map():
     """{nickname.lower(): (tag, sort_key)} for the attendance surfaces.
 
     tag       — Seniority letter + year category, e.g. "SU3", "JEG", "SG",
                 "SP1". Bare category ("U3") when Seniority is blank; "" when the
                 Year cell yields no category either.
-    sort_key  — (cat_rank, -year_num): Graduate < Exchange < Postgrad(yr desc)
-                < Undergrad(yr desc) < unknown. Use as the first sort term,
-                ahead of attendance rate.
+    sort_key  — (sen_rank, cat_rank, -year_num): Seniors before Juniors before
+                unknown; within a seniority block Graduate < Exchange <
+                Postgrad(yr desc) < Undergrad(yr desc) < unknown. Use as the
+                first sort term, ahead of attendance rate.
     One cached MEMBER INFO read (`Seniority` col Q + `Year`, header-matched).
     """
     from config import MEMBER_INFO_TAB
@@ -634,8 +638,8 @@ def _member_tag_map():
                 continue
             year_raw = row[year_i].strip() if (year_i is not None and year_i < len(row)) else ""
             code, rank, yr = _parse_year_category(year_raw)
-            tag = (sen_map.get(nm) or "") + code
-            out[nm] = (tag, (rank, -yr))
+            sen = sen_map.get(nm) or ""
+            out[nm] = (sen + code, (_SEN_RANK[sen], rank, -yr))
     except Exception as e:
         print(f"[WARN] member tag lookup failed: {e}")
     return out
@@ -654,10 +658,11 @@ def get_training_attendance_rates():
     ATTENDANCE tab counts as 0.
 
     The 4th field is the display tag ("SU3", "JEG", "SG", "SP1", …; "" when
-    unknown). Sorted by year category (Graduate → Exchange → Postgrad yr desc →
-    Undergrad yr desc → unknown), then attendance rate descending, then nickname
-    A-Z. All reads go through the smart cache (MEMBER INFO + one ATTENDANCE
-    read), so a warm cache costs zero API calls.
+    unknown). Sorted Seniors → Juniors → unknown, then by year category
+    (Graduate → Exchange → Postgrad yr desc → Undergrad yr desc → unknown),
+    then attendance rate descending, then nickname A-Z. All reads go through the
+    smart cache (MEMBER INFO + one ATTENDANCE read), so a warm cache costs zero
+    API calls.
     """
     names = [m[3] for m in get_active_members()]
     tags = _member_tag_map()
@@ -686,7 +691,7 @@ def get_training_attendance_rates():
             totals[nm.lower()] = 0
 
     def _info(nm):
-        return tags.get(nm.strip().lower(), ("", (9, 0)))
+        return tags.get(nm.strip().lower(), ("", (2, 9, 0)))
 
     out = [(nm, totals.get(nm.strip().lower(), 0), polls, _info(nm)[0]) for nm in names]
     out.sort(key=lambda it: (_info(it[0])[1],
@@ -1324,9 +1329,10 @@ def set_attendance(poll_id, user_id, present: bool):
 def get_attendees_for_date(col):
     """Return [(member_row, name, total, marked_bool), ...].
 
-    Sorted by year category (Graduate → Exchange → Postgrad yr desc → Undergrad
-    yr desc → unknown), then TOTAL desc, then name A-Z. `name` is display-only
-    here (the toggle UI writes by row) and is prefixed `(SU3) ` / `(JEG) ` etc.
+    Sorted Seniors → Juniors → unknown, then by year category (Graduate →
+    Exchange → Postgrad yr desc → Undergrad yr desc → unknown), then TOTAL desc,
+    then name A-Z. `name` is display-only here (the toggle UI writes by row) and
+    is prefixed `(SU3) ` / `(JEG) ` etc.
     """
     ws = get_attendance_ws()
     values = ws.get_all_values()
@@ -1343,7 +1349,7 @@ def get_attendees_for_date(col):
         except ValueError:
             total = 0
         marked = len(row) >= col and (row[col - 1] or "").strip() == "1"
-        tag, catkey = tags.get(name.lower(), ("", (9, 0)))
+        tag, catkey = tags.get(name.lower(), ("", (2, 9, 0)))
         pre = f"({tag}) " if tag else ""
         attendees.append((r, pre + name, total, marked, catkey))
     attendees.sort(key=lambda x: (x[4], -x[2], x[1].lower()))
@@ -1495,7 +1501,7 @@ def get_perf_attendees(col):
         except ValueError:
             total = 0
         marked = len(row) >= col and (row[col - 1] or "").strip() == "1"
-        tag, catkey = tags.get(name.lower(), ("", (9, 0)))
+        tag, catkey = tags.get(name.lower(), ("", (2, 9, 0)))
         pre = f"({tag}) " if tag else ""
         out.append((r, pre + name, total, marked, catkey))
     out.sort(key=lambda x: (x[4], -x[2], x[1].lower()))

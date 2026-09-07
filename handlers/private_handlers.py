@@ -985,7 +985,12 @@ async def handle_dashboard_navigation(update: Update, context: ContextTypes.DEFA
 
         subhead = f"_{polls} training{'s' if polls != 1 else ''} this semester · {len(rows)} active members_"
         body = []
+        prev_group = None
         for nm, attended, pol, tag in chunk:
+            group = tag.rstrip("0123456789")          # "SU3"→"SU", "SG"→"SG", ""→""
+            if prev_group is not None and group != prev_group:
+                body.append("")                       # blank line between categories
+            prev_group = group
             pct = min(100, round(attended / pol * 100))
             dot = "🟢" if pct >= 80 else "🟡" if pct >= 50 else "🔴"
             pre = f"({tag}) " if tag else ""

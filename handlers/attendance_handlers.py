@@ -18,6 +18,7 @@ from telegram.ext import ContextTypes
 
 from config import TOPIC_VOTING_ID, CHAT_ID, sg_tz
 from utils.constants import active_polls, yes_voters
+from utils.ui import paginate, pagination_row
 from services.google_sheets import (
     get_training_date_columns, get_attendees_for_date, commit_attendance_column,
     parse_sheet_date, replace_training_date_column,
@@ -37,10 +38,7 @@ def _render_attendance_keyboard(context: ContextTypes.DEFAULT_TYPE) -> InlineKey
     order = context.user_data.get("attd_order", [])
     page = context.user_data.get("attd_page", 0)
     total = len(order)
-    total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
-    page = max(0, min(page, total_pages - 1))
-    start = page * PAGE_SIZE
-    page_order = order[start: start + PAGE_SIZE]
+    page_order, page, total_pages = paginate(order, page, PAGE_SIZE)
 
     keyboard, buf = [], []
     for row in page_order:
@@ -55,14 +53,8 @@ def _render_attendance_keyboard(context: ContextTypes.DEFAULT_TYPE) -> InlineKey
     present = sum(1 for v in marks.values() if v)
     keyboard.append([InlineKeyboardButton(f"✅ Present: {present} / {total}", callback_data="ATTD_NOOP")])
 
-    if total_pages > 1:
-        indicator = InlineKeyboardButton(f"Page {page + 1}/{total_pages}", callback_data="ATTD_NOOP")
-        nav = []
-        if page > 0:
-            nav.append(InlineKeyboardButton("◀ Prev", callback_data="ATTD_PAGE|prev"))
-        nav.append(indicator)
-        if page < total_pages - 1:
-            nav.append(InlineKeyboardButton("Next ▶", callback_data="ATTD_PAGE|next"))
+    nav = pagination_row(page, total_pages, lambda p: f"ATTD_PAGE|{p}", "ATTD_NOOP")
+    if nav:
         keyboard.append(nav)
 
     mode = context.user_data.get("attd_mode", "REG")
@@ -561,15 +553,18 @@ async def attendance_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     # --- Page navigation ---
     if data.startswith("ATTD_PAGE|"):
-        direction = data.split("|")[1]
+        token = data.split("|")[1]
         page = context.user_data.get("attd_page", 0)
         order = context.user_data.get("attd_order", [])
-        total = len(order)
-        total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
-        if direction == "next":
-            page = min(page + 1, total_pages - 1)
+        # Absolute page numbers now; "prev"/"next" still accepted so buttons on
+        # an older message keep working after a restart.
+        if token.isdigit():
+            page = int(token)
+        elif token == "next":
+            page += 1
         else:
-            page = max(page - 1, 0)
+            page -= 1
+        _chunk, page, _pages = paginate(order, page, PAGE_SIZE)
         context.user_data["attd_page"] = page
         await query.edit_message_reply_markup(reply_markup=_render_attendance_keyboard(context))
         return

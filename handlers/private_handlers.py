@@ -316,6 +316,8 @@ async def handle_private_command(update: Update, context: ContextTypes.DEFAULT_T
     if not text.startswith("/"):
         from handlers.attendance_handlers import handle_moddate_text
         if await handle_moddate_text(update, context): return
+        # from handlers.logistics_handlers import handle_new_set_text
+        # if await handle_new_set_text(update, context): return
 
     if context.user_data.get("waiting_announcement_text") is not None:
         target_thread = context.user_data.pop("waiting_announcement_text")
@@ -983,11 +985,11 @@ async def handle_dashboard_navigation(update: Update, context: ContextTypes.DEFA
 
         subhead = f"_{polls} training{'s' if polls != 1 else ''} this semester · {len(rows)} active members_"
         body = []
-        for nm, attended, pol, sen in chunk:
+        for nm, attended, pol, tag in chunk:
             pct = min(100, round(attended / pol * 100))
             dot = "🟢" if pct >= 80 else "🟡" if pct >= 50 else "🔴"
-            tag = "(S) " if sen == "S" else "(J) " if sen == "J" else ""
-            body.append(f"{dot} *{f'{pct}%':>4}*  {tag}{nm}  ({attended}/{pol})")
+            pre = f"({tag}) " if tag else ""
+            body.append(f"{dot} *{f'{pct}%':>4}*  {pre}{nm}  ({attended}/{pol})")
         text = "📈 *Training Attendance Rate*\n" + subhead + "\n\n" + "\n".join(body)
 
         def _rate_page_cb(p):

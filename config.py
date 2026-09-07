@@ -70,8 +70,8 @@ SHEET_COLUMNS = ["THREAD ID", "EVENT TYPE", "EVENT NAME", "REHEARSAL DATE | TIME
 # SECONDARY admins: dashboard access only (no alert/reminder DMs).
 # Matching is case-insensitive "contains" — "vice chairperson" matches via
 # "chairperson", "Logistics Head" via "logistic", etc.
-MAIN_ADMIN_ROLE_KEYWORDS = ("chairperson", "secretary", "sde")
-SECONDARY_ADMIN_ROLE_KEYWORDS = ("treasurer", "logistic", "business", "publications", "coach")
+MAIN_ADMIN_ROLE_KEYWORDS = ("chairperson", "secretary", "sde", "business")
+SECONDARY_ADMIN_ROLE_KEYWORDS = ("treasurer", "logistic", "publications", "coach")
 
 # EMERGENCY fallback only: grants dashboard access / receives alerts ONLY when
 # the role lookup yields nothing at all (sheet unreachable / Role column wiped).

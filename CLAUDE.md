@@ -438,9 +438,9 @@ batch-writes the whole column, and every terminal outcome re-renders the list
 with a banner (never a dead-end). Both rosters
 (`get_attendees_for_date` / `get_perf_attendees`) prefix each label with the
 member's `(SU3)` / `(JEG)` tag and sort **Seniors → Juniors → unknown**, then by
-year category, then TOTAL desc, then name (see `_member_tag_map`); a full-width
-`─── <tag> ───` divider row (`ATTD_NOOP`) separates each distinct tag
-(`SU4` | `SU3` | `SP1` | …).
+year category, then TOTAL desc, then name (see `_member_tag_map`; year shows in
+the tag but is **not** a sort term). A full-width `─── <category> ───` divider
+row (`ATTD_NOOP`, e.g. `─── JP ───`, `─── JU ───`) separates the categories.
 - **Performance branch**: event picker from the PERF tab
   (`get_perf_event_list`, sorted latest perf date first, present count in
   brackets) → find-or-create the thread-id column in PERF TABULATION → roster
@@ -613,7 +613,7 @@ bubble with a 🔙 Back to its hub + 🦅 Exit to Cockpit):
 | 📊 Performance Ledger | `LEDGER` | status list (✅/⏳/❌, latest first, `+n more` date collapsing) **with a 👤 performers line per event** from PERF TABULATION |
 | 🧵 Thread Index | `THREADS` | thread-id directory (General 0, Voting 53 hardcoded, PERF, OTHERS) |
 | 👥 Member Roster | `MEMBERS` / `MEMBERS_<tok>` | grouped member menu: 🎩 Graduates (`Year == "-"`, top) → 🌏 Exchange (98) → 🎓 Year N → other named groups → ❓ Unassigned; counts on buttons, drill-down per group |
-| 📈 Attendance Rate | `ATTD_RATE` / `ATTD_RATE_<n>` | per-member regular-training attendance rate = ATTENDANCE col B `Tabulation` ÷ polled-REG-date count. Active members only. Each row `🟢 *100%*  (SU3) Wei Yin  (12/15)` (🟢≥80 / 🟡≥50 / 🔴 dot, `%` clamped at 100). Sorted **Seniors → Juniors → unknown**, then year category (Graduate → Exchange → Postgrad yr desc → Undergrad yr desc), then rate desc, then nickname; a **blank line** separates each distinct tag (`SU4` | `SU3` | `SP1` | …). Paginated **20/page**. `_member_tag_map()` builds the `(S/J)(G/EG/P<n>/U<n>)` tag + sort key from MEMBER INFO `Seniority` (col Q) + `Year`. Data from `get_training_attendance_rates()` → `(nick, attended, polls, tag)` (smart-cached, 0 API calls warm) |
+| 📈 Attendance Rate | `ATTD_RATE` / `ATTD_RATE_<n>` | per-member regular-training attendance rate = ATTENDANCE col B `Tabulation` ÷ polled-REG-date count. Active members only. Each row `🟢 *100%*  (SU3) Wei Yin  (12/15)` (🟢≥80 / 🟡≥50 / 🔴 dot, `%` clamped at 100). Sorted **Seniors → Juniors → unknown**, then year category (Graduate → Exchange → Postgrad → Undergrad), then rate desc, then nickname — year shows in the tag but is **not** a sort term; a **blank line** separates each category (`JP` | `JU` | …). Paginated **20/page**. `_member_tag_map()` builds the `(S/J)(G/EG/P<n>/U<n>)` tag + `(sen_rank, cat_rank)` sort key from MEMBER INFO `Seniority` (col Q) + `Year`. Data from `get_training_attendance_rates()` → `(nick, attended, polls, tag)` (smart-cached, 0 API calls warm) |
 
 **Only the latest panel is live**, enforced two ways:
 1. **Neutralise-on-open**: `/start` edits the previous `master_dash_id` bubble to

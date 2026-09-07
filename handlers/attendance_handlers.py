@@ -33,11 +33,14 @@ PAGE_SIZE = 20
 
 
 def _attd_group(name: str) -> str:
-    """"(SU3) Wei Yin" → "SU3"; "(JEG) X" → "JEG"; no-prefix name → ""."""
+    """Category of the tag: "(JU4) Sean" → "JU"; "(JEG) X" → "JEG"; "(SG) X" →
+    "SG"; no-prefix name → "". Year is kept in the bracket but not the divider."""
     if not name.startswith("("):
         return ""
     end = name.find(")")
-    return name[1:end] if end > 0 else ""
+    if end < 0:
+        return ""
+    return name[1:end].rstrip("0123456789")
 
 
 def _render_attendance_keyboard(context: ContextTypes.DEFAULT_TYPE) -> InlineKeyboardMarkup:

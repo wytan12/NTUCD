@@ -33,13 +33,11 @@ PAGE_SIZE = 20
 
 
 def _attd_group(name: str) -> str:
-    """"(SU3) Wei Yin" → "SU"; "(JEG) X" → "JEG"; no-prefix name → ""."""
+    """"(SU3) Wei Yin" → "SU3"; "(JEG) X" → "JEG"; no-prefix name → ""."""
     if not name.startswith("("):
         return ""
     end = name.find(")")
-    if end < 0:
-        return ""
-    return name[1:end].rstrip("0123456789")
+    return name[1:end] if end > 0 else ""
 
 
 def _render_attendance_keyboard(context: ContextTypes.DEFAULT_TYPE) -> InlineKeyboardMarkup:

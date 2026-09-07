@@ -1403,11 +1403,16 @@ def get_perf_event_column(thread_id, create=False, event_name=""):
 def get_perf_attendees(col):
     """[(member_row, name, total, marked_bool), ...] for a PERF event column.
 
-    Members are read from col A (the admin pre-fills the roster). Sorted by the
-    Tabulation count (col B) descending, like the regular-training view.
+    Members are read from col A (the admin pre-fills the roster). Sorted
+    Seniors → Juniors → unknown (MEMBER INFO `Seniority`), each block by the
+    Tabulation count (col B) desc then name A-Z, like the regular-training view.
+    `name` is display-only (the toggle UI writes by row) and is prefixed
+    `(S) ` / `(J) `.
     """
     ws = get_perf_tab_ws()
     values = ws.get_all_values()
+    seniority = _member_seniority_map()
+    _rank = {"S": 0, "J": 1, None: 2}
     out = []
     for r in range(PERF_FIRST_MEMBER_ROW, len(values) + 1):
         row = values[r - 1]
@@ -1420,9 +1425,11 @@ def get_perf_attendees(col):
         except ValueError:
             total = 0
         marked = len(row) >= col and (row[col - 1] or "").strip() == "1"
-        out.append((r, name, total, marked))
-    out.sort(key=lambda x: (-x[2], x[1].lower()))
-    return out
+        sen = seniority.get(name.lower())
+        tag = "(S) " if sen == "S" else "(J) " if sen == "J" else ""
+        out.append((r, tag + name, total, marked, _rank[sen]))
+    out.sort(key=lambda x: (x[4], -x[2], x[1].lower()))
+    return [(r, name, total, marked) for r, name, total, marked, _rk in out]
 
 
 def commit_perf_column(col, marks_by_row: dict):

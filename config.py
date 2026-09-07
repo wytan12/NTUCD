@@ -6,17 +6,17 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 GOOGLE_CREDENTIALS_JSON = os.environ.get("GOOGLE_CREDENTIALS_JSON")
 
 # Google Sheets Configuration
-SHEET_NAME = "NTUFD AY26/27 Database" # Main GSheet
-#SHEET_NAME = "NTUFD AY26/27 Timeline (Tele Bot Debug)" # Debug GSheet
+# SHEET_NAME = "NTUFD AY26/27 Database" # Main GSheet
+SHEET_NAME = "NTUFD AY26/27 Timeline (Tele Bot Debug)" # Debug GSheet
 SHEET_TAB_NAME = "PERF"
 ATTENDANCE_TAB = "ATTENDANCE"
 MEMBER_INFO_TAB = "MEMBER INFO AY26/27"  # holds Nickname (col B) + Tele ID (col P)
 
 # Chat Configuration
-CHAT_ID =  -1004406293828 # Main group Chat ID (AY26/27)
-#CHAT_ID = -1002614985856  # Debug group Chat ID
-WELCOME_TEA_GROUP_CHAT_ID = -1004392666592 # Main group Chat ID (AY26/27)
-#WELCOME_TEA_GROUP_CHAT_ID = -1004372970207 # Debug group Chat ID
+# CHAT_ID =  -1004406293828 # Main group Chat ID (AY26/27)
+CHAT_ID = -1002614985856  # Debug group Chat ID
+# WELCOME_TEA_GROUP_CHAT_ID = -1004392666592 # Main group Chat ID (AY26/27)
+WELCOME_TEA_GROUP_CHAT_ID = -1004372970207 # Debug group Chat ID
 
 # Thread Configuration
 GENERAL_TOPIC_ID = None
@@ -50,6 +50,15 @@ PERF_THREAD_ROW = 1        # row 1: thread id per event column
 PERF_EVENT_ROW = 2         # row 2: event name per event column
 PERF_FIRST_MEMBER_ROW = 3
 
+# Logistics / Costume Tracker — a SEPARATE spreadsheet from SHEET_NAME.
+# 'Costume Overview' holds the manually-maintained stock totals; 'Costume Tracking'
+# holds the RUNNING INVENTORY block (all formulas, read-only for the bot) above the
+# issue/return/transfer ledger.
+LOGISTICS_SHEET = "Logistics AY 26/27"
+COSTUME_OVERVIEW_TAB = "Costume Overview"
+COSTUME_TRACKING_TAB = "Costume Tracking"
+COSTUME_SIZE_TAB = "Costume Size"
+
 WELCOME_TEA_SHEET = "NTUFD Welcome Tea Registration 2026 (Responses)"
 WELCOME_TEA_TAB = "Form Responses 1"
 WELCOME_TEA_ID_TAB = "WELCOME TEA"
@@ -70,8 +79,8 @@ SHEET_COLUMNS = ["THREAD ID", "EVENT TYPE", "EVENT NAME", "REHEARSAL DATE | TIME
 # SECONDARY admins: dashboard access only (no alert/reminder DMs).
 # Matching is case-insensitive "contains" — "vice chairperson" matches via
 # "chairperson", "Logistics Head" via "logistic", etc.
-MAIN_ADMIN_ROLE_KEYWORDS = ("chairperson", "secretary", "sde")
-SECONDARY_ADMIN_ROLE_KEYWORDS = ("treasurer", "logistic", "business", "publications", "coach")
+MAIN_ADMIN_ROLE_KEYWORDS = ("chairperson", "secretary", "sde", "business")
+SECONDARY_ADMIN_ROLE_KEYWORDS = ("treasurer", "logistic", "publications", "coach")
 
 # EMERGENCY fallback only: grants dashboard access / receives alerts ONLY when
 # the role lookup yields nothing at all (sheet unreachable / Role column wiped).

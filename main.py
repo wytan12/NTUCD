@@ -28,6 +28,7 @@ from handlers.modify_handlers import start_modify, get_modify_field_callback
 from handlers.modify_handlers import handle_modify_status_selection, handle_modify_date_selection
 from handlers.member_handlers import handle_member_status, handle_new_member
 from handlers.private_handlers import handle_confirm_new_perf, handle_dashboard_refresh, handle_dashboard_navigation
+from handlers.logistics_handlers import logistics_callback
 from handlers.welcome_tea_handlers import (
     handle_welcome_tea_confirmation,
     handle_welcome_tea_still_coming,
@@ -291,6 +292,7 @@ def main():
     app.add_handler(CallbackQueryHandler(execute_manual_remind_dispatch, pattern="^MANUAL_REMIND_TID\\|"))
     app.add_handler(CallbackQueryHandler(handle_dashboard_refresh, pattern="^DASH_REFRESH$"))
     app.add_handler(CallbackQueryHandler(handle_dashboard_navigation, pattern="^DASH_VIEW\\|"))
+    app.add_handler(CallbackQueryHandler(logistics_callback, pattern="^LOGI\\|"))
     app.add_handler(CallbackQueryHandler(handle_remind_escrow_callback, pattern=r"^REMIND_ESCROW_CONFIRM\|"))
     app.add_handler(CallbackQueryHandler(execute_manual_announcement_dispatch, pattern=r"^ANNOUNCE_TARGET\|"))
     app.add_handler(CallbackQueryHandler(handle_welcome_tea_confirmation, pattern=r"^WELCOME_TEA_(CONFIRM|REJECT)$"))

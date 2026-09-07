@@ -645,6 +645,35 @@ def _member_tag_map():
     return out
 
 
+def get_member_genders():
+    """{nickname.lower(): "M" | "F" | "?"} from the MEMBER INFO `Gender` column
+    (first letter, upper-cased; header-matched). One cached read."""
+    from config import MEMBER_INFO_TAB
+    out = {}
+    try:
+        values = get_cached_values(tab_name=MEMBER_INFO_TAB)
+        if not values:
+            return out
+        header = [h.strip().lower() for h in values[0]]
+        try:
+            g_i = header.index("gender")
+        except ValueError:
+            return out
+        try:
+            n_i = header.index("nickname")
+        except ValueError:
+            n_i = 1
+        for row in values[1:]:
+            nm = row[n_i].strip().lower() if n_i < len(row) else ""
+            if not nm:
+                continue
+            gv = row[g_i].strip()[:1].upper() if g_i < len(row) else ""
+            out[nm] = gv if gv in ("M", "F") else "?"
+    except Exception as e:
+        print(f"[WARN] gender lookup failed: {e}")
+    return out
+
+
 def get_training_attendance_rates():
     """Return [(nickname, attended, polls, seniority), ...] for every active
     member. `seniority` is "S", "J", or None.

@@ -945,7 +945,7 @@ async def handle_dashboard_navigation(update: Update, context: ContextTypes.DEFA
         return
 
     elif target_view == "ATTD_RATE" or target_view.startswith("ATTD_RATE_"):
-        from services.google_sheets import get_training_attendance_rates
+        from services.google_sheets import get_training_attendance_rates, get_member_genders
         page = 1
         if target_view != "ATTD_RATE":
             try:
@@ -983,7 +983,23 @@ async def handle_dashboard_navigation(update: Update, context: ContextTypes.DEFA
         start = (page - 1) * per_page
         chunk = rows[start:start + per_page]
 
-        subhead = f"_{polls} training{'s' if polls != 1 else ''} this semester · {len(rows)} active members_"
+        # --- summary block (all members, not just this page) ---
+        genders = get_member_genders()
+        cat_counts, gen_counts = {}, {"M": 0, "F": 0, "?": 0}
+        for nm, _a, _p, tag in rows:
+            cat = tag.rstrip("0123456789") or "—"
+            cat_counts[cat] = cat_counts.get(cat, 0) + 1
+            gen_counts[genders.get(nm.strip().lower(), "?")] += 1
+        _cat_order = ["SG", "SEG", "SP", "SU", "JG", "JEG", "JP", "JU", "—"]
+        ordered = [c for c in _cat_order if c in cat_counts] + \
+                  [c for c in cat_counts if c not in _cat_order]
+        cat_line = " · ".join(f"{c} {cat_counts[c]}" for c in ordered)
+        gen_line = f"M {gen_counts['M']} · F {gen_counts['F']}" + \
+                   (f" · ? {gen_counts['?']}" if gen_counts["?"] else "")
+
+        subhead = (f"_{polls} training{'s' if polls != 1 else ''} this semester · "
+                   f"{len(rows)} active members_\n"
+                   f"📊 {cat_line}\n👥 {gen_line}")
         body = []
         prev_group = None
         for nm, attended, pol, tag in chunk:

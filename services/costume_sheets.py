@@ -186,12 +186,40 @@ def _int(row, idx) -> int:
         return 0
 
 
+def _invalidate_costume():
+    """Drop the costume snapshots after a write — and only those.
+
+    Invalidating by spreadsheet would now throw away ATTENDANCE and MEMBER INFO
+    too, since these tabs share a file with them. All three costume tabs go
+    together because a ledger write also changes the Overview running table:
+    its Out cells are formulas over the ledger.
+    """
+    for tab in (COSTUME_TRACKING_TAB, COSTUME_OVERVIEW_TAB, COSTUME_SIZE_TAB):
+        invalidate_sheet_cache(LOGISTICS_SHEET, tab)
+
+
+def _cvals(tab: str, force: bool = False):
+    """Every Costume Tracker read goes through here.
+
+    `trust_cache` means: serve the snapshot, ask Google nothing. Costume data
+    only changes when this module writes it — and every write invalidates the
+    cache — so re-checking on each screen would spend API calls to be told
+    nothing changed. It also stops an unrelated write elsewhere in the database
+    (attendance, a member joining) from invalidating these tabs, which is what
+    sharing a spreadsheet with them would otherwise cost.
+
+    A hand edit in the web UI is picked up by ♻️ Refresh Data, by the next
+    bot write, or by the 10-minute ceiling in `_TRUSTED_CACHE_TTL_SECONDS`.
+    """
+    return get_cached_values(LOGISTICS_SHEET, tab, force=force, trust_cache=not force)
+
+
 def _tracking_values(force=False):
-    return get_cached_values(LOGISTICS_SHEET, COSTUME_TRACKING_TAB, force=force)
+    return _cvals(COSTUME_TRACKING_TAB, force=force)
 
 
 def _overview_values(force=False):
-    return get_cached_values(LOGISTICS_SHEET, COSTUME_OVERVIEW_TAB, force=force)
+    return _cvals(COSTUME_OVERVIEW_TAB, force=force)
 
 
 def _metric_column(values) -> int | None:
@@ -391,7 +419,7 @@ def append_issues(entries: list[IssueEntry]) -> int:
     end = _col_letter(width - 1)
     ws.update(values=block, range_name=f"A{first_free}:{end}{first_free + len(block) - 1}",
               value_input_option="USER_ENTERED")
-    invalidate_sheet_cache(LOGISTICS_SHEET)
+    _invalidate_costume()
     return len(block)
 
 
@@ -422,7 +450,7 @@ def set_row_performance(row: int, performance: str) -> bool:
         return False
     ws = get_gspread_sheet(LOGISTICS_SHEET, COSTUME_TRACKING_TAB)
     ws.update_cell(row, cols["performances"] + 1, performance)
-    invalidate_sheet_cache(LOGISTICS_SHEET)
+    _invalidate_costume()
     return True
 
 
@@ -453,7 +481,7 @@ def close_rows(closures: list[Closure]) -> int:
 
     ws = get_gspread_sheet(LOGISTICS_SHEET, COSTUME_TRACKING_TAB)
     ws.batch_update(payload, value_input_option="USER_ENTERED")
-    invalidate_sheet_cache(LOGISTICS_SHEET)
+    _invalidate_costume()
     return len(closures)
 
 
@@ -465,7 +493,7 @@ def costume_size_layout(force=False) -> tuple[dict[str, int], int | None]:
     matched by header, never by position. Reading them positionally is what made
     the pant default silently pick up the White Shirt column.
     """
-    values = get_cached_values(LOGISTICS_SHEET, COSTUME_SIZE_TAB, force=force)
+    values = _cvals(COSTUME_SIZE_TAB, force=force)
     header = values[0] if values else []
     shirt_cols: dict[str, int] = {}
     pant_col = None
@@ -487,7 +515,7 @@ def get_costume_sizes(force=False) -> dict[str, dict]:
     Shirt sizes are keyed by costume set, so the issue screen can seed the size
     for whichever set is actually selected.
     """
-    values = get_cached_values(LOGISTICS_SHEET, COSTUME_SIZE_TAB, force=force)
+    values = _cvals(COSTUME_SIZE_TAB, force=force)
     shirt_cols, pant_col = costume_size_layout(force=force)
     sizes: dict[str, dict] = {}
     for row in values[1:]:
@@ -517,7 +545,7 @@ def record_sizes_from_issues(entries) -> int:
     if not entries:
         return 0
     shirt_cols, pant_col = costume_size_layout(force=True)
-    values = get_cached_values(LOGISTICS_SHEET, COSTUME_SIZE_TAB, force=True)
+    values = _cvals(COSTUME_SIZE_TAB, force=True)
     rows = {_cell(r, 0).strip().lower(): i + 1 for i, r in enumerate(values) if _cell(r, 0)}
     width = max([*shirt_cols.values()] + [pant_col if pant_col is not None else 0]) + 1
 
@@ -561,7 +589,7 @@ def record_sizes_from_issues(entries) -> int:
     if appended:
         ws.append_rows([r for _n, r in appended], value_input_option="USER_ENTERED")
     if updates or appended:
-        invalidate_sheet_cache(LOGISTICS_SHEET)
+        _invalidate_costume()
     return len(updates) + sum(1 for _ in appended)
 
 
@@ -593,18 +621,18 @@ def set_costume_size(nickname: str, garment: str, size: Size) -> bool:
         return False
 
     ws = get_gspread_sheet(LOGISTICS_SHEET, COSTUME_SIZE_TAB)
-    values = get_cached_values(LOGISTICS_SHEET, COSTUME_SIZE_TAB, force=True)
+    values = _cvals(COSTUME_SIZE_TAB, force=True)
     for i, row in enumerate(values):
         if _cell(row, 0).lower() == nickname.lower():
             ws.update_cell(i + 1, col0 + 1, size.value)
-            invalidate_sheet_cache(LOGISTICS_SHEET)
+            _invalidate_costume()
             return True
 
     new_row = [""] * (max(col0, 0) + 1)
     new_row[0] = nickname
     new_row[col0] = size.value
     ws.append_row(new_row, value_input_option="USER_ENTERED")
-    invalidate_sheet_cache(LOGISTICS_SHEET)
+    _invalidate_costume()
     return True
 
 
@@ -620,7 +648,7 @@ def adjust_stock(item, set_or_type: str, size_label: str, delta: int) -> int | N
     (and therefore On hand) picks the change up on its own.
     """
     ws = get_gspread_sheet(LOGISTICS_SHEET, COSTUME_OVERVIEW_TAB)
-    values = get_cached_values(LOGISTICS_SHEET, COSTUME_OVERVIEW_TAB, force=True)
+    values = _cvals(COSTUME_OVERVIEW_TAB, force=True)
     for i, row in enumerate(values):
         want_item = (item.value if isinstance(item, Item) else str(item)).strip().lower()
         if (_cell(row, 0).lower() == want_item
@@ -628,7 +656,7 @@ def adjust_stock(item, set_or_type: str, size_label: str, delta: int) -> int | N
                 and _cell(row, 3).lower() == str(size_label).lower()):
             new = max(0, _int(row, 4) + delta)
             ws.update_cell(i + 1, 5, new)
-            invalidate_sheet_cache(LOGISTICS_SHEET)
+            _invalidate_costume()
             return new
     return None
 
@@ -642,7 +670,7 @@ def get_stock_rows(force=False) -> list[tuple[str, str, str, str, int]]:
     as inventory rows and show up in both the Main Inventory table and the
     Update Stock picker.
     """
-    values = get_cached_values(LOGISTICS_SHEET, COSTUME_OVERVIEW_TAB, force=force)
+    values = _cvals(COSTUME_OVERVIEW_TAB, force=force)
     rows = []
     started = False
     for row in values[2:]:
@@ -840,7 +868,7 @@ def add_costume_set(set_name: str, items=None, sizes=None) -> tuple[bool, str]:
               range_name=f"{first_col}{block_start}:{last_col}{block_start + len(grid) - 1}",
               value_input_option="USER_ENTERED")
 
-    invalidate_sheet_cache(LOGISTICS_SHEET)
+    _invalidate_costume()
     return True, (f"Added '{name}': {len(new_rows)} inventory rows (quantity 0) and a "
                   f"running-table section. Count the stock in with Update Stock.")
 
@@ -907,7 +935,7 @@ def remove_costume_set(set_name: str) -> tuple[bool, str]:
         ws.batch_clear([f"{first_col}{start}:{last_col}{end}"])
         cleared = end - start + 1
 
-    invalidate_sheet_cache(LOGISTICS_SHEET)
+    _invalidate_costume()
     return True, (f"Removed '{name}': {dropped} inventory rows and "
                   f"{cleared} running-table rows cleared.")
 
@@ -1020,7 +1048,7 @@ def release_items(h, keys, action: str, to: str = "") -> tuple[bool, bool]:
 
     ws = get_gspread_sheet(LOGISTICS_SHEET, COSTUME_TRACKING_TAB)
     ws.batch_update(updates, value_input_option="USER_ENTERED")
-    invalidate_sheet_cache(LOGISTICS_SHEET)
+    _invalidate_costume()
     return True, closed
 
 

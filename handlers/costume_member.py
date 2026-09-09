@@ -29,7 +29,7 @@ from services.costume_sheets import (get_open_holdings, get_costume_sizes,
                                      ITEM_FIELDS, items_out, describe_items,
                                      release_items, issue_items_to)
 from handlers.costume_common import (_read, _edit, _holding_label_full, _picked,
-                                     _PAGE)
+                                     _item_button_label, _PAGE)
 
 _CELL = "MYCOS|NOP"
 
@@ -97,10 +97,14 @@ async def handle_my_costume(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 
 def _picked_items(ud: dict, row: str, holding) -> list[str]:
-    """Which pieces this member is passing on. Everything, until they say otherwise."""
+    """Which pieces this member is passing on — nothing until they say so.
+
+    Same rule as the admin transfer screen: handing over a whole set is the
+    exception, and a pre-ticked list would sign away pieces they still have.
+    """
     sel = ud.setdefault("mycos_items", {})
     if row not in sel:
-        sel[row] = items_out(holding)
+        sel[row] = []
     return sel[row]
 
 
@@ -108,11 +112,14 @@ async def _render_items(query, context, row: str, holding) -> None:
     """People hand over a shirt or a pair of pants, not always the whole set."""
     chosen = _picked_items(context.user_data, row, holding)
     available = items_out(holding)
-    lines = ["🔁 *Pass on*", "", f"*{_holding_label_full(holding)}*", "",
-             f"_issued for {holding.event}_", "", "What are you passing on?"]
-    rows = [[InlineKeyboardButton(_picked(label, key in chosen),
-                                  callback_data=f"MYCOS|I|{row}|{key}")]
-            for key, _hdr, label in ITEM_FIELDS if key in available]
+    lines = ["🔁 *Pass on*",
+             f"_{holding.costume_set or 'Costume'} set · issued for {holding.event}_", "",
+             "What are you passing on?"]
+    btns = [InlineKeyboardButton(
+        _picked(_item_button_label(holding, key, label), key in chosen),
+        callback_data=f"MYCOS|I|{row}|{key}")
+        for key, _hdr, label in ITEM_FIELDS if key in available]
+    rows = [btns[i:i + 2] for i in range(0, len(btns), 2)]
     if chosen:
         rows.append([InlineKeyboardButton("➡️ Who has it?",
                                           callback_data=f"MYCOS|IA|{row}")])

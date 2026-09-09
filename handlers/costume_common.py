@@ -17,6 +17,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from services.costume_sheets import Size, pant_size_label
 
 _PAGE = 16
+_ROSTER_PAGE = 20        # member lists page like Take Attendance does
 _SIZE_OPTS = list(Size)          # shared by the size editor and the issue config
 
 
@@ -136,6 +137,20 @@ def _holding_label_full(h) -> str:
     bits.append(f"Shirt {h.shirt_size.value}" if h.shirt_size else "no shirt")
     bits.append(f"Pants {pant_size_label(h.pant_size)}" if h.pant_size else "no pants")
     return " · ".join(bits)
+
+
+def _item_button_label(h, key: str, fallback: str) -> str:
+    """`Shirt M`, `Pants L - 180`, `Waist Wrap` — the piece AND its size.
+
+    The size belongs on the button rather than in a header line above it: the
+    header would repeat sizes for pieces the person is not even choosing, and
+    the tap target is where you actually need to know which shirt you mean.
+    """
+    if key == "shirt" and h.shirt_size:
+        return f"Shirt {h.shirt_size.value}"
+    if key == "pants" and h.pant_size:
+        return f"Pants {pant_size_label(h.pant_size)}"
+    return fallback
 
 
 def _stage(ud: dict) -> dict:

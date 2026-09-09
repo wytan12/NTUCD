@@ -237,10 +237,10 @@ async def logistics_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return await _render_item_pick(query, context, action, row, h)
         if verb == "RIT":
             key = parts[4]
-            chosen = _item_keys(ud, row, h)
+            chosen = _item_keys(ud, row, h, action)
             chosen.remove(key) if key in chosen else chosen.append(key)
             return await _render_item_pick(query, context, action, row, h)
-        keys = _item_keys(ud, row, h)     # RIA
+        keys = _item_keys(ud, row, h, action)     # RIA
         if not keys:
             return await _render_item_pick(query, context, action, row, h)
         if action == "return":
@@ -258,7 +258,7 @@ async def logistics_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if h is None:
             return await _render_holders(query, context, "transfer")
         return await _render_transfer_to(query, row, h.name,
-                                         describe_items(h, _item_keys(ud, row, h)),
+                                         describe_items(h, _item_keys(ud, row, h, "transfer")),
                                          h.event, int(parts[3]))
     if verb == "TRS":                    # TRS|<row>|<recipient>
         row, to = parts[2], parts[3]
@@ -266,7 +266,7 @@ async def logistics_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         h = next((x for x in (holdings if ok else []) if str(x.row) == row), None)
         if h is None:
             return await _render_holders(query, context, "transfer")
-        keys = _item_keys(ud, row, h)
+        keys = _item_keys(ud, row, h, "transfer")
         _stage_for(ud, "transfer", "*")["items"][row] = {
             "name": h.name, "label": _holding_label_full(h), "to": to,
             "desc": describe_items(h, keys), "keys": list(keys),

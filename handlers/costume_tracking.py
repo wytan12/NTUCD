@@ -13,6 +13,7 @@ import asyncio
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from utils.ui import paginate, pagination_row
+from services.google_sheets import get_member_roster
 from services.costume_sheets import (CostumeSet, Size, LedgerStatus,
                                      IssueEntry, Closure, get_running_inventory,
                                      get_open_holdings, get_costume_sizes,
@@ -23,10 +24,10 @@ from services.costume_sheets import (CostumeSet, Size, LedgerStatus,
                                      describe_items, release_items, issue_items_to,
                                      shirt_size_for)
 from handlers.costume_common import (_read, _edit, _fail, _set_icon, _holding_label,
-                                     _holding_label_full,
+                                     _holding_label_full, _item_button_label,
                                      _picked,
                                      _held_by_name, _stage, _stage_for, _clear_stage,
-                                     _stage_key, _PAGE, _SIZE_OPTS)
+                                     _stage_key, _PAGE, _ROSTER_PAGE, _SIZE_OPTS)
 
 
 _ACT_LABEL = {"issue": "📤 Issue", "return": "↩️ Return", "transfer": "🔁 Transfer"}
@@ -89,10 +90,16 @@ async def _render_pick_perf(query) -> None:
 
 
 def _run_sync_events():
-    """Sync wrapper so `_read` can push both PERF reads onto one thread."""
+    """Sync wrapper so `_read` can push both PERF reads onto one thread.
+
+    Both read from the cache without re-checking Drive: PERF and PERF TABULATION
+    change when the bot writes them (which invalidates the cache), and paging
+    around the Costume Tracker should not keep asking Google whether an
+    unrelated tab moved.
+    """
     from services.google_sheets import get_perf_event_list, get_all_perf_performers
-    events = get_perf_event_list()
-    performers = get_all_perf_performers()
+    events = get_perf_event_list(trust_cache=True)
+    performers = get_all_perf_performers(trust_cache=True)
     return [(tid, name, performers.get(str(tid), [])) for tid, name, _cnt in events]
 
 
@@ -318,7 +325,8 @@ async def _render_config(query, context, eid: str, nick: str, swap_row=None) -> 
     await _edit(query, text, kb)
 
 
-async def _render_holders(query, context, action: str, page: int = 0) -> None:
+async def _render_holders(query, context, action: str, page: int = 0,
+                          banner: str = "") -> None:
     """The list of open holdings to act on.
 
     Deliberately does NOT print a line per holder: after a big show 40 people
@@ -342,7 +350,8 @@ async def _render_holders(query, context, action: str, page: int = 0) -> None:
                                "🔙 Back", callback_data="LOGI|TRACK")]]))
 
     verb = "returning" if action == "return" else "transferring"
-    lines = [f"{_ACT_LABEL[action]} — currently holding (*{len(holdings)}*)"]
+    lines = ([banner, ""] if banner else []) + [
+        f"{_ACT_LABEL[action]} — currently holding (*{len(holdings)}*)"]
     if staged:
         lines += ["", f"_Staged for {verb}:_"]
         for h in holdings:
@@ -389,12 +398,17 @@ async def _render_holders(query, context, action: str, page: int = 0) -> None:
     await _edit(query, "\n".join(lines), InlineKeyboardMarkup(rows))
 
 
-def _item_keys(ud: dict, row: str, holding) -> list[str]:
-    """Which items are ticked for this row — everything still out, by default,
-    since returning the lot is the common case."""
+def _item_keys(ud: dict, row: str, holding, action: str = "return") -> list[str]:
+    """Which items are ticked for this row.
+
+    A return starts with everything ticked — people hand the whole costume back
+    and ticking four boxes every time would be busywork. A transfer starts with
+    NOTHING ticked: passing on a whole set is the exception, and a pre-ticked
+    list would quietly move pieces the giver still has.
+    """
     sel = ud.setdefault("logi_items", {})
     if row not in sel:
-        sel[row] = items_out(holding)
+        sel[row] = items_out(holding) if action == "return" else []
     return sel[row]
 
 
@@ -403,15 +417,19 @@ async def _render_item_pick(query, context, action: str, row: str, holding) -> N
     and each item's Out counts from its own field, so a partial action clears
     just that field and leaves the rest counted."""
     ud = context.user_data
-    chosen = _item_keys(ud, row, holding)
+    chosen = _item_keys(ud, row, holding, action)
     available = items_out(holding)
 
-    lines = [f"{_ACT_LABEL[action]} — *{holding.name}*", "",
-             f"_{_holding_label_full(holding)} · for {holding.event}_", "",
+    lines = [f"{_ACT_LABEL[action]} — *{holding.name}*",
+             f"_{holding.costume_set or 'Costume'} set · for {holding.event}_", "",
              f"Which pieces are being {'returned' if action == 'return' else 'passed on'}?"]
-    rows = [[InlineKeyboardButton(_picked(label, key in chosen),
-                                  callback_data=f"LOGI|RIT|{action}|{row}|{key}")]
-            for key, _hdr, label in ITEM_FIELDS if key in available]
+    # 2x2 grid: four pieces is a shape you read at a glance, where four stacked
+    # full-width buttons is a list you have to scan.
+    btns = [InlineKeyboardButton(
+        _picked(_item_button_label(holding, key, label), key in chosen),
+        callback_data=f"LOGI|RIT|{action}|{row}|{key}")
+        for key, _hdr, label in ITEM_FIELDS if key in available]
+    rows = [btns[i:i + 2] for i in range(0, len(btns), 2)]
     if chosen:
         nxt = "✔️ Add to list" if action == "return" else "➡️ Choose who has it"
         rows.append([InlineKeyboardButton(nxt, callback_data=f"LOGI|RIA|{action}|{row}")])
@@ -419,7 +437,7 @@ async def _render_item_pick(query, context, action: str, row: str, holding) -> N
         rows.append([InlineKeyboardButton("⚠️ Pick at least one piece",
                                           callback_data="LOGI|NOP")])
     rows.append([InlineKeyboardButton("🔙 Back", callback_data=f"LOGI|ACT|{action}")])
-    if len(chosen) < len(available):
+    if chosen and len(chosen) < len(available):   # nothing picked yet is not "partial"
         lines += ["", "_Partial — the rest stays out, and the row stays open._"]
     await _edit(query, "\n".join(lines), InlineKeyboardMarkup(rows))
 
@@ -429,18 +447,24 @@ async def _render_transfer_to(query, row: str, holder: str, label: str, event: s
     """Pick who the costume is being handed to.
 
     The recipient is the point of a transfer: without it the costume vanishes
-    from `Out` even though nobody returned it. Names come from the Costume Size
-    roster, which is the costume-side member list.
+    from `Out` even though nobody returned it. The list is the same one Take
+    Attendance shows — active members, year-category order, `(SU3)` tags,
+    20 a page — rather than the Costume Size sheet, which is a size record and
+    not a roster.
     """
-    ok, sizes = await _read(get_costume_sizes)
+    ok, roster = await _read(get_member_roster, True)
     if not ok:
-        return await _fail(query, "the member list", sizes, back="LOGI|ACT|transfer")
-    names = [n for n in sorted(sizes) if n != holder]
-    chunk, page, pages = paginate(names, page, _PAGE)
+        return await _fail(query, "the member list", roster, back="LOGI|ACT|transfer")
+    people = [(n, tag) for n, tag in roster if n != holder]
+    chunk, page, pages = paginate(people, page, _ROSTER_PAGE)
 
-    lines = [f"🔁 *Transfer — {holder}*", "", f"Held: {label} (from {event})", "",
-             "Hand it to:"]
-    btns = [InlineKeyboardButton(n, callback_data=f"LOGI|TRS|{row}|{n}") for n in chunk]
+    lines = [f"🔁 *Transfer — {holder}*", "",
+             f"Held: {label} (from {event})", "", "Hand it to:"]
+    # Same list, order and 20-a-page as Take Attendance: one member list behaves
+    # the same everywhere. The tag is display only — the ledger is written by
+    # nickname, so that is what the callback carries.
+    btns = [InlineKeyboardButton(f"({tag}) {n}" if tag else n,
+                                 callback_data=f"LOGI|TRS|{row}|{n}") for n, tag in chunk]
     rows = [btns[i:i + 2] for i in range(0, len(btns), 2)]
     nav = pagination_row(page, pages, lambda p: f"LOGI|TRT|{row}|{p}", "LOGI|NOP")
     if nav:
@@ -459,8 +483,10 @@ async def _render_review(query, context) -> None:
         if action == "issue":
             swap = " _(swap — old row closed)_" if it.get("swap_row") else ""
             acc = "+".join(lab for k, lab in _ACCESSORIES if it[k])
-            lines.append(f"• {it['nick']} — {it['set']} · S {it['shirt'] or '—'} / "
-                         f"P {pant_size_label(Size(it['pants'])) if it['pants'] else '—'}"
+            shirt = f"Shirt {it['shirt']}" if it['shirt'] else "no shirt"
+            pants = (f"Pants {pant_size_label(Size(it['pants']))}" if it['pants']
+                     else "no pants")
+            lines.append(f"• {it['nick']} — {it['set']} costume set · {shirt} · {pants}"
                          f"{' · ' + acc if acc else ''}{swap}")
         elif action == "return":
             lines.append(f"• {it['name']} — returning {it.get('desc') or it['label']}"
@@ -471,9 +497,6 @@ async def _render_review(query, context) -> None:
     if action == "transfer":
         lines += ["", "_Each transfer closes the giver's row and opens one for the "
                       "receiver, so the costume stays counted as out._"]
-    else:
-        lines += ["", "_On submit the ledger updates; Out and On hand recalculate "
-                      "in the sheet._"]
 
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton(f"✅ Submit {len(st['items'])}", callback_data="LOGI|SUB")],
@@ -513,7 +536,7 @@ async def _submit(query, context) -> None:
             # Handing someone a costume is the measurement — write it back so
             # Costume Size stays current and the next issue pre-fills.
             learned = await asyncio.to_thread(record_sizes_from_issues, entries)
-            msg = f"📤 Issued *{n}* costume(s)."
+            msg = f"🟢 *Issued {n} costume(s) — saved to the sheet.*"
             if learned:
                 word = "entry" if learned == 1 else "entries"
                 msg += f"\n📏 _Costume Size updated ({learned} {word})._"
@@ -540,9 +563,9 @@ async def _submit(query, context) -> None:
                 if action == "transfer":
                     await asyncio.to_thread(issue_items_to, h, keys, it["to"])
             if action == "return":
-                msg = f"↩️ Logged *{n}* return(s)."
+                msg = f"🟢 *Logged {n} return(s) — saved to the sheet.*"
             else:
-                msg = (f"🔁 Logged *{n}* transfer(s).\n"
+                msg = (f"🟢 *Logged {n} transfer(s) — saved to the sheet.*\n"
                        f"_Receivers now hold them; Out is unchanged._")
             if n - closed:
                 msg += (f"\n📝 _{n - closed} row(s) stayed open — some pieces "
@@ -557,10 +580,11 @@ async def _submit(query, context) -> None:
             InlineKeyboardMarkup([[InlineKeyboardButton("📋 Back to review",
                                                         callback_data="LOGI|REV")]]))
 
+    # Same shape as Take Attendance's CONFIRM: clear the staging buffer, then
+    # re-render the list we came from with the result as a banner. A terminal
+    # "done" bubble is a dead end — after writing one group there is usually
+    # another to do, and the list is where you see the write took effect.
     _clear_stage(ud)
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("↩️ Back to Tracking", callback_data="LOGI|TRACK")],
-        [InlineKeyboardButton("📦 Costume Overview", callback_data="LOGI|LIST")],
-        [InlineKeyboardButton("🦅 Costume Tracker home", callback_data="LOGI|HOME")],
-    ])
-    await _edit(query, msg, kb)
+    if action == "issue":
+        return await _render_pick_performer(query, context, _scope, banner=msg)
+    return await _render_holders(query, context, action, banner=msg)

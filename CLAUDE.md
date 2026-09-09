@@ -769,7 +769,7 @@ All render in the one dashboard bubble; callback namespace `LOGI|<verb>|…`.
 | Issue | `EV → PF → PFN\|PFS → DSET/DPTY/DSH/DPS/DACC → ADD` | `PF` routes to the swap-or-additional choice when the performer already holds something. On submit the sizes used are written back to Costume Size |
 | Return / Transfer | `HP\|<action>\|<page>` · `HSEL` → `RIT`/`RIA` → (`TRT\|<row>\|<page>` · `TRS`) | The holder list is **buttons only, 16 a page** — 40 holders as 40 text lines plus 40 buttons is unreadable and eventually too long to send; only STAGED people are spelled out, and a duplicated name gets a full-width button with its costume. Tapping a holder opens the **item picker** — every piece still out is ticked by default; untick to return or pass on only part of a set. Transfer then picks a **recipient**. Tapping an already-staged holder un-stages them |
 | ↪️ Keep for this performance | `KEEP` | retags an open row to the current performance instead of closing and re-issuing it |
-| Review / commit | `REV` · `SUB` · `CLR` | nothing is written until `SUB`; a partial action leaves the row open and writes a dated note to Remarks |
+| Review / commit | `REV` · `SUB` · `CLR` | nothing is written until `SUB`; a partial action leaves the row open and writes a dated note to Remarks. `SUB` follows **Take Attendance's CONFIRM shape** — clear the staging buffer, then re-render the list it came from (performer list for Issue, holders list for Return/Transfer) with a 🟢 success banner, never a terminal "done" bubble. A failed write keeps the list staged and offers 📋 Back to review |
 
 **Member-facing `/costume`** (`handlers/costume_member.py`, namespace `MYCOS|`)
 is the one costume screen ordinary members can open — a DM listing what they

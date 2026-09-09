@@ -19,8 +19,8 @@ University. It manages:
 | Layer | Technology |
 |---|---|
 | Bot framework | `python-telegram-bot` v21.5 (async, polling) |
-| Persistence | `PicklePersistence` → `bot_data.pkl` (WT job tracking, dietary-capture state, pending verification / member-write queues, group chat data survive restarts) |
-| Database | Google Sheets via `gspread` + `oauth2client` |
+| Persistence | `PicklePersistence` → `bot_data.pkl` (WT job tracking, dietary-capture state, pending verification / member-write queues, group chat data). **A cache in front of Sheets, not a database** — Heroku's filesystem is ephemeral, so the file is discarded on every deploy, crash and daily dyno cycle. It survives a crash *within* a dyno's life, nothing more. Anything durable must live in the sheet: this is why the WT jobs re-check per-user `SENT` columns rather than trusting `wt_jobs_sent`, and why `/verification` writes MEMBER INFO inline instead of trusting the queue |
+| Database | Google Sheets via `gspread` + `oauth2client`. The Costume Tracker's three `COSTUME *` tabs live in the **same** main database (`LOGISTICS_SHEET` names that file, not a separate one), so a costume write invalidates the whole file's cached tabs — which Drive's per-FILE `modifiedTime` would do anyway |
 | Timezone | Asia/Singapore (`pytz`) |
 | Scheduler | `JobQueue` (APScheduler): daily 7-day performance reminder scan (09:00 SGT), daily auto-poll (09:00 SGT), and a **7-second MEMBER INFO write drain** (`drain_member_writes_job`). The Welcome Tea 30-second heartbeat exists but is **currently disabled** (see below). Per-admin DM menus registered as a detached `asyncio.create_task` on startup |
 | Deployment | Heroku worker dyno (`Procfile`: `worker: python main.py`) |
@@ -60,15 +60,29 @@ telegram-bot/
 │   │                            #   Performance Ledger (+performers), Thread Index, Member Roster
 │   ├── verification_handlers.py # join-request router; ACTIVE /verify | /verification matric conversation;
 │   │                            #   drain_member_writes_job (background MEMBER INFO write queue)
-│   └── welcome_tea_handlers.py  # Welcome Tea automation — RSVP buttons, dietary capture, /attd event-day
-│                                #   check-in, 8 job callbacks + paced/batched broadcasting helpers
+│   ├── welcome_tea_handlers.py  # Welcome Tea automation — RSVP buttons, dietary capture, /attd event-day
+│   │                            #   check-in, 8 job callbacks + paced/batched broadcasting helpers
+│   ├── logistics_handlers.py    # Costume Tracker ENTRY POINT — render_logistics_home +
+│   │                            #   logistics_callback router (^LOGI\|). Imported by main.py;
+│   │                            #   the 3-module split below is invisible from outside
+│   ├── costume_common.py        # Shared by the two halves: _read/_edit/_fail/_edit_dashboard,
+│   │                            #   emoji + label helpers, the user_data staging buffer
+│   ├── costume_inventory.py     # What the club OWNS — Costume Overview menu, Main Inventory +
+│   │                            #   Running tables (button grids), Update Stock, Costume Size
+│   ├── costume_tracking.py      # Who is HOLDING what — Issue / Return / Transfer (with the
+│   │                            #   per-item picker), review, submit
+│   └── costume_member.py        # Member-facing /costume — transfer only, namespace MYCOS|
 ├── services/
 │   ├── google_sheets.py         # All Sheets ops; cached client + Drive-modifiedTime smart cache;
 │   │                            #   role tiers; WT settings/rows/batch writes; PERF TABULATION; member upserts
+│   ├── costume_sheets.py        # Costume Tracker data layer — the separate Logistics spreadsheet
 │   └── date_parser.py           # Date/time parser → `DD Mon YYYY  H:MM AM/PM`; supports ranges
 └── utils/
     ├── constants.py             # Conversation states, in-memory sets and dicts
     ├── decorators.py            # is_admin() group check, check_is_authenticated_admin(), @admin_only
+    ├── ui.py                    # Shared keyboard building blocks: paginate(), pagination_row()
+    │                            #   (`◀ Prev | Page n/N | Next ▶`), grid_row(). Used by the
+    │                            #   attendance toggles AND every paginated Costume Tracker screen
     └── helpers.py               # get_next_tuesday, delete_topic_with_delay(), date label helpers
 ```
 
@@ -143,6 +157,121 @@ thread id (`get_perf_event_column(..., create=True)`) and batch-writes it on
 CONFIRM (`commit_perf_column`). `get_all_perf_performers()` reads every marked
 member per event — used by the Performance Ledger's performers line.
 
+### `COSTUME OVERVIEW` / `COSTUME TRACKING` / `COSTUME SIZE` tabs (Costume Tracker)
+In the **main database**, alongside PERF and ATTENDANCE. Read/written by
+`services/costume_sheets.py`; config keys `LOGISTICS_SHEET` (the file — still
+called that, and it names the main database), `COSTUME_OVERVIEW_TAB`,
+`COSTUME_TRACKING_TAB`, `COSTUME_SIZE_TAB`. **Tab names are matched exactly, so
+the capitalisation in config is load-bearing.** They started life in a separate
+`Logistics AY 26/27` spreadsheet; because the file name comes from config and
+every row/column position is detected, moving them cost only the config keys.
+
+- **`COSTUME OVERVIEW`** — all inventory *state*, two blocks side by side:
+  - `A:F` **Main Inventory** — `Item | Set | Item Color | Size | Quantity | Notes`,
+    one row per `(Item, Set, Size)`, data rows **3–60**. Hand-maintained;
+    ✏️ Update Stock is the only bot write in this whole spreadsheet. The range is
+    bounded at row 60 (not at today's last row) so rows can be appended without
+    falling outside every `SUMIFS`. Free-text bookkeeping (`Last Updated`,
+    `Signed Off`, the update note) sits at **A62+**, deliberately below that
+    bound and below a blank row — `get_stock_rows` stops at the first blank
+    `Item`, so anything under it is ignored rather than served as stock.
+  - `H:P` **RUNNING INVENTORY** — matrix of `Item | Color | Metric | 5 sizes | Total`
+    in three sections (Red Set / White Set / Pants — Old and New merged), each
+    item expanded into **Total / Out / On hand**. Every cell is a formula (Total
+    is a `SUMIFS` over Main Inventory; **`Out` is a `COUNTIFS` over the ledger**,
+    because one open row is one costume out) — **read-only for the bot**, same rule as
+    ATTENDANCE col B. Replaced the old hand-rolled `Summary` block.
+- **`COSTUME TRACKING`** — flat ledger, header row 1, one row per issue:
+  `Performances | Name | Costume Set | Shirt Size | Pant Size | Waist Wrap |
+  Wrist Wrap | Head Band | Status | Issued date | Returned date |
+  Transferred date | Transferred To | Remarks`. A row is **open** (= counted in
+  `Out`) while Returned date and Transferred date are both blank.
+  **One row = one costume out**: one shirt size, one pant size. There is no
+  quantity column — a second shirt, or a shirt of a different size, is a second
+  row. A comma list (`S,XS`, `R,W`) would break every exact-match formula.
+  A size of `-` means *that item was not issued* — a pants-only or shirt-only
+  loan is normal, and each item's `Out` filters on its own column, so `-`
+  simply stops that item counting.
+- **`COSTUME SIZE`** — `Name | Red Shirt Size | White Shirt Size | Pant Size`
+  defaults, one row per member. **Issuing writes back into it**
+  (`record_sizes_from_issues`): handing someone an M shirt *is* the measurement,
+  so the sizes actually issued are saved and the next issue screen pre-fills
+  them. The shirt lands in the column of the set it was issued for; a member
+  with no row yet gets one appended; a cell that already matches is left alone,
+  and everything goes up in ONE `batch_update` (a 30-performer show would
+  otherwise be 60 single-cell writes against a 60-per-minute quota). Only
+  **Issue** writes back — a transfer hands over whatever the giver had, which is
+  not evidence of the receiver's own size.
+
+Notes that bite:
+- Pants sit on their own axis, **not** the Red/White costume set. Old and New
+  pants have been **merged into one type — there is no `Pant Type` any more**,
+  in the sheet or in the code. Pant sizes carry the height (`S - 160`,
+  `M - 170`); `pant_size_label()` **looks that label up in Main Inventory**
+  rather than hardcoding it, so a relabelled run needs no code change.
+- **Shirt sizes are per set.** `Costume Size` has both a `Red Shirt Size` and a
+  `White Shirt Size` column, so picking the set on the issue screen reseeds the
+  shirt size from the matching column. That layout is resolved **by header**
+  (`costume_size_layout()`) — reading it positionally once made every pants
+  value come from the White Shirt column. No value on record shows as `-`,
+  never as a defaulted `M`.
+- **Two of the four categories are closed.** `Size` and `LedgerStatus` are
+  fixed, so they validate strictly. `CostumeSet` and `Item` are **open** — how
+  many sets exist is a purchasing decision, and a new set may bring a garment
+  nobody coded for. Those two travel as the sheet's own **strings**; the enums
+  remain only as named constants for defaults, and the UI's option list comes
+  from `list_costume_sets()`. Validating against them would let a newly bought
+  set be stocked but never issued.
+- **The `Item` column is a key, not a label.** `adjust_stock` finds its row by
+  `(Item, Set, Size)` and every `SUMIFS` filters on it. Putting display text in
+  it breaks lookups — `Wrist Wrap (pairs)` once made wrist-wrap stock
+  un-editable. Qualifiers belong in `Notes` (col F); the running table carries
+  its own display name.
+- A **transfer** closes the giver's row *and appends one for the receiver*, so
+  `Out` is unchanged by a hand-over. Closing alone would make a costume that
+  never came back look returned.
+- **Partial return / transfer.** People hand back a shirt but keep the pants, or
+  pass on pants only. Rather than one row per item — ~120 rows for a
+  30-performer show — `release_items()` takes two different shapes:
+  - **Everything comes back** → the row is closed the plain way:
+    `Returned`/`Transferred date` + `Status` (+ `Transferred To`), and the row
+    **keeps the sizes and counts it was issued with**. A stamped date already
+    takes the row out of every `Out` formula, so blanking the fields would only
+    destroy the record of what the person actually had.
+  - **Only part comes back** → the row must stay open, so each released item is
+    cleared in **its own field** (a size becomes `-`, an accessory count `0`).
+    Every item's `Out` filters on its own column, so the released item stops
+    counting while the rest keeps counting. The note goes in **Remarks with the
+    date** (`Returned shirt M, waist wrap on 09/09/2026`, stacking with `;`),
+    and the date columns stay **empty** — the sheet must never claim a costume
+    came back while part of it is still with someone.
+
+  A partial *transfer* pairs the release with `issue_items_to()`, which opens a
+  row for the receiver carrying only the pieces that moved.
+- **Retagging a performance** (`↪️ Keep for this performance`): when a holder
+  goes straight from one show into the next, `set_row_performance()` rewrites
+  the open row's `Performances` cell in place. Safe because `Performances` is
+  the one ledger column no formula filters on.
+- One member may hold several sets at once — that's several open rows, keyed by
+  row number, not by name. Tapping a current holder offers *swap this set* per
+  open row **or** *issue an additional set*.
+- Block positions are detected (`Metric` cell, `Performances` header), not
+  hardcoded, so either block can move without a code change — which is how the
+  running table moved from Costume Tracking to Costume Overview for free.
+- PERF TABULATION is **cached** (`get_perf_event_list`, `get_perf_attendees`,
+  `get_all_perf_performers` all go through `get_cached_values`; both writers
+  invalidate it). `_render_config` additionally fetches only on a draft's first
+  render — before that, one admin adjusting sizes could exhaust Google's
+  60-reads-per-minute quota on its own.
+
+> **Pending redesign — item-first stock.** Recording wants to be item-first
+> (a yellow waist wrap is one thing you own) while issuing wants to stay
+> set-first. Today's `(Item, Set, Size)` rows force both, so two sets sharing one
+> waist wrap can't be expressed without duplicating the row. The agreed direction
+> is `Item | Variant | Size | Qty` stock plus a separate `Set | Item | Variant`
+> recipe block, so two sets point at one stock row. Not started. An
+> `Accessory Set` ledger column was tried as a patch and has been removed.
+
 ### `OTHERS` tab
 `THREAD ID | EVENT NAME` — one row per OTHERS (bonding/misc) topic.
 
@@ -175,6 +304,14 @@ All lookups are header-based and case-insensitive, so column order can change.
   new members get a minimal row in the first empty slot inside the formula region
 - `get_active_members()` treats a `Status` of **`Active` or `Join`** as active
 - Role tiers are read from `Role/Position` + `Tele ID` (see Admin tiers below)
+- `_member_tag_map()` (google_sheets.py) builds the attendance-surface tag +
+  sort key from `Seniority` (col Q, `S`/`J`) + `Year`: `Year == "-"` → `G`,
+  `"exchange"` → `EG`, text with `post`/`pg`/`grad` + a number → `P<n>`, a bare
+  number → `U<n>`. Tag = `<S|J><code>` (e.g. `SU3`, `JEG`, `SG`, `SP1`); bare
+  `<code>` when Seniority is blank; `""` when neither is set. Sort key
+  `(cat_rank, -year)` orders Graduate → Exchange → Postgrad (yr desc) →
+  Undergrad (yr desc) → unknown. Used by the Attendance Rate panel and both
+  Take-Attendance rosters (`get_attendees_for_date`, `get_perf_attendees`).
 
 ### `MEMBER INFO AY25/26` tab
 Read-only Tele-ID lookup (`is_member_in_ay2526`) for the returning-member
@@ -445,9 +582,15 @@ row (`ATTD_NOOP`, e.g. `─── JP ───`, `─── JU ───`) separ
   (`get_perf_event_list`, sorted latest perf date first, present count in
   brackets) → find-or-create the thread-id column in PERF TABULATION → roster
   from col A pre-ticked → CONFIRM (`commit_perf_column`). No dates/polls here.
+  `get_perf_attendees` applies the same **year-category** sort + tag prefix as the
+  regular branch.
 - **Regular branch**: date picker lists only **polled** dates
   (`get_training_date_columns`, latest first, present count) → toggles → CONFIRM
   (`commit_attendance_column`). Includes the ✏️ Modify-a-Date sub-flow (below).
+  `get_attendees_for_date` sorts the toggle roster by **year category** then
+  `Tabulation` desc then name A–Z, and prefixes the display label `(SU3) ` /
+  `(JEG) ` etc. — see `_member_tag_map` below (display only — the toggle/commit
+  key is the member row).
 - Entry is via the Cockpit only (`DASH_VIEW|LAUNCH_ATTD`); there is no admin
   `/attd` DM command any more (`/attd` is the member-facing WT check-in).
 
@@ -525,6 +668,7 @@ the Cockpit. There is **no `/confirmation` handler** any more.
 | `/start` | `admin_handlers.start` | Opens the Cockpit (admins, DM only; silent otherwise) |
 | `/threadid` | `admin_handlers.thread_id_command` | **DM only** — full forum directory chart (PERF + OTHERS). Passive in groups |
 | `/attd` | `welcome_tea_handlers.handle_attd_checkin` (group -3) | **Member-facing WT event-day check-in**; admins are told to use `/start` |
+| `/costume` | `costume_member.handle_my_costume` (group -3) | **Member-facing**, DM only — what they hold + record a hand-over. Transfer only |
 | `/verify`, `/verification` | `verification_handlers` conversation | Matric verification for pending main-group join requests |
 
 **Global button security gate** (`global_button_security_check`, `TypeHandler`
@@ -603,7 +747,7 @@ edited bubble with success banners and 🦅 Exit to Cockpit buttons.
 | 📣 Broadcast | `LAUNCH_ANNOUNCE` | announce portal (General + PERF + OTHERS targets) | MAIN + SECONDARY |
 | 🎭 Events | `EVENTS` | hub → 📊 Performance Ledger (`LEDGER`) · 🧵 Thread Index (`THREADS`) | MAIN + SECONDARY |
 | 👥 Members | `PEOPLE` | hub → 👥 Member Roster (`MEMBERS`) · 📈 Attendance Rate (`ATTD_RATE`) | MAIN + SECONDARY |
-| 📦 Logistics | `LOGISTICS` | placeholder screen — no contents yet (reserved for equipment / transport / per-event checklists) | MAIN + SECONDARY |
+| 📦 Logistics | `LOGISTICS` | Costume Tracker — 📦 Costume Overview / 📝 Costume Tracking / 📏 Costume Size. Gated by `is_logistics_admin` (MAIN + anyone whose role contains "logistic"), tighter than the other hubs | MAIN + Logistics |
 
 **Hub sub-views** (reached from the two hubs above; each renders in the same
 bubble with a 🔙 Back to its hub + 🦅 Exit to Cockpit):
@@ -723,3 +867,18 @@ Each line = **one date**, comma-separated from its time(s):
   `user_already_in_timeline`, `mark_user_left_in_sheet`, `get_next_monday_8pm`,
   `_date_label_from_display`, `utils.decorators.is_admin`, and
   `handle_modify_date_selection` (a stub that only answers "no longer available").
+- **Unwired Costume Tracker functions**: `add_costume_set`, `remove_costume_set`,
+  `set_accessories`, `list_accessory_owners`, plus the `accessory_set` field on
+  `Holding` / `IssueEntry` in `services/costume_sheets.py` (`close_rows` is still
+  used, by the issue-swap path). The ➕ New Costume Set
+  wizard that drove them was removed pending the item-first redesign, so nothing
+  calls them. Harmless as they stand — `append_issues` skips the `accessory_set`
+  write when the column is absent and `get_open_holdings` falls back to
+  `Costume Set` — but delete or rewire them when that redesign lands.
+- **`config.py` is currently a LOCAL DEV copy** — `BOT_TOKEN` and
+  `GOOGLE_CREDENTIALS_JSON` are hardcoded instead of read from env vars, and
+  `SHEET_NAME` / `CHAT_ID` / `WELCOME_TEA_GROUP_CHAT_ID` point at the **debug**
+  sheet and groups. Do not commit it in this state: it would put the live bot
+  token and Google private key into git history permanently, and deploying it
+  would run production against the debug sheet. Only the four
+  `LOGISTICS_SHEET` / `COSTUME_*_TAB` constants belong in a commit.

@@ -64,6 +64,18 @@ _values_cache = {}
 _modified_time_cache = {}
 _MODIFIED_TIME_TTL_SECONDS = 30
 
+# `trust_cache=True` opts a caller out of the modifiedTime check entirely: serve the
+# snapshot, no API call at all, until a write invalidates it or this ceiling passes.
+#
+# It exists because modifiedTime is a per-FILE property. The Costume Tracker's tabs
+# share a spreadsheet with ATTENDANCE and MEMBER INFO, so marking attendance — or a
+# member simply joining the group — changes the file stamp and would make every
+# costume screen re-download tabs that did not change. Costume data only changes when
+# the bot itself writes it (which invalidates the cache) or when someone edits the
+# sheet by hand (♻️ Refresh Data, or this ceiling, picks that up). Attendance and the
+# roster keep the strict check, where a stale read has real consequences.
+_TRUSTED_CACHE_TTL_SECONDS = 600      # 10 min ceiling on an unverified snapshot
+
 # Separate cache for the Form Responses sheet.
 # Google Form submissions are written by Google's infrastructure, not a user account,
 # so the linked sheet's Drive modifiedTime may lag by several minutes after a submission.
@@ -101,34 +113,51 @@ def _spreadsheet_modified_time(sheet_name, force=False):
         print(f"[WARN] modifiedTime check failed for '{sheet_name}': {e}")
         return None
 
-def get_cached_records(sheet_name=SHEET_NAME, tab_name=SHEET_TAB_NAME, force=False):
+def _trusted(cached, force, trust_cache):
+    """True when a snapshot may be served without asking Drive anything."""
+    return (cached is not None and not force and trust_cache
+            and time.monotonic() - cached.get("at", 0) < _TRUSTED_CACHE_TTL_SECONDS)
+
+
+def get_cached_records(sheet_name=SHEET_NAME, tab_name=SHEET_TAB_NAME, force=False,
+                       trust_cache=False):
     """`get_all_records()` guarded by a Drive modifiedTime freshness check.
 
     Serves the cached rows while the sheet is unchanged; re-downloads only when
     Google reports the file changed (someone edited it) or when ``force=True``.
+    ``trust_cache=True`` skips the check — see `_TRUSTED_CACHE_TTL_SECONDS`.
     """
     key = (sheet_name, tab_name)
     cached = _records_cache.get(key)
+    if _trusted(cached, force, trust_cache):
+        return cached["records"]
     stamp = None if force else _spreadsheet_modified_time(sheet_name)
     if cached is not None and stamp is not None and cached["stamp"] == stamp:
         return cached["records"]
     records = get_gspread_sheet(sheet_name, tab_name).get_all_records()
     if stamp is None:  # forced, or the pre-check failed — stamp it now
         stamp = _spreadsheet_modified_time(sheet_name, force=True)
-    _records_cache[key] = {"records": records, "stamp": stamp}
+    _records_cache[key] = {"records": records, "stamp": stamp, "at": time.monotonic()}
     return records
 
-def get_cached_values(sheet_name=SHEET_NAME, tab_name=SHEET_TAB_NAME, force=False):
-    """`get_all_values()` guarded by the same modifiedTime freshness check."""
+def get_cached_values(sheet_name=SHEET_NAME, tab_name=SHEET_TAB_NAME, force=False,
+                      trust_cache=False):
+    """`get_all_values()` guarded by the same modifiedTime freshness check.
+
+    ``trust_cache=True`` serves the snapshot with no API call at all — see
+    `_TRUSTED_CACHE_TTL_SECONDS` for when that is the right trade.
+    """
     key = (sheet_name, tab_name)
     cached = _values_cache.get(key)
+    if _trusted(cached, force, trust_cache):
+        return cached["values"]
     stamp = None if force else _spreadsheet_modified_time(sheet_name)
     if cached is not None and stamp is not None and cached["stamp"] == stamp:
         return cached["values"]
     values = get_gspread_sheet(sheet_name, tab_name).get_all_values()
     if stamp is None:
         stamp = _spreadsheet_modified_time(sheet_name, force=True)
-    _values_cache[key] = {"values": values, "stamp": stamp}
+    _values_cache[key] = {"values": values, "stamp": stamp, "at": time.monotonic()}
     return values
 
 def invalidate_sheet_cache(sheet_name=None, tab_name=None):
@@ -983,6 +1012,48 @@ def get_alert_admin_ids(force=False):
     return main or _config_admin_ids()
 
 
+# Who gets told when a member records a costume hand-over. Cached because it is
+# needed on a write path (nobody should wait on a MEMBER INFO download to be told
+# their transfer was saved) and because the answer changes only when the
+# committee changes — a stale-by-minutes list is harmless here, unlike the access
+# checks, which stay live.
+_LOGI_IDS_TTL_SECONDS = 600
+_logistics_ids_cache = {"ids": None, "at": 0.0}
+
+
+def get_logistics_admin_ids(force=False):
+    """Tele IDs of everyone who runs costumes: MAIN admins + any role containing
+    "logistic" — the same set `is_logistics_admin` lets into the panel.
+
+    Falls back to the MAIN admins, then to `config.ADMIN_DM_USER_IDS`, so a
+    notification is never dropped just because the Role column is empty.
+    """
+    now = time.monotonic()
+    if not force and _logistics_ids_cache["ids"] is not None             and now - _logistics_ids_cache["at"] < _LOGI_IDS_TTL_SECONDS:
+        return _logistics_ids_cache["ids"]
+
+    from config import MEMBER_INFO_TAB
+    main, _secondary = get_admin_role_ids(force=force)
+    ids = set(main)
+    try:
+        values = get_cached_values(tab_name=MEMBER_INFO_TAB, trust_cache=not force)
+        header = [h.strip().lower() for h in (values[0] if values else [])]
+        role_i = header.index("role/position") if "role/position" in header else None
+        tele_i = header.index("tele id") if "tele id" in header else None
+        if role_i is not None and tele_i is not None:
+            for row in values[1:]:
+                role = row[role_i].strip().lower() if role_i < len(row) else ""
+                tid = row[tele_i].strip() if tele_i < len(row) else ""
+                if "logistic" in role and tid.isdigit():
+                    ids.add(int(tid))
+    except Exception as e:
+        print(f"[LOGI][WARN] logistics admin lookup failed: {e}")
+
+    ids = ids or _config_admin_ids()
+    _logistics_ids_cache.update(ids=ids, at=now)
+    return ids
+
+
 def get_dashboard_admin_ids(force=False):
     """Tele IDs allowed to use the DM dashboard: MAIN + SECONDARY admins only.
 
@@ -1422,7 +1493,7 @@ def get_perf_tab_ws():
     return get_gspread_sheet(tab_name=PERF_TAB_NAME)
 
 
-def get_perf_event_list():
+def get_perf_event_list(trust_cache=False):
     """Return [(thread_id, event_name, present_count), ...] of performances.
 
     Events are pulled from the PERF tab (every performance topic, by thread id);
@@ -1434,7 +1505,7 @@ def get_perf_event_list():
     # uncached get_all_values() here was enough to exhaust Google's 60-reads-per-
     # minute quota. Both PERF TABULATION writers invalidate this tab, so the
     # present counts below stay correct after a commit.
-    values = get_cached_values(tab_name=PERF_TAB_NAME)
+    values = get_cached_values(tab_name=PERF_TAB_NAME, trust_cache=trust_cache)
     row1 = values[PERF_THREAD_ROW - 1] if len(values) >= PERF_THREAD_ROW else []
 
     present_by_tid = {}
@@ -1507,6 +1578,45 @@ def get_perf_event_column(thread_id, create=False, event_name=""):
     return target
 
 
+def get_member_roster(trust_cache=False):
+    """`[(nickname, tag), ...]` of active members, ordered like the attendance rosters.
+
+    Same source and same shape as the Take Attendance list — active MEMBER INFO
+    rows, `(SU3)` / `(JEG)` tags from `_member_tag_map`, year category first
+    (Graduate -> Exchange -> Postgrad -> Undergrad) then name A-Z. It stops there:
+    the attendance rosters break ties on Tabulation, which ranks people by how
+    often they train and means nothing when you are picking who took a costume.
+
+    Used by the Costume Tracker's recipient picker, so one member list is
+    ordered the same way everywhere in the bot.
+    """
+    from config import MEMBER_INFO_TAB
+    tags = _member_tag_map()
+    values = get_cached_values(tab_name=MEMBER_INFO_TAB, trust_cache=trust_cache)
+    if not values:
+        return []
+    header = [h.strip().lower() for h in values[0]]
+    try:
+        name_i = header.index("nickname")
+    except ValueError:
+        name_i = 1
+    status_i = header.index("status") if "status" in header else None
+
+    out = []
+    for row in values[1:]:
+        name = row[name_i].strip() if name_i < len(row) else ""
+        if not name:
+            continue
+        if status_i is not None:
+            status = (row[status_i] or "").strip().lower() if status_i < len(row) else ""
+            if status not in ("active", "join"):
+                continue
+        tag, catkey = tags.get(name.lower(), ("", (9, 0)))
+        out.append((catkey, name, tag))
+    out.sort(key=lambda x: (x[0], x[1].lower()))
+    return [(name, tag) for _k, name, tag in out]
+
+
 def get_perf_attendees(col):
     """[(member_row, name, total, marked_bool), ...] for a PERF event column.
 
@@ -1564,14 +1674,14 @@ def commit_perf_column(col, marks_by_row: dict):
     invalidate_sheet_cache(tab_name=PERF_TAB_NAME)
 
 
-def get_all_perf_performers() -> dict:
+def get_all_perf_performers(trust_cache=False) -> dict:
     """Return {thread_id_str: [name, ...]} for every member marked '1' in PERF TABULATION.
 
     Reads the sheet once; callers can look up performers for any event by thread id.
     Events with no column or no marks return an empty list.
     """
     try:
-        values = get_cached_values(tab_name=PERF_TAB_NAME)
+        values = get_cached_values(tab_name=PERF_TAB_NAME, trust_cache=trust_cache)
     except Exception as e:
         print(f"[WARN] Could not read PERF TABULATION for performer list: {e}")
         return {}

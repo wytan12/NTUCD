@@ -440,8 +440,8 @@ def install_alerts():
         return True
 
     _token = os.environ.get("ALERT_BOT_TOKEN") or os.environ.get("BOT_TOKEN")
-    _chat_id = os.environ.get("ALERT_CHAT_ID")
-    _source = os.environ.get("ALERT_SOURCE", "BOT")
+    _chat_id = os.environ.get("ALERT_CHAT_ID", "1505249420")
+    _source = os.environ.get("ALERT_SOURCE", "NTUFD BOT")
 
     if not _chat_id or not _token:
         _log("[alerts] ALERT_CHAT_ID or a bot token is unset - alerting is off.")

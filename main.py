@@ -28,6 +28,7 @@ from handlers.modify_handlers import start_modify, get_modify_field_callback
 from handlers.modify_handlers import handle_modify_status_selection, handle_modify_date_selection
 from handlers.member_handlers import handle_member_status, handle_new_member
 from handlers.private_handlers import handle_confirm_new_perf, handle_dashboard_refresh, handle_dashboard_navigation
+from handlers.logistics_handlers import logistics_callback
 from handlers.welcome_tea_handlers import (
     handle_welcome_tea_confirmation,
     handle_welcome_tea_still_coming,
@@ -140,6 +141,11 @@ async def global_button_security_check(update: Update, context: ContextTypes.DEF
             "WELCOME_TEA_STILL_COMING", "WELCOME_TEA_CANT_MAKE_IT",
         ]:
             return  # Let it pass cleanly to the normal handlers!
+
+        # 🟢 VIP PASS: /costume is member-facing, so its buttons must survive this
+        # gate. The handler itself re-checks that every row belongs to the caller.
+        if (query.data or "").startswith("MYCOS|"):
+            return
             
         user_id = query.from_user.id
         from services.google_sheets import is_dashboard_admin
@@ -258,6 +264,12 @@ def main():
     # /attd: must run before handle_private_command's admin gate (group -3)
     app.add_handler(CommandHandler("attd", handle_attd_checkin), group=-3)
 
+    # Member-facing costume screen: /costume lets a member record passing their
+    # costume to someone else. Returns stay with logistics.
+    from handlers.costume_member import handle_my_costume, member_callback
+    app.add_handler(CommandHandler("costume", handle_my_costume), group=-3)
+    app.add_handler(CallbackQueryHandler(member_callback, pattern="^MYCOS\|"))
+
     # Dietary reply intercept: runs before the admin gate (group -2)
     app.add_handler(
         MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND, handle_dietary_reply),
@@ -291,6 +303,7 @@ def main():
     app.add_handler(CallbackQueryHandler(execute_manual_remind_dispatch, pattern="^MANUAL_REMIND_TID\\|"))
     app.add_handler(CallbackQueryHandler(handle_dashboard_refresh, pattern="^DASH_REFRESH$"))
     app.add_handler(CallbackQueryHandler(handle_dashboard_navigation, pattern="^DASH_VIEW\\|"))
+    app.add_handler(CallbackQueryHandler(logistics_callback, pattern="^LOGI\\|"))
     app.add_handler(CallbackQueryHandler(handle_remind_escrow_callback, pattern=r"^REMIND_ESCROW_CONFIRM\|"))
     app.add_handler(CallbackQueryHandler(execute_manual_announcement_dispatch, pattern=r"^ANNOUNCE_TARGET\|"))
     app.add_handler(CallbackQueryHandler(handle_welcome_tea_confirmation, pattern=r"^WELCOME_TEA_(CONFIRM|REJECT)$"))

@@ -928,19 +928,19 @@ async def handle_dashboard_navigation(update: Update, context: ContextTypes.DEFA
         return
 
     elif target_view == "LOGISTICS":
-        # from handlers.logistics_handlers import render_logistics_home
-        # await render_logistics_home(update, context)
-        # return
-        text = (
-            "📦 *Logistics*\n\n"
-            "🚧 Nothing here yet — this hub is reserved for logistics tracking "
-            "(equipment, transport, per-event checklists)."
-        )
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🦅 Exit to Cockpit", callback_data="DASH_VIEW|HOME")],
-        ])
-        await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
+        from handlers.logistics_handlers import render_logistics_home
+        await render_logistics_home(update, context)
         return
+        # text = (
+        #     "📦 *Logistics*\n\n"
+        #     "🚧 Nothing here yet — this hub is reserved for logistics tracking "
+        #     "(equipment, transport, per-event checklists)."
+        # )
+        # keyboard = InlineKeyboardMarkup([
+        #     [InlineKeyboardButton("🦅 Exit to Cockpit", callback_data="DASH_VIEW|HOME")],
+        # ])
+        # await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
+        # return
 
     elif target_view == "ATTD_RATE" or target_view.startswith("ATTD_RATE_"):
         from services.google_sheets import get_training_attendance_rates

@@ -1,30 +1,38 @@
-"""Costume Tracker data layer — the separate `Logistics AY 26/27` spreadsheet.
+"""Costume Tracker data layer — the three COSTUME tabs of the main database.
+
+These lived in a separate `Logistics AY 26/27` spreadsheet at first and were
+folded back into `NTUFD AY26/27 Database`; nothing here assumes either, since
+the file and tab names come from config and every position is detected.
 
 Three tabs, three jobs:
 
-* **Costume Overview** — all inventory *state*, in two blocks:
+* **COSTUME OVERVIEW** — all inventory *state*, in two blocks:
   - `A:F` **Main Inventory**, the manually-maintained stock totals, one row per
     `(Item, Set, Size)`. The only place the bot ever *writes* a stock number
     (✏️ Update Stock).
   - `H:P` the **RUNNING INVENTORY** matrix. Every cell is a `SUMIFS` pulling
-    Total from Main Inventory beside it and Out from the Costume Tracking
+    Total from Main Inventory beside it and Out from the COSTUME TRACKING
     ledger, so Total / Out / On hand can never drift from the records they
     summarise. The bot **reads this and never writes to it** — the same rule
     the ATTENDANCE `Tabulation` column follows.
-* **Costume Tracking** — inventory *events*: a flat ledger, header on row 1,
+* **COSTUME TRACKING** — inventory *events*: a flat ledger, header on row 1,
   one row per (performance, member) issue, closed by stamping a Returned or
   Transferred date. Nothing above it, so it stays sortable and filterable.
-* **Costume Size** — `Nickname | Shirt Size | Pant Size` defaults.
+* **COSTUME SIZE** — per-member default sizes, one column per set
+  (`Red Shirt Size` / `White Shirt Size`) plus `Pant Size`. Issuing writes back
+  into it: what a member was handed IS their size.
 
 A **transfer** closes the giver's row *and opens one for the receiver*, so a
-costume handed from A to B stays counted as out — see `apply_transfers`.
+costume handed from A to B stays counted as out — the giver's row is
+released and a fresh one opened for the receiver.
 
 Row/column positions are *detected*, never hardcoded: the running block is found
 by its `Metric` header cells and the ledger by its `Performances` header, so
 inserting a section or reordering ledger columns in the sheet does not break the
 bot. All reads go through the shared `get_cached_values` smart cache, keyed by
-`(sheet_name, tab_name)` — so this spreadsheet caches independently of the main
-database, and every write invalidates it.
+`(sheet_name, tab_name)`, and every write invalidates it. Since these tabs now
+sit in the main database, a costume write drops that whole file's cached tabs —
+which is what Drive's per-FILE `modifiedTime` would have done anyway.
 """
 from __future__ import annotations
 
@@ -66,18 +74,6 @@ class CostumeSet(str, Enum):
     def dot(self) -> str:
         return "🔴" if self is CostumeSet.RED else "⚪"
 
-class PantType(str, Enum):
-    """Pants are stocked on their own axis, independent of the costume set.
-
-    Open like `CostumeSet`: Old/New may be merged into a single pant type once
-    the old stock is retired, so the code reads the available types from Main
-    Inventory (`list_pant_types`) rather than assuming these two. These members
-    remain as named constants for defaults.
-    """
-    OLD = "Old"
-    NEW = "New"
-
-
 class Size(str, Enum):
     XS = "XS"
     S = "S"
@@ -107,19 +103,22 @@ class LedgerStatus(str, Enum):
     TRANSFERRED = "Transferred"
 
 
-def pant_size_label(pant_type, size: Size) -> str:
-    """The sheet's own label for a pant size — `'M'` for Old, `'M - 170'` for New.
+NONE_SIZE = "-"          # "no item of this type on this row" — matched by nothing
 
-    Looked up in Main Inventory rather than hardcoded. The height suffix is a
-    property of the stock, so if the pant types merge or a new run is labelled
-    differently, the sheet is already the source of truth and nothing here has
-    to change. Falls back to the bare size when there is no matching row.
+
+def pant_size_label(size: Size) -> str:
+    """The sheet's own label for a pant size, e.g. Size.M -> `'M - 170'`.
+
+    Looked up in Main Inventory rather than hardcoded, so a re-labelled run needs
+    no code change. This label is the **key** the running table's pants `Out`
+    filters on, so the ledger must store it verbatim — writing a bare `'M'`
+    would leave that column counting nothing. Falls back to the bare size when
+    no matching row exists.
     """
     want = (size.value if isinstance(size, Size) else str(size)).strip().upper()
     try:
-        for item, st, _color, label, _qty in get_stock_rows():
-            if (item.strip().lower() == Item.PANTS.value.lower()
-                    and st.strip().lower() == str(pant_type).strip().lower()
+        for item, _st, _color, label, _qty in get_stock_rows():
+            if (item.strip().lower().startswith(Item.PANTS.value.lower())
                     and label.strip().upper().split("-")[0].strip() == want):
                 return label.strip()
     except Exception as e:                       # noqa: BLE001 — labelling is cosmetic
@@ -262,8 +261,8 @@ def get_running_inventory(force=False) -> list[InventorySection]:
 # Ledger
 # ---------------------------------------------------------------------------
 
-LEDGER_HEADERS = ["Performances", "Name", "Costume Set", "Pant Type", "Shirt Size",
-                  "Pant Size", "Quantity", "Waist Wrap", "Wrist Wrap", "Head Band",
+LEDGER_HEADERS = ["Performances", "Name", "Costume Set", "Shirt Size",
+                  "Pant Size", "Waist Wrap", "Wrist Wrap", "Head Band",
                   "Status", "Issued date", "Returned date", "Transferred date",
                   "Transferred To", "Remarks", "Accessory Set"]
 
@@ -276,10 +275,8 @@ class Holding:
     event: str
     costume_set: str                 # raw sheet value; may be a set we don't know
     accessory_set: str               # whose wraps these are (may differ from costume_set)
-    pant_type: str                   # raw sheet value ("Old"/"New"/whatever)
     shirt_size: Size | None
     pant_size: Size | None
-    quantity: int
     waist: int
     wrist: int
     head: int
@@ -320,17 +317,14 @@ def get_open_holdings(force=False) -> list[Holding]:
     for number, row in rows:
         if col(row, "returned date") or col(row, "transferred date"):
             continue
-        pant_type = col(row, "pant type")
         holdings.append(Holding(
             row=number,
             name=col(row, "name"),
             event=col(row, "performances"),
             costume_set=col(row, "costume set"),
             accessory_set=col(row, "accessory set") or col(row, "costume set"),
-            pant_type=pant_type,
             shirt_size=parse_size(col(row, "shirt size")),
             pant_size=parse_size(col(row, "pant size")),
-            quantity=_int(row, cols.get("quantity", -1)) if "quantity" in cols else 0,
             waist=_int(row, cols.get("waist wrap", -1)) if "waist wrap" in cols else 0,
             wrist=_int(row, cols.get("wrist wrap", -1)) if "wrist wrap" in cols else 0,
             head=_int(row, cols.get("head band", -1)) if "head band" in cols else 0,
@@ -356,10 +350,8 @@ class IssueEntry:
     name: str
     event: str
     costume_set: str
-    pant_type: str
     shirt_size: Size
     pant_size: Size
-    quantity: int = 1
     waist: int = 1
     wrist: int = 1
     head: int = 0
@@ -384,10 +376,10 @@ def append_issues(entries: list[IssueEntry]) -> int:
         for key, val in (("performances", e.event), ("name", e.name),
                          ("costume set", str(e.costume_set)),
                          ("accessory set", str(e.accessory_set or e.costume_set)),
-                         ("pant type", str(e.pant_type)),
-                         ("shirt size", e.shirt_size.value),
-                         ("pant size", pant_size_label(e.pant_type, e.pant_size)),
-                         ("quantity", e.quantity), ("waist wrap", e.waist),
+                         ("shirt size", e.shirt_size.value if e.shirt_size else NONE_SIZE),
+                         ("pant size",
+                          pant_size_label(e.pant_size) if e.pant_size else NONE_SIZE),
+                         ("waist wrap", e.waist),
                          ("wrist wrap", e.wrist), ("head band", e.head),
                          ("status", LedgerStatus.ISSUED.value),
                          ("issued date", today), ("remarks", e.remarks)):
@@ -410,6 +402,28 @@ class Closure:
     status: LedgerStatus
     remarks: str = ""
     to: str = ""
+
+
+def set_row_performance(row: int, performance: str) -> bool:
+    """Retag an open ledger row with the performance it is now being kept for.
+
+    A costume kept across shows never physically moves, so nothing is closed and
+    nothing is appended — only this cell changes, and `Out` is untouched. Safe
+    because `Performances` is the one ledger column no running-table formula
+    filters on, and the `Issued date` still records when it first went out.
+
+    Without this the tag goes stale the moment a costume is kept for a second
+    show, and "still holding for the next performance" becomes indistinguishable
+    from "never gave it back".
+    """
+    _hdr, cols, _rows = get_ledger(force=True)
+    if "performances" not in cols:
+        print("[LOGI][WARN] ledger has no Performances column")
+        return False
+    ws = get_gspread_sheet(LOGISTICS_SHEET, COSTUME_TRACKING_TAB)
+    ws.update_cell(row, cols["performances"] + 1, performance)
+    invalidate_sheet_cache(LOGISTICS_SHEET)
+    return True
 
 
 def close_rows(closures: list[Closure]) -> int:
@@ -443,73 +457,153 @@ def close_rows(closures: list[Closure]) -> int:
     return len(closures)
 
 
-def apply_transfers(transfers: list[tuple[Holding, str, str]]) -> int:
-    """Hand costumes from one member to another. `[(holding, to_name, remarks)]`.
+def costume_size_layout(force=False) -> tuple[dict[str, int], int | None]:
+    """`({set_name: column_index}, pant_size_column)` read from the header row.
 
-    A transfer is two ledger movements, not one: the giver's row is closed
-    (Transferred + date + Transferred To) **and a fresh open row is created for
-    the receiver** carrying the same set, sizes and accessories.
-
-    Both halves matter. Closing the giver's row alone would drop the item out of
-    the `Out` count even though it never came back — the sheet would show stock
-    on hand that is physically in someone's bag. Opening the receiver's row keeps
-    `Out` constant across the hand-over and makes the chain traceable when the
-    costume is passed on again.
-
-    The close batch runs first: if the append then fails, the item shows as
-    returned rather than silently issued to two people at once, and re-running
-    the transfer fixes it.
+    A member's shirt size differs per costume set ("Red Shirt Size", "White Shirt
+    Size"), and more columns appear when a set is bought — so the columns are
+    matched by header, never by position. Reading them positionally is what made
+    the pant default silently pick up the White Shirt column.
     """
-    if not transfers:
-        return 0
-
-    close_rows([Closure(row=h.row, status=LedgerStatus.TRANSFERRED,
-                        remarks=remarks, to=to) for h, to, remarks in transfers])
-
-    entries = [IssueEntry(
-        name=to,
-        event=h.event,
-        costume_set=h.costume_set or CostumeSet.RED.value,
-        accessory_set=h.accessory_set or h.costume_set or CostumeSet.RED.value,
-        pant_type=h.pant_type or PantType.NEW.value,
-        shirt_size=h.shirt_size or Size.M,
-        pant_size=h.pant_size or Size.M,
-        quantity=h.quantity or 1,
-        waist=h.waist, wrist=h.wrist, head=h.head,
-        remarks=f"Transferred from {h.name}",
-    ) for h, to, _remarks in transfers]
-    append_issues(entries)
-    return len(transfers)
-
-
-# ---------------------------------------------------------------------------
-# Costume Size defaults
-# ---------------------------------------------------------------------------
-
-def get_costume_sizes(force=False) -> dict[str, dict[str, Size | None]]:
-    """`{nickname: {'shirt': Size|None, 'pants': Size|None}}` from Costume Size."""
     values = get_cached_values(LOGISTICS_SHEET, COSTUME_SIZE_TAB, force=force)
-    sizes: dict[str, dict[str, Size | None]] = {}
+    header = values[0] if values else []
+    shirt_cols: dict[str, int] = {}
+    pant_col = None
+    for idx, raw in enumerate(header):
+        name = (raw or "").strip()
+        low = name.lower()
+        if low.endswith("shirt size"):
+            set_name = name[: -len("Shirt Size")].strip()
+            if set_name:
+                shirt_cols[set_name] = idx
+        elif low.startswith("pant"):
+            pant_col = idx
+    return shirt_cols, pant_col
+
+
+def get_costume_sizes(force=False) -> dict[str, dict]:
+    """`{nickname: {'shirt': {set: Size|None}, 'pants': Size|None}}`.
+
+    Shirt sizes are keyed by costume set, so the issue screen can seed the size
+    for whichever set is actually selected.
+    """
+    values = get_cached_values(LOGISTICS_SHEET, COSTUME_SIZE_TAB, force=force)
+    shirt_cols, pant_col = costume_size_layout(force=force)
+    sizes: dict[str, dict] = {}
     for row in values[1:]:
         nick = _cell(row, 0)
         if not nick or nick.lower() == "nickname":
             continue
-        sizes[nick] = {"shirt": parse_size(_cell(row, 1)), "pants": parse_size(_cell(row, 2))}
+        sizes[nick] = {
+            "shirt": {st: parse_size(_cell(row, c)) for st, c in shirt_cols.items()},
+            "pants": parse_size(_cell(row, pant_col)) if pant_col is not None else None,
+        }
     return sizes
 
 
+def record_sizes_from_issues(entries) -> int:
+    """Learn a member's sizes from what they were actually issued.
+
+    Handing someone an M shirt IS the measurement — more reliable than whatever
+    was typed into Costume Size months ago — so an issue writes back the sizes it
+    used, and the next issue screen pre-fills them. Shirt goes to the column of
+    the set it was issued for (`Red Shirt Size` / `White Shirt Size`), matched by
+    header so a newly bought set lands in its own column.
+
+    Only cells that actually differ are written, and everything goes up in one
+    `batch_update`: a 30-performer show would otherwise cost 60 single-cell
+    writes against a 60-per-minute quota. Returns the number of cells written.
+    """
+    if not entries:
+        return 0
+    shirt_cols, pant_col = costume_size_layout(force=True)
+    values = get_cached_values(LOGISTICS_SHEET, COSTUME_SIZE_TAB, force=True)
+    rows = {_cell(r, 0).strip().lower(): i + 1 for i, r in enumerate(values) if _cell(r, 0)}
+    width = max([*shirt_cols.values()] + [pant_col if pant_col is not None else 0]) + 1
+
+    updates, appended = [], []
+
+    def current(row_no, col0):
+        row = values[row_no - 1] if row_no - 1 < len(values) else []
+        return _cell(row, col0).strip()
+
+    for e in entries:
+        nick = (e.name or "").strip()
+        if not nick:
+            continue
+        wanted = []
+        col = next((c for st, c in shirt_cols.items()
+                    if st.lower() == (e.costume_set or "").strip().lower()), None)
+        if e.shirt_size and col is not None:
+            wanted.append((col, e.shirt_size.value))
+        if e.pant_size and pant_col is not None:
+            wanted.append((pant_col, e.pant_size.value))
+        if not wanted:
+            continue
+
+        row_no = rows.get(nick.lower())
+        if row_no is None:                       # member not on the size sheet yet
+            new_row = next((r for n, r in appended if n == nick.lower()), None)
+            if new_row is None:
+                new_row = [""] * width
+                new_row[0] = nick
+                appended.append((nick.lower(), new_row))
+            for col0, val in wanted:
+                new_row[col0] = val
+            continue
+        for col0, val in wanted:
+            if current(row_no, col0) != val:     # skip what already matches
+                updates.append({'range': f"{_col_letter(col0)}{row_no}", 'values': [[val]]})
+
+    ws = get_gspread_sheet(LOGISTICS_SHEET, COSTUME_SIZE_TAB)
+    if updates:
+        ws.batch_update(updates, value_input_option="USER_ENTERED")
+    if appended:
+        ws.append_rows([r for _n, r in appended], value_input_option="USER_ENTERED")
+    if updates or appended:
+        invalidate_sheet_cache(LOGISTICS_SHEET)
+    return len(updates) + sum(1 for _ in appended)
+
+
+def shirt_size_for(entry: dict | None, costume_set: str) -> Size | None:
+    """That member's shirt size for one set, falling back to any set they have."""
+    if not entry:
+        return None
+    per_set = entry.get("shirt") or {}
+    for st, size in per_set.items():
+        if size and st.lower() == str(costume_set).strip().lower():
+            return size
+    return next((s for s in per_set.values() if s), None)
+
+
 def set_costume_size(nickname: str, garment: str, size: Size) -> bool:
-    """Write one member's default shirt/pant size, appending a row if they're new."""
+    """Write one member's default size, appending a row if they're new.
+
+    `garment` is `"pants"` or `"shirt:<set>"` (e.g. `"shirt:Red"`), resolved
+    against the header row so a newly added set's column is written correctly.
+    """
+    shirt_cols, pant_col = costume_size_layout(force=True)
+    if garment.startswith("shirt:"):
+        wanted = garment.split(":", 1)[1].strip().lower()
+        col0 = next((c for st, c in shirt_cols.items() if st.lower() == wanted), None)
+    else:
+        col0 = pant_col
+    if col0 is None:
+        print(f"[LOGI][WARN] no Costume Size column for {garment!r}")
+        return False
+
     ws = get_gspread_sheet(LOGISTICS_SHEET, COSTUME_SIZE_TAB)
     values = get_cached_values(LOGISTICS_SHEET, COSTUME_SIZE_TAB, force=True)
-    col = 2 if garment == "shirt" else 3
     for i, row in enumerate(values):
         if _cell(row, 0).lower() == nickname.lower():
-            ws.update_cell(i + 1, col, size.value)
+            ws.update_cell(i + 1, col0 + 1, size.value)
             invalidate_sheet_cache(LOGISTICS_SHEET)
             return True
-    ws.append_row([nickname, size.value if col == 2 else "", size.value if col == 3 else ""],
-                  value_input_option="USER_ENTERED")
+
+    new_row = [""] * (max(col0, 0) + 1)
+    new_row[0] = nickname
+    new_row[col0] = size.value
+    ws.append_row(new_row, value_input_option="USER_ENTERED")
     invalidate_sheet_cache(LOGISTICS_SHEET)
     return True
 
@@ -604,15 +698,6 @@ def list_accessory_owners(force=False) -> list[str]:
     in the ledger's `Accessory Set` column.
     """
     return [s for s in list_costume_sets(force=force) if set_accessories(s)]
-
-
-def list_pant_types(force=False) -> list[str]:
-    """Pant types present in Main Inventory ("Old"/"New", or one if they merge)."""
-    seen = []
-    for item, st, _c, _z, _q in get_stock_rows(force=force):
-        if item.strip().lower() == Item.PANTS.value.lower() and st and st not in seen:
-            seen.append(st)
-    return seen
 
 
 # ---------------------------------------------------------------------------
@@ -825,3 +910,134 @@ def remove_costume_set(set_name: str) -> tuple[bool, str]:
     invalidate_sheet_cache(LOGISTICS_SHEET)
     return True, (f"Removed '{name}': {dropped} inventory rows and "
                   f"{cleared} running-table rows cleared.")
+
+
+# ---------------------------------------------------------------------------
+# Partial return / transfer
+# ---------------------------------------------------------------------------
+# A row bundles a whole costume, but people hand back or pass on one piece at a
+# time. Rather than splitting into one row per item — which would mean ~120 rows
+# for a 30-performer show — an item is released by clearing ITS OWN field on the
+# row. That works because every item's Out already filters on its own field:
+# shirt on Shirt Size, pants on Pant Size, each accessory on its count column.
+# So clearing one stops that item counting while the rest keep counting.
+
+ITEM_FIELDS = (
+    ("shirt", "shirt size", "Shirt"),
+    ("pants", "pant size", "Pants"),
+    ("waist", "waist wrap", "Waist Wrap"),
+    ("wrist", "wrist wrap", "Wrist Wrap"),
+    ("head", "head band", "Head Band"),
+)
+
+
+def items_out(h) -> list[str]:
+    """Which item keys are still out on this holding."""
+    out = []
+    if h.shirt_size:
+        out.append("shirt")
+    if h.pant_size:
+        out.append("pants")
+    for key, attr in (("waist", "waist"), ("wrist", "wrist"), ("head", "head")):
+        if getattr(h, attr, 0):
+            out.append(key)
+    return out
+
+
+def describe_items(h, keys) -> str:
+    """`'shirt M, pants M - 170, waist wrap'` for the Remarks note."""
+    bits = []
+    for key in keys:
+        if key == "shirt" and h.shirt_size:
+            bits.append(f"shirt {h.shirt_size.value}")
+        elif key == "pants" and h.pant_size:
+            bits.append(f"pants {pant_size_label(h.pant_size)}")
+        elif key == "waist":
+            bits.append("waist wrap")
+        elif key == "wrist":
+            bits.append("wrist wrap")
+        elif key == "head":
+            bits.append("head band")
+    return ", ".join(bits)
+
+
+def release_items(h, keys, action: str, to: str = "") -> tuple[bool, bool]:
+    """Release some items from an open row. Returns `(ok, row_closed)`.
+
+    `action` is "returned" or "transferred". Two very different shapes:
+
+    * **Everything goes back** (nothing left out) — the row is closed the plain
+      way: `Returned`/`Transferred date` + `Status`, and **the row keeps what it
+      says it issued**. Once a date is stamped the row no longer counts towards
+      `Out`, so blanking the sizes would only destroy the record of what the
+      person actually had.
+    * **Only some of it goes back** — the row must stay open, so each released
+      item is cleared in ITS OWN field (a size becomes `-`, an accessory count
+      `0`). Every item's `Out` filters on its own column, so the released item
+      stops counting while the rest keeps counting. A dated note goes in
+      **Remarks**; the date columns stay empty, because the costume has not
+      fully come back.
+    """
+    keys = [k for k in keys if k in dict((f[0], f) for f in ITEM_FIELDS)]
+    if not keys:
+        return False, False
+
+    _hdr, cols, rows = get_ledger(force=True)
+    raw = next((r for n, r in rows if n == h.row), None)
+    if raw is None:
+        return False, False
+
+    stamp = _today()
+    closed = not [k for k in items_out(h) if k not in keys]
+    updates = []
+
+    if closed:
+        status = (LedgerStatus.RETURNED.value if action == "returned"
+                  else LedgerStatus.TRANSFERRED.value)
+        date_col = "returned date" if action == "returned" else "transferred date"
+        cells = {date_col: stamp, "status": status}
+        if to:
+            cells["transferred to"] = to
+        for header, value in cells.items():
+            if header in cols:
+                updates.append({'range': f"{_col_letter(cols[header])}{h.row}",
+                                'values': [[value]]})
+    else:
+        for key, header, _label in ITEM_FIELDS:
+            if key not in keys or header not in cols:
+                continue
+            blank = NONE_SIZE if header.endswith("size") else 0
+            updates.append({'range': f"{_col_letter(cols[header])}{h.row}",
+                            'values': [[blank]]})
+        note = f"{action.capitalize()} {describe_items(h, keys)}"
+        if to:
+            note += f" to {to}"
+        note += f" on {stamp}"
+        if "remarks" in cols:
+            prev = _cell(raw, cols["remarks"])
+            updates.append({'range': f"{_col_letter(cols['remarks'])}{h.row}",
+                            'values': [[f"{prev}; {note}" if prev else note]]})
+
+    ws = get_gspread_sheet(LOGISTICS_SHEET, COSTUME_TRACKING_TAB)
+    ws.batch_update(updates, value_input_option="USER_ENTERED")
+    invalidate_sheet_cache(LOGISTICS_SHEET)
+    return True, closed
+
+
+def issue_items_to(h, keys, to: str) -> int:
+    """Open a row for `to` carrying only `keys` from `h` — the receiving half of
+    a partial transfer. Items not passed on stay with the original holder."""
+    if not keys:
+        return 0
+    entry = IssueEntry(
+        name=to,
+        event=h.event,
+        costume_set=h.costume_set or CostumeSet.RED.value,
+        shirt_size=h.shirt_size if "shirt" in keys else None,
+        pant_size=h.pant_size if "pants" in keys else None,
+        waist=1 if "waist" in keys else 0,
+        wrist=1 if "wrist" in keys else 0,
+        head=1 if "head" in keys else 0,
+        remarks=f"Transferred from {h.name}",
+    )
+    return append_issues([entry])

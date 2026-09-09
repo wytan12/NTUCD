@@ -15,6 +15,7 @@ from utils.ui import paginate, pagination_row, grid_row
 from services.costume_sheets import (Item, Size, get_running_inventory, get_stock_rows,
                                      get_costume_sizes, set_costume_size, adjust_stock)
 from handlers.costume_common import (_read, _edit, _fail, _edit_dashboard, _PAGE,
+                                     _picked,
                                      _compact_size, _emoji_for, _set_icon,
                                      _ITEM_EMOJI, _SECTION_EMOJI, _stock_dot,
                                      _SIZE_OPTS)
@@ -94,13 +95,19 @@ async def _render_running_table(query, idx: int) -> None:
 
     # New-pants labels are "M - 170"; the height alone is unambiguous under a
     # section already titled NEW PANTS, and "M-170" would clip in a 7th of a row.
-    labels = [_compact_size(s).split("-")[-1].strip() for s in sec.sizes]
+    # Keep the size letter with the height ("S-160"): the number alone loses which
+    # size it is, and the item name now has its own full-width row so the size
+    # columns have room for five characters.
+    labels = [_compact_size(s) for s in sec.sizes]
     grid = []
     for item in sec.items:
-        # "Wrist Wrap (pairs)" -> "Wrist Wrap": the qualifier adds nothing here.
+        # "Wrist Wrap (pairs)" -> "Wrist Wrap": the qualifier adds nothing here,
+        # and the slot is better spent on the colour — two sets' wraps differ by
+        # colour, not by name, so "Waist Wrap" alone is ambiguous across sections.
         name = item.name.split("(")[0].strip()
         icon = _emoji_for(item.name, _ITEM_EMOJI, "•")
-        grid.append(_wide(f"{icon} {name}"))
+        colour = item.color.strip()
+        grid.append(_wide(f"{icon} {name} ({colour})" if colour else f"{icon} {name}"))
         if item.sized:
             # Size header repeats under each item's name rather than sitting once
             # at the top: it reads as that item's own column labels, and a
@@ -162,7 +169,12 @@ def _stock_back(rows, st: str, item: str, from_size_screen: bool = False) -> str
         return f"LOGI|SKI|{st}|{item}"
     if len(items) > 1:
         return f"LOGI|SKS|{st}"
-    return f"LOGI|SKC|{_stock_category(item)}"
+    category = _stock_category(item)
+    # Since Old/New pants merged there is only one pant "set", so the set picker
+    # is skipped on the way in — Back must skip it too or it bounces forward.
+    if len({s for _i, s, _c, _z, _q in rows if _stock_category(_i) == category}) > 1:
+        return f"LOGI|SKC|{category}"
+    return "LOGI|SKP|0"
 
 
 async def _render_stock_pick(query, _page: int = 0, banner: str = "") -> None:
@@ -174,8 +186,8 @@ async def _render_stock_pick(query, _page: int = 0, banner: str = "") -> None:
     head = f"{banner}\n\n" if banner else ""
     await _edit(query, f"{head}✏️ *Update Stock*\n\nWhat are you counting?\n\n"
                        "• *Costume Set* — shirt, waist wrap, wrist wrap, head band\n"
-                       "• *Pants* — stocked separately as Old / New\n"
-                       "• *New Costume Set* — register a set the club just bought\n\n"
+                       "• *Pants* — stocked on their own, not per costume set\n"
+                       "\n"
                        "_Writes to Main Inventory; On hand recalculates itself._", kb)
 
 
@@ -187,6 +199,10 @@ async def _render_stock_sets(query, category: str) -> None:
     if not groups:
         return await _fail(query, "that category", "no matching inventory rows",
                            back="LOGI|SKP|0")
+    # One set in the category (pants, since Old/New merged) — nothing to pick.
+    if len(groups) == 1:
+        return await _render_stock_items(query, next(iter(groups)))
+
     btns = [InlineKeyboardButton(f"{_set_icon(st)} {st}",
                                  callback_data=f"LOGI|SKS|{st}") for st in groups]
     kb = [btns[i:i + 2] for i in range(0, len(btns), 2)]
@@ -278,13 +294,14 @@ async def _render_sizes(query, page: int) -> None:
         return await _fail(query, "costume sizes", sizes)
     nicks = sorted(sizes)
     chunk, page, pages = paginate(nicks, page, _PAGE)
-    filled = sum(1 for n in nicks if sizes[n]["shirt"] or sizes[n]["pants"])
+    filled = sum(1 for n in nicks
+                 if any((sizes[n]["shirt"] or {}).values()) or sizes[n]["pants"])
     lines = [f"📏 *Default Costume Sizes*  _({filled}/{len(nicks)} filled)_", ""]
     for nick in chunk:
         sz = sizes[nick]
-        s = sz["shirt"].value if sz["shirt"] else "—"
+        shirts = " · ".join(f"{st} *{v.value}*" for st, v in (sz["shirt"] or {}).items() if v)
         p = sz["pants"].value if sz["pants"] else "—"
-        lines.append(f"• {nick} — Shirt *{s}* · Pants *{p}*")
+        lines.append(f"• {nick} — {shirts or 'no shirt size'} · Pants *{p}*")
     btns = [InlineKeyboardButton(f"✏️ {n}", callback_data=f"LOGI|SZE|{n}") for n in chunk]
     kb = [btns[i:i + 2] for i in range(0, len(btns), 2)]
     nav = pagination_row(page, pages, lambda p: f"LOGI|SIZE|{p}", _CELL)
@@ -298,16 +315,21 @@ async def _render_size_edit(query, nick: str) -> None:
     ok, sizes = await _read(get_costume_sizes)
     if not ok:
         return await _fail(query, "costume sizes", sizes)
-    sz = sizes.get(nick, {"shirt": None, "pants": None})
-    s, p = sz["shirt"], sz["pants"]
-    text = (f"📏 *{nick}*\nShirt: *{s.value if s else '—'}*    "
-            f"Pants: *{p.value if p else '—'}*\n\nTap a size to change it:")
-    shirt_row = [InlineKeyboardButton(("• " if o is s else "") + o.value,
-                                      callback_data=f"LOGI|SZ|{nick}|shirt|{o.value}")
-                 for o in _SIZE_OPTS]
-    pants_row = [InlineKeyboardButton(("• " if o is p else "") + o.value,
+    sz = sizes.get(nick) or {"shirt": {}, "pants": None}
+    per_set, p = sz.get("shirt") or {}, sz.get("pants")
+
+    # One shirt row per costume set — a member's shirt size differs between them.
+    lines = [f"📏 *{nick}*"]
+    rows = []
+    for st, cur in per_set.items():
+        lines.append(f"👕 {st} Shirt: *{cur.value if cur else '—'}*")
+        rows.append([InlineKeyboardButton(_picked(o.value, o is cur),
+                                          callback_data=f"LOGI|SZ|{nick}|shirt:{st}|{o.value}")
+                     for o in _SIZE_OPTS])
+    lines.append(f"👖 Pants: *{p.value if p else '—'}*")
+    rows.append([InlineKeyboardButton(_picked(o.value, o is p),
                                       callback_data=f"LOGI|SZ|{nick}|pants|{o.value}")
-                 for o in _SIZE_OPTS]
-    kb = InlineKeyboardMarkup([shirt_row, pants_row,
-                               [InlineKeyboardButton("🔙 Back", callback_data="LOGI|SIZE|0")]])
-    await _edit(query, text, kb)
+                 for o in _SIZE_OPTS])
+    rows.append([InlineKeyboardButton("🔙 Back", callback_data="LOGI|SIZE|0")])
+    await _edit(query, "\n".join(lines) + "\n\nTap a size to change it:",
+                InlineKeyboardMarkup(rows))

@@ -50,8 +50,10 @@ Callback map:
     SIZE|<page> · SZE|<nick> · SZ|<nick>|<garment>|<size>
     TRACK · ACT|<action> · EV|<eid> · PF|<eid>|<nick>
     PFN|<eid>|<nick> · PFS|<eid>|<nick>|<row>
-    DSET/DPTY/DSH/DPS/DACC · ADD
-    HSEL|<action>|<row> · TRT|<row>|<page> · TRS|<row>|<name>
+    DSET/DSH/DPS/DACC · ADD
+    HP|<action>|<page> · HSEL|<action>|<row>
+    RIT|<action>|<row>|<item> · RIA|<action>|<row>
+    TRT|<row>|<page> · TRS|<row>|<name>
     REV · SUB · CLR · NOP
 """
 from __future__ import annotations
@@ -61,16 +63,20 @@ from telegram.ext import ContextTypes
 
 from services.costume_sheets import Item, Size
 from handlers.costume_common import (_read, _edit, _fail, _clear_stage, _held_by_name,
-                                     _holding_label, _stage, _stage_for, _stage_key)
+                                     _holding_label, _holding_label_full,
+                                     _stage, _stage_for, _stage_key)
 from handlers.costume_inventory import (
     _render_list, _render_main_inventory, _render_running_table,
     _render_stock_pick, _render_stock_sets, _render_stock_items,
     _render_stock_sizes, _render_stock_leaf, _render_sizes, _render_size_edit)
 from handlers.costume_tracking import (
     _render_track, _render_pick_perf, _render_pick_performer, _render_holder_choice,
-    _render_config, _render_holders, _render_transfer_to, _render_review, _submit)
+    _render_config, _render_holders, _render_transfer_to, _render_review, _submit,
+    _render_item_pick, _item_keys,
+    event_name_for)
 from services.costume_sheets import (get_open_holdings, adjust_stock,
-                                     set_costume_size)
+                                     set_costume_size, set_row_performance,
+                                     describe_items, items_out)
 
 __all__ = ["render_logistics_home", "logistics_callback"]
 
@@ -85,7 +91,7 @@ async def render_logistics_home(update: Update, context: ContextTypes.DEFAULT_TY
     )
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("📦 Costume Overview", callback_data="LOGI|LIST")],
-        [InlineKeyboardButton("🎭 Costume Tracking", callback_data="LOGI|TRACK")],
+        [InlineKeyboardButton("📝 Costume Tracking", callback_data="LOGI|TRACK")],
         [InlineKeyboardButton("📏 Costume Size", callback_data="LOGI|SIZE|0")],
         [InlineKeyboardButton("🦅 Exit to Cockpit", callback_data="DASH_VIEW|HOME")],
     ])
@@ -168,23 +174,37 @@ async def logistics_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         ok, holdings = await _read(get_open_holdings)
         mine = _held_by_name(holdings if ok else []).get(nick, [])
         if mine:
-            return await _render_holder_choice(query, eid, nick, mine)
+            return await _render_holder_choice(query, eid, nick, mine,
+                                               await event_name_for(eid))
         return await _render_config(query, context, eid, nick)
+    if verb == "PFK":                    # PFK|<eid>|<row> — retag, issue nothing
+        eid, row = parts[2], int(parts[3])
+        name = await event_name_for(eid)
+        if not name:
+            return await _render_pick_performer(query, context, eid)
+        ok, _res = await _read(set_row_performance, row, name)
+        banner = (f"↪️ _Kept for *{name}* — row retagged, nothing issued._" if ok
+                  else "⚠️ _Couldn't retag that row._")
+        return await _render_pick_performer(query, context, eid, banner=banner)
     if verb == "PFN":                    # PFN|<eid>|<nick> — an additional set
         ud.pop("logi_draft", None)
         return await _render_config(query, context, parts[2], parts[3])
     if verb == "PFS":                    # PFS|<eid>|<nick>|<row> — swap that row
         ud.pop("logi_draft", None)
         return await _render_config(query, context, parts[2], parts[3], swap_row=parts[4])
-    if verb in ("DSET", "DPTY", "DSH", "DPS", "DACC"):
+    if verb in ("DSET", "DSH", "DPS", "DACC"):
         d = ud.get("logi_draft")
         if not d:
             return await _render_track(query)
         if verb == "DACC":
             d[parts[2]] = 0 if d[parts[2]] else 1
         else:
-            key = {"DSET": "set", "DPTY": "ptype", "DSH": "shirt", "DPS": "pants"}[verb]
+            key = {"DSET": "set", "DSH": "shirt", "DPS": "pants"}[verb]
             d[key] = parts[2]
+            if verb == "DSET":
+                # Shirt size differs per set, so follow the member's record for
+                # the set just picked; keep the current size if they have none.
+                d["shirt"] = (d.get("shirt_by_set") or {}).get(parts[2], d["shirt"])
         return await _render_config(query, context, d["eid"], d["nick"],
                                     swap_row=d.get("swap_row"))
     if verb == "ADD":
@@ -192,11 +212,15 @@ async def logistics_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if not d:
             return await _render_track(query)
         _stage_for(ud, "issue", d["eid"])["items"][_stage_key(d["nick"], d["swap_row"])] = {
-            k: d.get(k) for k in ("nick", "event", "set", "ptype", "shirt", "pants",
+            k: d.get(k) for k in ("nick", "event", "set", "shirt", "pants",
                                   "waist", "wrist", "head", "swap_row")}
         ud.pop("logi_draft", None)
         return await _render_pick_performer(query, context, d["eid"])
-    if verb == "HSEL":                   # HSEL|<action>|<ledger row>
+    if verb == "HP":                     # HP|<action>|<page> — holders list paging
+        return await _render_holders(query, context, parts[2], int(parts[3]))
+    if verb in ("HSEL", "RIT", "RIA"):
+        # HSEL|<action>|<row> opens the item picker; RIT toggles one piece;
+        # RIA accepts the selection. All three need the live row.
         action, row = parts[2], parts[3]
         ok, holdings = await _read(get_open_holdings)
         if not ok:
@@ -204,30 +228,49 @@ async def logistics_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         h = next((x for x in holdings if str(x.row) == row), None)
         if h is None:
             return await _render_holders(query, context, action)
-        if action == "return":
-            st = _stage_for(ud, "return", "*")
-            if row in st["items"]:
+        st = _stage_for(ud, action, "*")
+        if verb == "HSEL":
+            if row in st["items"]:        # tapping a staged person un-stages them
                 del st["items"][row]
-            else:
-                st["items"][row] = {"name": h.name, "label": _holding_label(h)}
+                ud.get("logi_items", {}).pop(row, None)
+                return await _render_holders(query, context, action)
+            return await _render_item_pick(query, context, action, row, h)
+        if verb == "RIT":
+            key = parts[4]
+            chosen = _item_keys(ud, row, h)
+            chosen.remove(key) if key in chosen else chosen.append(key)
+            return await _render_item_pick(query, context, action, row, h)
+        keys = _item_keys(ud, row, h)     # RIA
+        if not keys:
+            return await _render_item_pick(query, context, action, row, h)
+        if action == "return":
+            st["items"][row] = {"name": h.name, "label": _holding_label_full(h),
+                                "desc": describe_items(h, keys), "keys": list(keys),
+                                "full": len(keys) == len(items_out(h))}
             return await _render_holders(query, context, "return")
-        return await _render_transfer_to(query, row, h.name, _holding_label(h), h.event, 0)
+        # Show what is actually changing hands, not the whole set.
+        return await _render_transfer_to(query, row, h.name, describe_items(h, keys),
+                                         h.event, 0)
     if verb == "TRT":                    # TRT|<row>|<page> — recipient picker paging
         row = parts[2]
         ok, holdings = await _read(get_open_holdings)
         h = next((x for x in (holdings if ok else []) if str(x.row) == row), None)
         if h is None:
             return await _render_holders(query, context, "transfer")
-        return await _render_transfer_to(query, row, h.name, _holding_label(h), h.event,
-                                         int(parts[3]))
+        return await _render_transfer_to(query, row, h.name,
+                                         describe_items(h, _item_keys(ud, row, h)),
+                                         h.event, int(parts[3]))
     if verb == "TRS":                    # TRS|<row>|<recipient>
         row, to = parts[2], parts[3]
         ok, holdings = await _read(get_open_holdings)
         h = next((x for x in (holdings if ok else []) if str(x.row) == row), None)
         if h is None:
             return await _render_holders(query, context, "transfer")
+        keys = _item_keys(ud, row, h)
         _stage_for(ud, "transfer", "*")["items"][row] = {
-            "name": h.name, "label": _holding_label(h), "to": to}
+            "name": h.name, "label": _holding_label_full(h), "to": to,
+            "desc": describe_items(h, keys), "keys": list(keys),
+            "full": len(keys) == len(items_out(h))}
         return await _render_holders(query, context, "transfer")
     if verb == "REV":
         return await _render_review(query, context)

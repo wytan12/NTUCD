@@ -6,17 +6,17 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 GOOGLE_CREDENTIALS_JSON = os.environ.get("GOOGLE_CREDENTIALS_JSON")
 
 # Google Sheets Configuration
-# SHEET_NAME = "NTUFD AY26/27 Database" # Main GSheet
-SHEET_NAME = "NTUFD AY26/27 Timeline (Tele Bot Debug)" # Debug GSheet
+SHEET_NAME = "NTUFD AY26/27 Database" # Main GSheet
+# SHEET_NAME = "NTUFD AY26/27 Timeline (Tele Bot Debug)" # Debug GSheet
 SHEET_TAB_NAME = "PERF"
 ATTENDANCE_TAB = "ATTENDANCE"
 MEMBER_INFO_TAB = "MEMBER INFO AY26/27"  # holds Nickname (col B) + Tele ID (col P)
 
 # Chat Configuration
-# CHAT_ID =  -1004406293828 # Main group Chat ID (AY26/27)
-CHAT_ID = -1002614985856  # Debug group Chat ID
-# WELCOME_TEA_GROUP_CHAT_ID = -1004392666592 # Main group Chat ID (AY26/27)
-WELCOME_TEA_GROUP_CHAT_ID = -1004372970207 # Debug group Chat ID
+CHAT_ID =  -1004406293828 # Main group Chat ID (AY26/27)
+# CHAT_ID = -1002614985856  # Debug group Chat ID
+WELCOME_TEA_GROUP_CHAT_ID = -1004392666592 # Main group Chat ID (AY26/27)
+# WELCOME_TEA_GROUP_CHAT_ID = -1004372970207 # Debug group Chat ID
 
 # Thread Configuration
 GENERAL_TOPIC_ID = None
@@ -50,14 +50,19 @@ PERF_THREAD_ROW = 1        # row 1: thread id per event column
 PERF_EVENT_ROW = 2         # row 2: event name per event column
 PERF_FIRST_MEMBER_ROW = 3
 
-# Logistics / Costume Tracker — a SEPARATE spreadsheet from SHEET_NAME.
-# 'Costume Overview' holds the manually-maintained stock totals; 'Costume Tracking'
-# holds the RUNNING INVENTORY block (all formulas, read-only for the bot) above the
-# issue/return/transfer ledger.
-LOGISTICS_SHEET = "Logistics AY 26/27"
-COSTUME_OVERVIEW_TAB = "Costume Overview"
-COSTUME_TRACKING_TAB = "Costume Tracking"
-COSTUME_SIZE_TAB = "Costume Size"
+# Costume Tracker. These three tabs live in the MAIN database now — the separate
+# "Logistics AY 26/27" spreadsheet was folded back in — so LOGISTICS_SHEET names
+# that file rather than pointing at SHEET_NAME: locally SHEET_NAME is the debug
+# sheet, which has no costume tabs.
+#   COSTUME OVERVIEW  A:F  Main Inventory (hand-maintained stock)
+#                     H:P  RUNNING INVENTORY (all formulas, read-only for the bot)
+#   COSTUME TRACKING  the issue / return / transfer ledger, header row 1
+#   COSTUME SIZE      per-member default sizes, written back on every issue
+# Tab names are matched exactly, so the capitalisation here is load-bearing.
+LOGISTICS_SHEET = "NTUFD AY26/27 Database"
+COSTUME_OVERVIEW_TAB = "COSTUME OVERVIEW"
+COSTUME_TRACKING_TAB = "COSTUME TRACKING"
+COSTUME_SIZE_TAB = "COSTUME SIZE"
 
 WELCOME_TEA_SHEET = "NTUFD Welcome Tea Registration 2026 (Responses)"
 WELCOME_TEA_TAB = "Form Responses 1"

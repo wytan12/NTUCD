@@ -20,7 +20,7 @@ University. It manages:
 |---|---|
 | Bot framework | `python-telegram-bot` v21.5 (async, polling) |
 | Persistence | `PicklePersistence` → `bot_data.pkl` (WT job tracking, dietary-capture state, pending verification / member-write queues, group chat data). **A cache in front of Sheets, not a database** — Heroku's filesystem is ephemeral, so the file is discarded on every deploy, crash and daily dyno cycle. It survives a crash *within* a dyno's life, nothing more. Anything durable must live in the sheet: this is why the WT jobs re-check per-user `SENT` columns rather than trusting `wt_jobs_sent`, and why `/verification` writes MEMBER INFO inline instead of trusting the queue |
-| Database | Google Sheets via `gspread` + `oauth2client`. **Two spreadsheets**: `SHEET_NAME` (main) and `LOGISTICS_SHEET` (Costume Tracker), cached independently since the smart cache is keyed by `(sheet_name, tab_name)` |
+| Database | Google Sheets via `gspread` + `oauth2client`. The Costume Tracker's three `COSTUME *` tabs live in the **same** main database (`LOGISTICS_SHEET` names that file, not a separate one), so a costume write invalidates the whole file's cached tabs — which Drive's per-FILE `modifiedTime` would do anyway |
 | Timezone | Asia/Singapore (`pytz`) |
 | Scheduler | `JobQueue` (APScheduler): daily 7-day performance reminder scan (09:00 SGT), daily auto-poll (09:00 SGT), and a **7-second MEMBER INFO write drain** (`drain_member_writes_job`). The Welcome Tea 30-second heartbeat exists but is **currently disabled** (see below). Per-admin DM menus registered as a detached `asyncio.create_task` on startup |
 | Deployment | Heroku worker dyno (`Procfile`: `worker: python main.py`) |
@@ -69,7 +69,9 @@ telegram-bot/
 │   │                            #   emoji + label helpers, the user_data staging buffer
 │   ├── costume_inventory.py     # What the club OWNS — Costume Overview menu, Main Inventory +
 │   │                            #   Running tables (button grids), Update Stock, Costume Size
-│   └── costume_tracking.py      # Who is HOLDING what — Issue / Return / Transfer, review, submit
+│   ├── costume_tracking.py      # Who is HOLDING what — Issue / Return / Transfer (with the
+│   │                            #   per-item picker), review, submit
+│   └── costume_member.py        # Member-facing /costume — transfer only, namespace MYCOS|
 ├── services/
 │   ├── google_sheets.py         # All Sheets ops; cached client + Drive-modifiedTime smart cache;
 │   │                            #   role tiers; WT settings/rows/batch writes; PERF TABULATION; member upserts
@@ -155,11 +157,16 @@ thread id (`get_perf_event_column(..., create=True)`) and batch-writes it on
 CONFIRM (`commit_perf_column`). `get_all_perf_performers()` reads every marked
 member per event — used by the Performance Ledger's performers line.
 
-### `Logistics AY 26/27` sheet (Costume Tracker) — separate spreadsheet
-Read/written by `services/costume_sheets.py`; config keys `LOGISTICS_SHEET`,
-`COSTUME_OVERVIEW_TAB`, `COSTUME_TRACKING_TAB`, `COSTUME_SIZE_TAB`.
+### `COSTUME OVERVIEW` / `COSTUME TRACKING` / `COSTUME SIZE` tabs (Costume Tracker)
+In the **main database**, alongside PERF and ATTENDANCE. Read/written by
+`services/costume_sheets.py`; config keys `LOGISTICS_SHEET` (the file — still
+called that, and it names the main database), `COSTUME_OVERVIEW_TAB`,
+`COSTUME_TRACKING_TAB`, `COSTUME_SIZE_TAB`. **Tab names are matched exactly, so
+the capitalisation in config is load-bearing.** They started life in a separate
+`Logistics AY 26/27` spreadsheet; because the file name comes from config and
+every row/column position is detected, moving them cost only the config keys.
 
-- **`Costume Overview`** — all inventory *state*, two blocks side by side:
+- **`COSTUME OVERVIEW`** — all inventory *state*, two blocks side by side:
   - `A:F` **Main Inventory** — `Item | Set | Item Color | Size | Quantity | Notes`,
     one row per `(Item, Set, Size)`, data rows **3–60**. Hand-maintained;
     ✏️ Update Stock is the only bot write in this whole spreadsheet. The range is
@@ -169,37 +176,82 @@ Read/written by `services/costume_sheets.py`; config keys `LOGISTICS_SHEET`,
     bound and below a blank row — `get_stock_rows` stops at the first blank
     `Item`, so anything under it is ignored rather than served as stock.
   - `H:P` **RUNNING INVENTORY** — matrix of `Item | Color | Metric | 5 sizes | Total`
-    in four sections (Red Set / White Set / Old Pants / New Pants), each item
-    expanded into **Total / Out / On hand**. Every cell is a `SUMIFS` (Total from
-    Main Inventory, Out from the ledger) — **read-only for the bot**, same rule as
+    in three sections (Red Set / White Set / Pants — Old and New merged), each
+    item expanded into **Total / Out / On hand**. Every cell is a formula (Total
+    is a `SUMIFS` over Main Inventory; **`Out` is a `COUNTIFS` over the ledger**,
+    because one open row is one costume out) — **read-only for the bot**, same rule as
     ATTENDANCE col B. Replaced the old hand-rolled `Summary` block.
-- **`Costume Tracking`** — flat ledger, header row 1, one row per issue:
-  `Performances | Name | Costume Set | Pant Type | Shirt Size | Pant Size | Quantity |
-  Waist Wrap | Wrist Wrap | Head Band | Status | Issued date | Returned date |
+- **`COSTUME TRACKING`** — flat ledger, header row 1, one row per issue:
+  `Performances | Name | Costume Set | Shirt Size | Pant Size | Waist Wrap |
+  Wrist Wrap | Head Band | Status | Issued date | Returned date |
   Transferred date | Transferred To | Remarks`. A row is **open** (= counted in
   `Out`) while Returned date and Transferred date are both blank.
-- **`Costume Size`** — `Nickname | Shirt Size | Pant Size` defaults.
+  **One row = one costume out**: one shirt size, one pant size. There is no
+  quantity column — a second shirt, or a shirt of a different size, is a second
+  row. A comma list (`S,XS`, `R,W`) would break every exact-match formula.
+  A size of `-` means *that item was not issued* — a pants-only or shirt-only
+  loan is normal, and each item's `Out` filters on its own column, so `-`
+  simply stops that item counting.
+- **`COSTUME SIZE`** — `Name | Red Shirt Size | White Shirt Size | Pant Size`
+  defaults, one row per member. **Issuing writes back into it**
+  (`record_sizes_from_issues`): handing someone an M shirt *is* the measurement,
+  so the sizes actually issued are saved and the next issue screen pre-fills
+  them. The shirt lands in the column of the set it was issued for; a member
+  with no row yet gets one appended; a cell that already matches is left alone,
+  and everything goes up in ONE `batch_update` (a 30-performer show would
+  otherwise be 60 single-cell writes against a 60-per-minute quota). Only
+  **Issue** writes back — a transfer hands over whatever the giver had, which is
+  not evidence of the receiver's own size.
 
 Notes that bite:
-- Pants sit on their own axis (`Pant Type` Old/New), **not** the Red/White costume
-  set; New pant sizes carry the height (`M - 170`). `pant_size_label()` **looks
-  that label up in Main Inventory** rather than hardcoding it, so a relabelled
-  run — or Old/New merging into one type — needs no code change.
-- **Only three of the five categories are closed.** `Size` and `LedgerStatus` are
-  fixed, so they validate strictly. `CostumeSet`, `PantType` and `Item` are
-  **open** — how many sets exist is a purchasing decision, Old/New may merge, and
-  a new set may bring a garment nobody coded for. Those three travel as the
-  sheet's own **strings**; the enums remain only as named constants for defaults,
-  and the UI's option lists come from `list_costume_sets()` / `list_pant_types()`.
-  Validating against them would let a newly bought set be stocked but never issued.
+- Pants sit on their own axis, **not** the Red/White costume set. Old and New
+  pants have been **merged into one type — there is no `Pant Type` any more**,
+  in the sheet or in the code. Pant sizes carry the height (`S - 160`,
+  `M - 170`); `pant_size_label()` **looks that label up in Main Inventory**
+  rather than hardcoding it, so a relabelled run needs no code change.
+- **Shirt sizes are per set.** `Costume Size` has both a `Red Shirt Size` and a
+  `White Shirt Size` column, so picking the set on the issue screen reseeds the
+  shirt size from the matching column. That layout is resolved **by header**
+  (`costume_size_layout()`) — reading it positionally once made every pants
+  value come from the White Shirt column. No value on record shows as `-`,
+  never as a defaulted `M`.
+- **Two of the four categories are closed.** `Size` and `LedgerStatus` are
+  fixed, so they validate strictly. `CostumeSet` and `Item` are **open** — how
+  many sets exist is a purchasing decision, and a new set may bring a garment
+  nobody coded for. Those two travel as the sheet's own **strings**; the enums
+  remain only as named constants for defaults, and the UI's option list comes
+  from `list_costume_sets()`. Validating against them would let a newly bought
+  set be stocked but never issued.
 - **The `Item` column is a key, not a label.** `adjust_stock` finds its row by
   `(Item, Set, Size)` and every `SUMIFS` filters on it. Putting display text in
   it breaks lookups — `Wrist Wrap (pairs)` once made wrist-wrap stock
   un-editable. Qualifiers belong in `Notes` (col F); the running table carries
   its own display name.
-- A **transfer** closes the giver's row *and appends one for the receiver*
-  (`apply_transfers`), so `Out` is unchanged by a hand-over. Closing alone would
-  make a costume that never came back look returned.
+- A **transfer** closes the giver's row *and appends one for the receiver*, so
+  `Out` is unchanged by a hand-over. Closing alone would make a costume that
+  never came back look returned.
+- **Partial return / transfer.** People hand back a shirt but keep the pants, or
+  pass on pants only. Rather than one row per item — ~120 rows for a
+  30-performer show — `release_items()` takes two different shapes:
+  - **Everything comes back** → the row is closed the plain way:
+    `Returned`/`Transferred date` + `Status` (+ `Transferred To`), and the row
+    **keeps the sizes and counts it was issued with**. A stamped date already
+    takes the row out of every `Out` formula, so blanking the fields would only
+    destroy the record of what the person actually had.
+  - **Only part comes back** → the row must stay open, so each released item is
+    cleared in **its own field** (a size becomes `-`, an accessory count `0`).
+    Every item's `Out` filters on its own column, so the released item stops
+    counting while the rest keeps counting. The note goes in **Remarks with the
+    date** (`Returned shirt M, waist wrap on 09/09/2026`, stacking with `;`),
+    and the date columns stay **empty** — the sheet must never claim a costume
+    came back while part of it is still with someone.
+
+  A partial *transfer* pairs the release with `issue_items_to()`, which opens a
+  row for the receiver carrying only the pieces that moved.
+- **Retagging a performance** (`↪️ Keep for this performance`): when a holder
+  goes straight from one show into the next, `set_row_performance()` rewrites
+  the open row's `Performances` cell in place. Safe because `Performances` is
+  the one ledger column no formula filters on.
 - One member may hold several sets at once — that's several open rows, keyed by
   row number, not by name. Tapping a current holder offers *swap this set* per
   open row **or** *issue an additional set*.
@@ -611,6 +663,7 @@ the Cockpit. There is **no `/confirmation` handler** any more.
 | `/start` | `admin_handlers.start` | Opens the Cockpit (admins, DM only; silent otherwise) |
 | `/threadid` | `admin_handlers.thread_id_command` | **DM only** — full forum directory chart (PERF + OTHERS). Passive in groups |
 | `/attd` | `welcome_tea_handlers.handle_attd_checkin` (group -3) | **Member-facing WT event-day check-in**; admins are told to use `/start` |
+| `/costume` | `costume_member.handle_my_costume` (group -3) | **Member-facing**, DM only — what they hold + record a hand-over. Transfer only |
 | `/verify`, `/verification` | `verification_handlers` conversation | Matric verification for pending main-group join requests |
 
 **Global button security gate** (`global_button_security_check`, `TypeHandler`
@@ -689,7 +742,7 @@ edited bubble with success banners and 🦅 Exit to Cockpit buttons.
 | 📣 Broadcast | `LAUNCH_ANNOUNCE` | announce portal (General + PERF + OTHERS targets) | MAIN + SECONDARY |
 | 🎭 Events | `EVENTS` | hub → 📊 Performance Ledger (`LEDGER`) · 🧵 Thread Index (`THREADS`) | MAIN + SECONDARY |
 | 👥 Members | `PEOPLE` | hub → 👥 Member Roster (`MEMBERS`) · 📈 Attendance Rate (`ATTD_RATE`) | MAIN + SECONDARY |
-| 📦 Logistics | `LOGISTICS` | Costume Tracker — 📦 Overview / 🎭 Costume Tracking / 📏 Costume Size. Gated by `is_logistics_admin` (MAIN + anyone whose role contains "logistic"), tighter than the other hubs | MAIN + Logistics |
+| 📦 Logistics | `LOGISTICS` | Costume Tracker — 📦 Costume Overview / 📝 Costume Tracking / 📏 Costume Size. Gated by `is_logistics_admin` (MAIN + anyone whose role contains "logistic"), tighter than the other hubs | MAIN + Logistics |
 
 **Hub sub-views** (reached from the two hubs above; each renders in the same
 bubble with a 🔙 Back to its hub + 🦅 Exit to Cockpit):
@@ -706,16 +759,30 @@ All render in the one dashboard bubble; callback namespace `LOGI|<verb>|…`.
 
 | Screen | Callback | Notes |
 |---|---|---|
-| Costume Tracker home | `HOME` | 📦 Costume Overview · 🎭 Costume Tracking · 📏 Costume Size |
+| Costume Tracker home | `HOME` | 📦 Costume Overview · 📝 Costume Tracking · 📏 Costume Size |
 | 📦 Costume Overview | `LIST` | a **menu**, no sheet reads — two table buttons + ✏️ Update Stock |
 | 📋 Main Inventory | `INV\|<page>` | `Item / Set / Size / Qty`, 10 rows a page |
 | 📊 Running Table | `RUN\|<section>` | one section a screen; item name on its own full-width row, then `tot` / `out` / `left` across the size columns |
 | ✏️ Update Stock | `SKP → SKC → SKS → SKI → SKZ → SKADJ` | drill-down Costume Set **or** Pants → set → item → size → `−10 −5 −1 / +1 +5 +10`. Single-option steps are skipped, and `_stock_back()` skips them on the way back too so Back never bounces forward |
 | 📏 Costume Size | `SIZE\|<page>` · `SZE` · `SZ` | 71 members, 16 a page |
-| 🎭 Costume Tracking | `TRACK` · `ACT\|<action>` | Issue / Return / Transfer |
-| Issue | `EV → PF → PFN\|PFS → DSET/DPTY/DSH/DPS/DACC → ADD` | `PF` routes to the swap-or-additional choice when the performer already holds something |
-| Return / Transfer | `HSEL` · `TRT\|<row>\|<page>` · `TRS` | Transfer picks a **recipient**; both act on open ledger rows |
-| Review / commit | `REV` · `SUB` · `CLR` | nothing is written until `SUB` |
+| 📝 Costume Tracking | `TRACK` · `ACT\|<action>` | Issue / Return / Transfer |
+| Issue | `EV → PF → PFN\|PFS → DSET/DPTY/DSH/DPS/DACC → ADD` | `PF` routes to the swap-or-additional choice when the performer already holds something. On submit the sizes used are written back to Costume Size |
+| Return / Transfer | `HP\|<action>\|<page>` · `HSEL` → `RIT`/`RIA` → (`TRT\|<row>\|<page>` · `TRS`) | The holder list is **buttons only, 16 a page** — 40 holders as 40 text lines plus 40 buttons is unreadable and eventually too long to send; only STAGED people are spelled out, and a duplicated name gets a full-width button with its costume. Tapping a holder opens the **item picker** — every piece still out is ticked by default; untick to return or pass on only part of a set. Transfer then picks a **recipient**. Tapping an already-staged holder un-stages them |
+| ↪️ Keep for this performance | `KEEP` | retags an open row to the current performance instead of closing and re-issuing it |
+| Review / commit | `REV` · `SUB` · `CLR` | nothing is written until `SUB`; a partial action leaves the row open and writes a dated note to Remarks |
+
+**Member-facing `/costume`** (`handlers/costume_member.py`, namespace `MYCOS|`)
+is the one costume screen ordinary members can open — a DM listing what they
+currently hold, with the same item picker before choosing who they passed it to.
+**Transfer only**: a transfer is net-zero for stock and self-correcting, while a
+*return* decreases `Out` and would claim stock that isn't physically back, so
+returns stay with logistics (who are standing there anyway). Every callback
+re-checks that the ledger row belongs to the caller — callback data is
+client-supplied, so a crafted `MYCOS|T|<row>` would otherwise let one member
+transfer another's costume. A member holding nothing gets a plain "you have no
+costume on loan" reply. `MYCOS|` is whitelisted in
+`global_button_security_check`; without that entry every button answers
+"Access Denied".
 
 **Both tables are drawn as button grids** — Telegram has no table markup and
 splits a row's width evenly between its buttons, so a keyboard is the only way
@@ -832,7 +899,8 @@ Each line = **one date**, comma-separated from its time(s):
   `handle_modify_date_selection` (a stub that only answers "no longer available").
 - **Unwired Costume Tracker functions**: `add_costume_set`, `remove_costume_set`,
   `set_accessories`, `list_accessory_owners`, plus the `accessory_set` field on
-  `Holding` / `IssueEntry` in `services/costume_sheets.py`. The ➕ New Costume Set
+  `Holding` / `IssueEntry` in `services/costume_sheets.py` (`close_rows` is still
+  used, by the issue-swap path). The ➕ New Costume Set
   wizard that drove them was removed pending the item-first redesign, so nothing
   calls them. Harmless as they stand — `append_issues` skips the `accessory_set`
   write when the column is absent and `get_open_holdings` falls back to

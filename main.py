@@ -141,6 +141,11 @@ async def global_button_security_check(update: Update, context: ContextTypes.DEF
             "WELCOME_TEA_STILL_COMING", "WELCOME_TEA_CANT_MAKE_IT",
         ]:
             return  # Let it pass cleanly to the normal handlers!
+
+        # 🟢 VIP PASS: /costume is member-facing, so its buttons must survive this
+        # gate. The handler itself re-checks that every row belongs to the caller.
+        if (query.data or "").startswith("MYCOS|"):
+            return
             
         user_id = query.from_user.id
         from services.google_sheets import is_dashboard_admin
@@ -258,6 +263,12 @@ def main():
 
     # /attd: must run before handle_private_command's admin gate (group -3)
     app.add_handler(CommandHandler("attd", handle_attd_checkin), group=-3)
+
+    # Member-facing costume screen: /costume lets a member record passing their
+    # costume to someone else. Returns stay with logistics.
+    from handlers.costume_member import handle_my_costume, member_callback
+    app.add_handler(CommandHandler("costume", handle_my_costume), group=-3)
+    app.add_handler(CallbackQueryHandler(member_callback, pattern="^MYCOS\|"))
 
     # Dietary reply intercept: runs before the admin gate (group -2)
     app.add_handler(

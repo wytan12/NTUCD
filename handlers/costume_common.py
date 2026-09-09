@@ -14,7 +14,7 @@ import asyncio
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-from services.costume_sheets import PantType, Size, pant_size_label
+from services.costume_sheets import Size, pant_size_label
 
 _PAGE = 16
 _SIZE_OPTS = list(Size)          # shared by the size editor and the issue config
@@ -66,7 +66,8 @@ def _compact_size(label: str) -> str:
     return "-".join(part.strip() for part in label.split("-")) if "-" in label else label
 
 
-_SECTION_EMOJI = (("red", "🔴"), ("white", "⚪"), ("old", "👖"), ("new", "✨"))
+_SECTION_EMOJI = (("red", "🔴"), ("white", "⚪"), ("pants", "👖"),
+                  ("old", "👖"), ("new", "✨"))
 
 
 _ITEM_EMOJI = (("shirt", "👕"), ("pants", "👖"), ("waist", "🧣"),
@@ -87,6 +88,16 @@ def _stock_dot(on_hand: int, total: int) -> str:
     return "🟢"
 
 
+def _picked(label: str, selected: bool) -> str:
+    """Mark a chosen option unmistakably.
+
+    A leading "•" or trailing "✓" was too easy to miss in a row of identical
+    buttons, so a selected option gets the same ✅ the accessory toggles use and
+    an unselected one is padded to keep the row from jumping as it changes.
+    """
+    return f"✅ {label}" if selected else f"◻️ {label}"
+
+
 def _set_icon(name: str) -> str:
     """Icon for a costume set. Sets come from the sheet, so an unknown one must
     still render — never borrow another category's icon."""
@@ -102,11 +113,28 @@ def _held_by_name(holdings) -> dict[str, list]:
 
 
 def _holding_label(h) -> str:
+    """Compact form — `Red · SM · PM - 170`.
+
+    For admin lists and buttons, where several holdings appear at once and the
+    shorthand is read by people who use this screen daily.
+    """
     bits = [h.costume_set or "?"]
     if h.shirt_size:
         bits.append(f"S{h.shirt_size.value}")
     if h.pant_size:
-        bits.append(f"P{pant_size_label(h.pant_type or PantType.OLD.value, h.pant_size)}")
+        bits.append(f"P{pant_size_label(h.pant_size)}")
+    return " · ".join(bits)
+
+
+def _holding_label_full(h) -> str:
+    """Spelled out — `Red costume set · Shirt M · Pants M - 170`.
+
+    For the member-facing screen, where someone sees this once or twice a term
+    and `SM`/`PM` reads like nothing at all.
+    """
+    bits = [f"{h.costume_set} costume set" if h.costume_set else "Costume set"]
+    bits.append(f"Shirt {h.shirt_size.value}" if h.shirt_size else "no shirt")
+    bits.append(f"Pants {pant_size_label(h.pant_size)}" if h.pant_size else "no pants")
     return " · ".join(bits)
 
 
@@ -124,6 +152,7 @@ def _stage_for(ud: dict, action: str, scope: str) -> dict:
 def _clear_stage(ud: dict) -> None:
     ud["logi_stage"] = {"key": None, "items": {}}
     ud.pop("logi_draft", None)
+    ud.pop("logi_items", None)      # per-row item ticks belong to the staged list
 
 
 def _stage_key(nick: str, swap_row) -> str:

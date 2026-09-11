@@ -221,6 +221,38 @@ def short_colour(colour: str, among) -> str:
     return colour
 
 
+def colour_initials(colour: str) -> str:
+    """`Yellow` -> `Y`, `Red & White mix` -> `RW`.
+
+    One letter per colour word, dropping the joining words — a multi-colour name
+    is exactly where a single first letter would lose the distinction, and `RW`
+    still reads as red-and-white at a glance.
+    """
+    import re
+    skip = {"and", "mix", "mixed", "with", "of"}
+    words = [w for w in re.split(r"[^A-Za-z]+", colour or "")
+             if w and w.lower() not in skip]
+    return "".join(w[0].upper() for w in words)
+
+
+def _holding_brief(h) -> str:
+    """`Red M · Black L-180 · waist Y · wrist B` — a holding in one short line.
+
+    The wraps are named by initial rather than counted: which yellow or white
+    wrap someone has is the thing you check, and spelling out
+    "yellow waist wrap · black wrist wrap" wrapped every line onto three.
+    """
+    bits = []
+    if h.shirt_size:
+        bits.append(f"{h.shirt_colour} {h.shirt_size.value}")
+    if h.pant_size:
+        bits.append(f"{h.pant_colour} {_compact_size(pant_size_label(h.pant_size))}")
+    for label, colour in (("waist", h.waist), ("wrist", h.wrist), ("head", h.head)):
+        if colour and colour != NONE_SIZE:
+            bits.append(f"{label} {colour_initials(colour)}")
+    return " \u00b7 ".join(bits) or "nothing out"
+
+
 def _item_button_label(h, key: str, fallback: str) -> str:
     """`Shirt M`, `Pants L - 180`, `Waist Wrap` — the piece AND its size.
 

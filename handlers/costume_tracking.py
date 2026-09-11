@@ -30,7 +30,8 @@ from handlers.costume_common import (_read, _edit, _fail, _set_icon, _holding_la
                                      _picked,
                                      _held_by_name, _stage, _stage_for, _clear_stage,
                                      _stage_key, _tag_group, divider_row,
-                                     tagged_rows, short_colour, _DIVIDER_MIN,
+                                     tagged_rows, short_colour, _holding_brief,
+                                     colour_initials, _DIVIDER_MIN,
                                      _PAGE, _ROSTER_PAGE, _ISSUE_PAGE, _SIZE_OPTS)
 
 
@@ -242,36 +243,40 @@ async def _render_pick_performer(query, context, eid: str, banner: str = "",
     chunk, page, pages = paginate(performers, page, _ISSUE_PAGE)
     lines = ([banner, ""] if banner else []) + [
         f"\U0001f4e4 *Issue \u2014 {name}*",
-        f"_{sum(1 for n in performers if n in held)}/{len(performers)} already holding "
+        f"_{sum(1 for n in performers if n in held)}/{len(performers)} holding "
         f"\u00b7 {len(staged)} staged_", ""]
 
-    if staged_by_nick:
-        for nick, mine in staged_by_nick.items():
-            for it in mine:
-                tag = "swap\u2192" if it.get("swap_row") else "\u2192"
-                bits = [b for b in (
-                    f"{it['shirt_colour']} shirt {it['shirt']}" if it.get("shirt") else "",
-                    f"{it['pant_colour']} pants "
-                    f"{pant_size_label(Size(it['pants']))}" if it.get("pants") else "",
-                ) if b]
-                lines.append(f"\U0001f4dd {nick}  {tag} " +
-                             (", ".join(bits) or "accessories only"))
-        lines.append("")
+    # Only the people who need attention get a line: someone staged, or someone
+    # already holding. "Not issued" is the majority and says nothing the button
+    # does not — the button is right there with their name on it.
+    for nick, mine in staged_by_nick.items():
+        for it in mine:
+            tag = "swap\u2192" if it.get("swap_row") else "\u2192"
+            bits = [b for b in (
+                f"{it['shirt_colour']} {it['shirt']}" if it.get("shirt") else "",
+                f"{it['pant_colour']} "
+                f"{_compact_size(pant_size_label(Size(it['pants'])))}"
+                if it.get("pants") else "",
+            ) if b]
+            for label, key in (("waist", "waist"), ("wrist", "wrist"),
+                               ("head", "head")):
+                if it.get(key) not in ("", NONE_SIZE, None):
+                    bits.append(f"{label} {colour_initials(it[key])}")
+            lines.append(f"\U0001f4dd {nick}  {tag} " +
+                         (" \u00b7 ".join(bits) or "accessories only"))
 
     def labelled(nick):
         tag = tags.get(nick.strip().lower(), "")
         return f"({tag}) {nick}" if tag else nick
 
     for nick in chunk:
-        if nick in staged_by_nick:
-            continue                     # already spelled out above
-        if nick in held:
-            sets = "; ".join(_holding_label_full(h) for h in held[nick])
-            plural = "sets" if len(held[nick]) > 1 else "set"
-            lines.append(f"\u2705 {labelled(nick)} \u2014 holding {len(held[nick])} "
-                         f"{plural}: {sets}")
-        else:
-            lines.append(f"\u23f3 {labelled(nick)} \u2014 not issued")
+        if nick in staged_by_nick or nick not in held:
+            continue
+        for h in held[nick]:
+            lines.append(f"\U0001f501 {labelled(nick)} \u2014 {_holding_brief(h)}")
+
+    if len(lines) > 3:
+        lines.append("")
 
     def mark(nick):
         return ("\U0001f4dd " if nick in staged_by_nick

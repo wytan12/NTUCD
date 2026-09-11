@@ -41,16 +41,16 @@ MODEL — holding is per *ledger row*, not per person or per performance:
     hand-over never makes the costume look returned.
 
 Sets, pant types and items are read from the sheet, not from the enums — a newly
-bought costume set needs no code change (see `add_costume_set`).
+bought colour needs no code change: option lists come from Main Inventory.
 
 Callback map:
     HOME · LIST · INV|<page> · RUN|<section>
-    SKP · SKC|<category> · SKS|<set> · SKI|<set>|<item> · SKZ|<set>|<item>|<size>
+    SKZ|<item>|<colour>|<size>|<page> · SKADJ|…|<delta>|<page> · ADDI · RBLD
     SKADJ|<set>|<item>|<size>|<delta>
     SIZE|<page> · SZE|<nick> · SZ|<nick>|<garment>|<size>
     TRACK · ACT|<action> · EV|<eid> · PF|<eid>|<nick>
     PFN|<eid>|<nick> · PFS|<eid>|<nick>|<row>
-    DSET/DSH/DPS/DACC · ADD
+    DSH/DPS/DACC/DALL · ADD
     HP|<action>|<page> · HSEL|<action>|<row>
     RIT|<action>|<row>|<item> · RIA|<action>|<row>
     TRT|<row>|<page> · TRS|<row>|<name>
@@ -61,20 +61,22 @@ from __future__ import annotations
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
-from services.costume_sheets import Item, Size
+from services.costume_sheets import Item, Size, NONE_SIZE
 from handlers.costume_common import (_read, _edit, _fail, _clear_stage, _held_by_name,
                                      _holding_label, _holding_label_full,
                                      _stage, _stage_for, _stage_key)
 from handlers.costume_inventory import (
     _render_list, _render_main_inventory, _render_running_table,
-    _render_stock_pick, _render_stock_sets, _render_stock_items,
-    _render_stock_sizes, _render_stock_leaf, _render_sizes, _render_size_edit)
+    _render_rebuild_confirm, _render_add_item,
+    _render_stock_leaf, _render_sizes, _render_size_edit)
 from handlers.costume_tracking import (
     _render_track, _render_pick_perf, _render_pick_performer, _render_holder_choice,
+    _render_outstanding_list, _render_outstanding,
     _render_config, _render_holders, _render_transfer_to, _render_review, _submit,
     _render_item_pick, _item_keys,
     event_name_for)
 from services.costume_sheets import (get_open_holdings, adjust_stock,
+                                     rebuild_running_block,
                                      set_costume_size, set_row_performance,
                                      describe_items, items_out)
 
@@ -96,6 +98,23 @@ async def render_logistics_home(update: Update, context: ContextTypes.DEFAULT_TY
         [InlineKeyboardButton("🦅 Exit to Cockpit", callback_data="DASH_VIEW|HOME")],
     ])
     await _edit(update.callback_query, text, kb)
+
+
+def _drop_unpaired(draft: dict, ud: dict) -> None:
+    """Clear any accessory that no longer pairs with the chosen shirt colour.
+
+    Leaving one selected-but-greyed would submit a combination the screen is
+    simultaneously telling you it will not allow.
+    """
+    if draft.get("all_colours"):
+        return
+    pairs = (ud.get("logi_opts") or {}).get("pairs", {})
+    shirt = (draft.get("shirt_colour") or "").strip().lower()
+    for key, item in (("waist", "Waist Wrap"), ("wrist", "Wrist Wrap"),
+                      ("head", "Head Band")):
+        pair = pairs.get(f"{item}|{draft.get(key)}", "")
+        if pair and pair.strip().lower() != shirt:
+            draft[key] = NONE_SIZE
 
 
 async def logistics_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -125,24 +144,35 @@ async def logistics_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return await _render_main_inventory(query, int(parts[2]))
     if verb == "RUN":
         return await _render_running_table(query, int(parts[2]))
-    if verb == "SKP":                    # SKP|<page> — page kept for old buttons
-        return await _render_stock_pick(query)
-    if verb == "SKC":                    # SKC|costume|pants
-        return await _render_stock_sets(query, parts[2])
-    if verb == "SKS":                    # SKS|<set>
-        return await _render_stock_items(query, parts[2])
-    if verb == "SKI":                    # SKI|<set>|<item>
-        return await _render_stock_sizes(query, parts[2], parts[3])
-    if verb == "SKZ":                    # SKZ|<set>|<item>|<size>
-        return await _render_stock_leaf(query, parts[2], parts[3], parts[4])
-    if verb == "SKADJ":                  # SKADJ|<set>|<item>|<size>|<delta>
-        st, item, size, delta = parts[2], parts[3], parts[4], int(parts[5])
-        # Pass the sheet's own item name straight through. Forcing it through the
-        # Item enum broke as soon as the sheet renamed a row ("Wrist Wrap (pairs)").
-        ok, new = await _read(adjust_stock, item, st, size, delta)
+    if verb == "ADDI":
+        return await _render_add_item(query, context)
+    if verb == "RBLD":
+        return await _render_rebuild_confirm(query)
+    if verb == "RBLDOK":
+        await _edit(query, "⏳ Rebuilding the running table…", InlineKeyboardMarkup([]))
+        ok, res = await _read(rebuild_running_block)
+        # `_read` wraps the call's own (ok, note) pair, so unwrap both layers —
+        # a sheet error and a "nothing to build from" are different failures.
+        built, note = res if ok and isinstance(res, tuple) else (False, res)
+        banner = (f"✅ *Running table rebuilt* — {note}" if built
+                  else f"⚠️ Couldn't rebuild it: {note}")
+        return await _render_list(query, banner=banner)
+    if verb == "SKZ":                    # SKZ|<item>|<colour>|<size>[|<page>]
+        # The optional page is where Main Inventory was when its Qty was
+        # tapped, so Back can return to it rather than to the drill-down.
+        return await _render_stock_leaf(query, parts[2], parts[3], parts[4],
+                                        from_page=parts[5] if len(parts) > 5 else None)
+    if verb == "SKADJ":                  # SKADJ|<item>|<colour>|<size>|<delta>[|<page>]
+        item, colour, size, delta = parts[2], parts[3], parts[4], int(parts[5])
+        from_page = parts[6] if len(parts) > 6 else None
+        # Pass the sheet's own item and colour strings straight through. Forcing
+        # either through an enum breaks the moment the sheet renames a row —
+        # "Wrist Wrap (pairs)" did exactly that once.
+        ok, new = await _read(adjust_stock, item, colour, size, delta)
         banner = ("✅ Updated." if ok and new is not None
                   else "⚠️ Couldn't write that row — check Main Inventory.")
-        return await _render_stock_leaf(query, st, item, size, banner=banner)
+        return await _render_stock_leaf(query, item, colour, size, banner=banner,
+                                        from_page=from_page)
 
     # --- Costume Size ---
     if verb == "SIZE":
@@ -157,6 +187,14 @@ async def logistics_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     # --- Costume Tracking ---
     if verb == "TRACK":
         return await _render_track(query)
+    if verb == "EVP":                    # EVP|<page> — performance list paging
+        return await _render_pick_perf(query, int(parts[2]))
+    if verb == "PFP":                    # PFP|<event>|<page> — roster paging
+        return await _render_pick_performer(query, context, parts[2], page=int(parts[3]))
+    if verb == "OUT":
+        return await _render_outstanding_list(query)
+    if verb == "OUTP":                   # OUTP|<performance>|<page>
+        return await _render_outstanding(query, parts[2], int(parts[3]))
     if verb == "ACT":
         action = parts[2]
         cur = _stage(ud)["key"]
@@ -192,19 +230,28 @@ async def logistics_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if verb == "PFS":                    # PFS|<eid>|<nick>|<row> — swap that row
         ud.pop("logi_draft", None)
         return await _render_config(query, context, parts[2], parts[3], swap_row=parts[4])
-    if verb in ("DSET", "DSH", "DPS", "DACC"):
+    if verb in ("DSH", "DPS", "DACC", "DALL"):
         d = ud.get("logi_draft")
         if not d:
             return await _render_track(query)
-        if verb == "DACC":
-            d[parts[2]] = 0 if d[parts[2]] else 1
-        else:
-            key = {"DSET": "set", "DSH": "shirt", "DPS": "pants"}[verb]
-            d[key] = parts[2]
-            if verb == "DSET":
-                # Shirt size differs per set, so follow the member's record for
-                # the set just picked; keep the current size if they have none.
-                d["shirt"] = (d.get("shirt_by_set") or {}).get(parts[2], d["shirt"])
+        if verb == "DALL":
+            # Lift the pairing guard rail so a deliberate mix can be recorded.
+            d["all_colours"] = not d.get("all_colours")
+        elif verb == "DACC":             # DACC|<key>|<colour> — tap again to clear
+            key, colour = parts[2], parts[3]
+            d[key] = NONE_SIZE if d.get(key) == colour else colour
+        else:                            # DSH|<colour>|<size>, DPS|<colour>|<size>
+            # The size IS the choice: its row already names the colour, so one
+            # tap sets both and the two can never drift apart.
+            key, colour_key = (("shirt", "shirt_colour") if verb == "DSH"
+                               else ("pants", "pant_colour"))
+            colour, size = parts[2], parts[3]
+            if d.get(colour_key) == colour and d.get(key) == size:
+                d[colour_key], d[key] = NONE_SIZE, ""   # tapping it again clears
+            else:
+                d[colour_key], d[key] = colour, size
+                if verb == "DSH":
+                    _drop_unpaired(d, ud)
         return await _render_config(query, context, d["eid"], d["nick"],
                                     swap_row=d.get("swap_row"))
     if verb == "ADD":
@@ -212,12 +259,35 @@ async def logistics_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if not d:
             return await _render_track(query)
         _stage_for(ud, "issue", d["eid"])["items"][_stage_key(d["nick"], d["swap_row"])] = {
-            k: d.get(k) for k in ("nick", "event", "set", "shirt", "pants",
-                                  "waist", "wrist", "head", "swap_row")}
+            k: d.get(k) for k in ("nick", "event", "shirt_colour", "shirt",
+                                  "pant_colour", "pants", "waist", "wrist", "head",
+                                  "swap_row")}
         ud.pop("logi_draft", None)
         return await _render_pick_performer(query, context, d["eid"])
     if verb == "HP":                     # HP|<action>|<page> — holders list paging
         return await _render_holders(query, context, parts[2], int(parts[3]))
+    if verb == "HPART":                  # flip pick-the-pieces mode
+        ud["logi_partial"] = not ud.get("logi_partial")
+        return await _render_holders(query, context, "return")
+    if verb == "HALL":                   # HALL|<row> — stage a whole return
+        row = parts[2]
+        ok, holdings = await _read(get_open_holdings)
+        if not ok:
+            return await _fail(query, "the holders list", holdings, back="LOGI|TRACK")
+        h = next((x for x in holdings if str(x.row) == row), None)
+        if h is None:
+            return await _render_holders(query, context, "return")
+        st = _stage_for(ud, "return", "*")
+        if row in st["items"]:           # tapping a staged person un-stages them
+            del st["items"][row]
+            ud.get("logi_items", {}).pop(row, None)
+        else:
+            keys = items_out(h)
+            ud.setdefault("logi_items", {})[row] = list(keys)
+            st["items"][row] = {"name": h.name, "label": _holding_label_full(h),
+                                "desc": describe_items(h, keys), "keys": list(keys),
+                                "full": True}
+        return await _render_holders(query, context, "return")
     if verb in ("HSEL", "RIT", "RIA"):
         # HSEL|<action>|<row> opens the item picker; RIT toggles one piece;
         # RIA accepts the selection. All three need the live row.
@@ -230,7 +300,11 @@ async def logistics_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return await _render_holders(query, context, action)
         st = _stage_for(ud, action, "*")
         if verb == "HSEL":
-            if row in st["items"]:        # tapping a staged person un-stages them
+            # On RETURN the name stages and un-stages, so ✂️ always means
+            # "let me pick the pieces" — even for someone already staged, who is
+            # exactly who you press it for when only half came back. On TRANSFER
+            # the name IS this button, so it keeps the un-stage toggle.
+            if action != "return" and row in st["items"]:
                 del st["items"][row]
                 ud.get("logi_items", {}).pop(row, None)
                 return await _render_holders(query, context, action)

@@ -316,6 +316,8 @@ async def handle_private_command(update: Update, context: ContextTypes.DEFAULT_T
     if not text.startswith("/"):
         from handlers.attendance_handlers import handle_moddate_text
         if await handle_moddate_text(update, context): return
+        from handlers.costume_inventory import handle_add_item_text
+        if await handle_add_item_text(update, context): return
 
     if context.user_data.get("waiting_announcement_text") is not None:
         target_thread = context.user_data.pop("waiting_announcement_text")

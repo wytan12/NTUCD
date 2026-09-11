@@ -12,7 +12,10 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
 from utils.ui import paginate, pagination_row, grid_row
-from services.costume_sheets import (Item, Size, get_running_inventory, get_stock_rows,
+import types
+
+from services.costume_sheets import (Item, Size, add_stock_row,
+                                     get_running_inventory, get_stock_rows,
                                      get_costume_sizes, set_costume_size, adjust_stock)
 from handlers.costume_common import (_read, _edit, _fail, _edit_dashboard, _PAGE,
                                      _picked,
@@ -44,44 +47,163 @@ def _wide(label: str) -> list:
     return [InlineKeyboardButton(label, callback_data=_CELL)]
 
 
-async def _render_list(query) -> None:
+async def _render_list(query, banner: str = "") -> None:
     """Costume Overview is a menu, not a report.
 
     The per-item listing that used to live here is gone: both tables now have
     their own screen, so printing them again on the way in was duplication. This
     screen also makes no sheet reads at all.
     """
-    text = ("📦 *Costume Overview*\n\n"
-            "• *Main Inventory* — stock totals exactly as typed in the sheet\n"
+    text = ((f"{banner}\n\n" if banner else "")
+            + "📦 *Costume Overview*\n\n"
+            "• *Main Inventory* — stock totals; tap a quantity to change it\n"
             "• *Running Table* — Total / Out / On hand, per size\n\n"
-            "_Both come straight from the Logistics sheet._")
+            "_Added a new colour or item to the sheet? Rebuild the running "
+            "table so it picks them up._")
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("📋 Main Inventory", callback_data="LOGI|INV|0"),
          InlineKeyboardButton("📊 Running Table", callback_data="LOGI|RUN|0")],
-        [InlineKeyboardButton("✏️ Update Stock", callback_data="LOGI|SKP|0")],
+        [InlineKeyboardButton("🔄 Rebuild running table", callback_data="LOGI|RBLD")],
         [InlineKeyboardButton("🔙 Back", callback_data="LOGI|HOME")],
     ])
     await _edit(query, text, kb)
 
 
-async def _render_main_inventory(query, page: int) -> None:
+async def _render_rebuild_confirm(query) -> None:
+    """Rebuilding rewrites the whole block, so it asks first.
+
+    It only ever writes FORMULAS — every number stays the sheet's own — but it
+    does overwrite anything typed into those cells by hand, which is exactly
+    what it is for.
+    """
+    ok, rows = await _read(get_stock_rows)
+    items = len({i for i, _c, _z, _q, _p in rows}) if ok else 0
+    lines = ["🔄 *Rebuild running table*", "",
+             "This regenerates the whole block from Main Inventory:", "",
+             f"• *{items}* item group(s), every colour and size it stocks",
+             "• Total / Out / On hand formulas, freshly written",
+             "• On hand colour-coded 🔴 none · 🟡 low · 🟢 fine", "",
+             "_Use it after adding a colour, a size or a new item to the sheet._",
+             "_It writes formulas only — the numbers stay the sheet's own._"]
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Rebuild it", callback_data="LOGI|RBLDOK")],
+        [InlineKeyboardButton("🔙 Back", callback_data="LOGI|LIST")],
+    ])
+    await _edit(query, "\n".join(lines), kb)
+
+
+async def _render_main_inventory(query, page: int, banner: str = "") -> None:
+    """The stock list, with every Qty cell tappable.
+
+    The other three cells stay inert — they are a layout device, since Telegram
+    has no table markup. The quantity is the one thing on this screen you would
+    ever want to change, so it is the one cell that does something: tapping it
+    goes straight to that row's counter instead of walking back through
+    item -> colour -> size to reach a row already in front of you.
+    """
     ok, rows = await _read(get_stock_rows)
     if not ok:
         return await _fail(query, "Main Inventory", rows, back="LOGI|LIST")
     chunk, page, pages = paginate(rows, page, _INV_PAGE)
 
-    grid = [_cells("Item", "Set", "Size", "Qty")]
-    for item, st, _color, size, qty in chunk:
-        grid.append(_cells(item, st, size, qty))
+    grid = [_cells("Item", "Colour", "Size", "Qty")]
+    for item, colour, size, qty, _pairs in chunk:
+        grid.append(_cells(item, colour, size)
+                    + [InlineKeyboardButton(
+                        f"{qty} \u270f\ufe0f",
+                        callback_data=f"LOGI|SKZ|{item}|{colour}|{size}|{page}")])
     nav = pagination_row(page, pages, lambda p: f"LOGI|INV|{p}", _CELL)
     if nav:
         grid.append(nav)
-    grid.append([InlineKeyboardButton("🔙 Back", callback_data="LOGI|LIST")])
+    grid.append([InlineKeyboardButton("\u2795 Add item", callback_data="LOGI|ADDI"),
+                 InlineKeyboardButton("\U0001f519 Back", callback_data="LOGI|LIST")])
 
-    text = (f"📋 *Main Inventory*\n\n"
-            f"Stock totals exactly as typed in the sheet — {len(rows)} rows.\n"
-            f"_Tap ✏️ Update Stock on the previous screen to change a quantity._")
+    text = ((f"{banner}\n\n" if banner else "")
+            + f"\U0001f4cb *Main Inventory*\n\n"
+            + f"Stock totals exactly as typed in the sheet \u2014 {len(rows)} rows.\n"
+            + "_Tap a quantity to change it._")
     await _edit(query, text, InlineKeyboardMarkup(grid))
+
+
+async def _render_add_item(query, context, banner: str = "") -> None:
+    """Ask for the new row as one typed line.
+
+    One line rather than a four-step wizard: a new item's name and colour cannot
+    come from buttons — there is nothing to pick them from yet — and typing
+    "Sash, Gold, -, 12" is quicker than four screens for the one case buttons
+    cannot cover.
+    """
+    ok, rows = await _read(get_stock_rows)
+    items = ", ".join(dict.fromkeys(i for i, _c, _z, _q, _p in rows)) if ok else ""
+    context.user_data["logi_add_item"] = True
+    lines = [f"{banner}\n" if banner else "",
+             "\u2795 *Add to Main Inventory*", "",
+             "Send it as one line:", "",
+             "`Item, Colour, Size, Quantity`", "",
+             "Examples:",
+             "`Sash, Gold, -, 12`",
+             "`Shirt, Blue, M, 6`", "",
+             f"_Already stocked: {items}_",
+             "_Use `-` for the size when the item has no sizes._",
+             "_A new ITEM also needs a matching column in COSTUME TRACKING "
+             "before it can be issued._"]
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton(
+        "\U0001f519 Cancel", callback_data="LOGI|INV|0")]])
+    await _edit(query, "\n".join(x for x in lines if x != ""), kb)
+
+
+async def handle_add_item_text(update, context) -> bool:
+    """Consume a typed `Item, Colour, Size, Quantity` line. True if handled."""
+    if not context.user_data.get("logi_add_item"):
+        return False
+    text = (update.effective_message.text or "").strip()
+    if text.startswith("/"):
+        return False
+    context.user_data.pop("logi_add_item", None)
+
+    parts = [p.strip() for p in text.split(",")]
+    if len(parts) < 2:
+        await update.effective_message.reply_text(
+            "\u26a0\ufe0f I need at least an item and a colour, like "
+            "`Sash, Gold, -, 12`.", parse_mode="Markdown")
+        return True
+    item, colour = parts[0], parts[1]
+    size = parts[2] if len(parts) > 2 and parts[2] else "-"
+    try:
+        qty = int(parts[3]) if len(parts) > 3 and parts[3] else 0
+    except ValueError:
+        await update.effective_message.reply_text(
+            f"\u26a0\ufe0f `{parts[3]}` is not a number \u2014 nothing was added.",
+            parse_mode="Markdown")
+        return True
+
+    ok, note = await _read(add_stock_row, item, colour, size, qty)
+    added, detail = note if ok and isinstance(note, tuple) else (False, note)
+    try:
+        await update.effective_message.delete()
+    except Exception:                    # noqa: BLE001 — deletion is cosmetic
+        pass
+
+    banner = (f"\u2705 *Added* {item} {colour} {size} \u00d7 {qty} ({detail})."
+              if added else f"\u26a0\ufe0f Couldn't add it: {detail}")
+    if added:
+        banner += "\n_Tap \U0001f504 Rebuild running table so it starts counting._"
+    dash = context.user_data.get("master_dash_id")
+    if dash:
+        class _Q:                        # the inventory screen edits a message
+            message = types.SimpleNamespace(message_id=dash,
+                                            chat=update.effective_chat)
+            from_user = update.effective_user
+            async def answer(self, *a, **k):
+                pass
+        _Q.message.chat_id = update.effective_chat.id
+        try:
+            await _render_main_inventory(_Q(), 0, banner=banner)
+            return True
+        except Exception as e:           # noqa: BLE001 — fall back to a reply
+            print(f"[LOGI][WARN] add-item redraw failed: {e}")
+    await update.effective_message.reply_text(banner, parse_mode="Markdown")
+    return True
 
 
 async def _render_running_table(query, idx: int) -> None:
@@ -104,10 +226,13 @@ async def _render_running_table(query, idx: int) -> None:
         # "Wrist Wrap (pairs)" -> "Wrist Wrap": the qualifier adds nothing here,
         # and the slot is better spent on the colour — two sets' wraps differ by
         # colour, not by name, so "Waist Wrap" alone is ambiguous across sections.
-        name = item.name.split("(")[0].strip()
-        icon = _emoji_for(item.name, _ITEM_EMOJI, "•")
+        # The section already names the item, so the full-width row names the
+        # COLOUR — that is what identifies a thing now, and two colours of the
+        # same item are what the reader is telling apart.
         colour = item.color.strip()
-        grid.append(_wide(f"{icon} {name} ({colour})" if colour else f"{icon} {name}"))
+        icon = _set_icon(colour)
+        name = item.name.split("(")[0].strip()
+        grid.append(_wide(f"{icon} {colour}" if colour else f"• {name}"))
         if item.sized:
             # Size header repeats under each item's name rather than sitting once
             # at the top: it reads as that item's own column labels, and a
@@ -126,7 +251,7 @@ async def _render_running_table(query, idx: int) -> None:
         grid.append(nav)
     grid.append([InlineKeyboardButton("🔙 Back", callback_data="LOGI|LIST")])
 
-    title = sec.title.replace(" COSTUME SET", " SET").title()
+    title = sec.title.title()
     text = (f"📊 *Running Table* — {_emoji_for(sec.title, _SECTION_EMOJI, '📦')} *{title}*\n\n"
             f"*tot* = initial stock · *out* = issued out · "
             f"*left* = what's available.\n"
@@ -134,157 +259,55 @@ async def _render_running_table(query, idx: int) -> None:
     await _edit(query, text, InlineKeyboardMarkup(grid))
 
 
-def _stock_groups(rows, category: str):
-    """`{set: {item: [(size, qty), ...]}}` for one category, in sheet order."""
-    groups: dict[str, dict[str, list]] = {}
-    for item, st, _color, size, qty in rows:
-        is_pants = item.lower() == _PANTS.lower()
-        if (category == "pants") != is_pants:
-            continue
-        groups.setdefault(st, {}).setdefault(item, []).append((size, qty))
-    return groups
-
-
-def _stock_qty(rows, st: str, item: str, size: str) -> int | None:
-    for i, s, _c, z, q in rows:
-        if i == item and s == st and z == size:
+def _stock_qty(rows, item: str, colour: str, size: str) -> int | None:
+    for i, c, z, q, _p in rows:
+        if i == item and c == colour and z == size:
             return q
     return None
 
 
-def _stock_category(item: str) -> str:
-    return "pants" if item.lower() == _PANTS.lower() else "costume"
+def _colours_of(rows, item: str) -> list[str]:
+    return list(dict.fromkeys(c for i, c, _z, _q, _p in rows if i == item))
 
 
-def _stock_back(rows, st: str, item: str, from_size_screen: bool = False) -> str:
-    """Back target that skips any step which had only one option.
+def _sizes_of(rows, item: str, colour: str) -> list[tuple[str, int]]:
+    return [(z, q) for i, c, z, q, _p in rows if i == item and c == colour]
 
-    Single-option screens are skipped on the way in (a pants set has only
-    "Pants"; a free-size item has only "-"), so a Back button pointing at one
-    would bounce the admin straight forward again and look broken.
+
+async def _render_stock_leaf(query, item: str, colour: str, size: str,
+                             banner: str = "", from_page: str | None = None) -> None:
+    """The +/- counter for one (item, colour, size).
+
+    Only ever reached by tapping a quantity in Main Inventory, so Back returns
+    to the page that was being read — `from_page` carries it through the
+    adjustments so a run of +1s does not lose your place.
     """
-    items = {i for i, s, _c, _z, _q in rows if s == st}
-    sizes = [z for i, s, _c, z, _q in rows if s == st and i == item]
-    if not from_size_screen and len(sizes) > 1:
-        return f"LOGI|SKI|{st}|{item}"
-    if len(items) > 1:
-        return f"LOGI|SKS|{st}"
-    category = _stock_category(item)
-    # Since Old/New pants merged there is only one pant "set", so the set picker
-    # is skipped on the way in — Back must skip it too or it bounces forward.
-    if len({s for _i, s, _c, _z, _q in rows if _stock_category(_i) == category}) > 1:
-        return f"LOGI|SKC|{category}"
-    return "LOGI|SKP|0"
+    ok, rows = await _read(get_stock_rows)
+    if not ok:
+        return await _fail(query, "the stock list", rows, back="LOGI|INV|0")
+    qty = _stock_qty(rows, item, colour, size)
+    if qty is None:                      # the row was deleted in the sheet
+        return await _render_main_inventory(query, int(from_page or 0),
+                                            banner=f"⚠️ _{item} {colour} {size} is no "
+                                                   f"longer in Main Inventory._")
 
-
-async def _render_stock_pick(query, _page: int = 0, banner: str = "") -> None:
+    back = f"LOGI|INV|{from_page or 0}"
+    tail = f"|{from_page}" if from_page is not None else ""
+    step = lambda d: f"LOGI|SKADJ|{item}|{colour}|{size}|{d}{tail}"      # noqa: E731
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("👕 Costume Set", callback_data="LOGI|SKC|costume")],
-        [InlineKeyboardButton("👖 Pants", callback_data="LOGI|SKC|pants")],
-        [InlineKeyboardButton("🔙 Back", callback_data="LOGI|LIST")],
-    ])
-    head = f"{banner}\n\n" if banner else ""
-    await _edit(query, f"{head}✏️ *Update Stock*\n\nWhat are you counting?\n\n"
-                       "• *Costume Set* — shirt, waist wrap, wrist wrap, head band\n"
-                       "• *Pants* — stocked on their own, not per costume set\n"
-                       "\n"
-                       "_Writes to Main Inventory; On hand recalculates itself._", kb)
-
-
-async def _render_stock_sets(query, category: str) -> None:
-    ok, rows = await _read(get_stock_rows)
-    if not ok:
-        return await _fail(query, "the stock list", rows, back="LOGI|LIST")
-    groups = _stock_groups(rows, category)
-    if not groups:
-        return await _fail(query, "that category", "no matching inventory rows",
-                           back="LOGI|SKP|0")
-    # One set in the category (pants, since Old/New merged) — nothing to pick.
-    if len(groups) == 1:
-        return await _render_stock_items(query, next(iter(groups)))
-
-    btns = [InlineKeyboardButton(f"{_set_icon(st)} {st}",
-                                 callback_data=f"LOGI|SKS|{st}") for st in groups]
-    kb = [btns[i:i + 2] for i in range(0, len(btns), 2)]
-    kb.append([InlineKeyboardButton("🔙 Back", callback_data="LOGI|SKP|0")])
-    word = "costume set" if category == "costume" else "pants"
-    await _edit(query, f"✏️ *Update Stock*\n\nWhich {word}?", InlineKeyboardMarkup(kb))
-
-
-async def _render_stock_items(query, st: str) -> None:
-    ok, rows = await _read(get_stock_rows)
-    if not ok:
-        return await _fail(query, "the stock list", rows, back="LOGI|SKP|0")
-    items = {}
-    for item, s, _c, size, qty in rows:
-        if s == st:
-            items.setdefault(item, []).append((size, qty))
-    if not items:
-        return await _render_stock_pick(query)
-
-    # A set with a single item (pants) has nothing to choose — skip this screen.
-    if len(items) == 1:
-        only = next(iter(items))
-        return await _render_stock_sizes(query, st, only)
-
-    category = _stock_category(next(iter(items)))
-    btns = []
-    for item, sizes in items.items():
-        icon = _emoji_for(item, _ITEM_EMOJI, "•")
-        total = sum(q for _s, q in sizes)
-        btns.append(InlineKeyboardButton(f"{icon} {item} ({total})",
-                                         callback_data=f"LOGI|SKI|{st}|{item}"))
-    kb = [btns[i:i + 2] for i in range(0, len(btns), 2)]
-    kb.append([InlineKeyboardButton("🔙 Back", callback_data=f"LOGI|SKC|{category}")])
-    await _edit(query, f"✏️ *Update Stock* — *{st}*\n\nWhich item?",
-                InlineKeyboardMarkup(kb))
-
-
-async def _render_stock_sizes(query, st: str, item: str) -> None:
-    ok, rows = await _read(get_stock_rows)
-    if not ok:
-        return await _fail(query, "the stock list", rows, back="LOGI|SKP|0")
-    sizes = [(z, q) for i, s, _c, z, q in rows if s == st and i == item]
-    if not sizes:
-        return await _render_stock_items(query, st)
-    # Free-size items ("-") have nothing to choose — go straight to the counter.
-    if len(sizes) == 1:
-        return await _render_stock_leaf(query, st, item, sizes[0][0])
-
-    btns = [InlineKeyboardButton(f"{_compact_size(z)} ({q})",
-                                 callback_data=f"LOGI|SKZ|{st}|{item}|{z}")
-            for z, q in sizes]
-    kb = [btns[i:i + 3] for i in range(0, len(btns), 3)]
-    kb.append([InlineKeyboardButton("🔙 Back",
-                                    callback_data=_stock_back(rows, st, item, from_size_screen=True))])
-    icon = _emoji_for(item, _ITEM_EMOJI, "•")
-    await _edit(query, f"✏️ *Update Stock* — {icon} *{item}* · *{st}*\n\nWhich size?",
-                InlineKeyboardMarkup(kb))
-
-
-async def _render_stock_leaf(query, st: str, item: str, size: str, banner: str = "") -> None:
-    ok, rows = await _read(get_stock_rows)
-    if not ok:
-        return await _fail(query, "the stock list", rows, back="LOGI|SKP|0")
-    qty = _stock_qty(rows, st, item, size)
-    if qty is None:
-        return await _render_stock_items(query, st)
-
-    back = _stock_back(rows, st, item)
-    step = lambda d: f"LOGI|SKADJ|{st}|{item}|{size}|{d}"      # noqa: E731
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("−10", callback_data=step(-10)),
-         InlineKeyboardButton("−5", callback_data=step(-5)),
-         InlineKeyboardButton("−1", callback_data=step(-1))],
+        [InlineKeyboardButton("\u221210", callback_data=step(-10)),
+         InlineKeyboardButton("\u22125", callback_data=step(-5)),
+         InlineKeyboardButton("\u22121", callback_data=step(-1))],
         [InlineKeyboardButton("+1", callback_data=step(1)),
          InlineKeyboardButton("+5", callback_data=step(5)),
          InlineKeyboardButton("+10", callback_data=step(10))],
-        [InlineKeyboardButton("🔙 Back", callback_data=back)],
+        [InlineKeyboardButton("\U0001f519 Back", callback_data=back)],
     ])
-    icon = _emoji_for(item, _ITEM_EMOJI, "•")
-    size_line = "" if str(size).strip() in ("", "-") else f" · Size *{_compact_size(size)}*"
+    icon = _emoji_for(item, _ITEM_EMOJI, "\u2022")
+    size_line = "" if str(size).strip() in ("", "-") else f" \u00b7 Size *{_compact_size(size)}*"
     head = f"{banner}\n\n" if banner else ""
-    await _edit(query, f"{head}✏️ *Update Stock*\n{icon} *{item}* · *{st}*{size_line}\n\n"
+    await _edit(query, f"{head}\u270f\ufe0f *Edit quantity*\n{icon} *{item}* \u00b7 "
+                       f"{_set_icon(colour)} *{colour}*{size_line}\n\n"
                        f"Quantity in stock: *{qty}*\n\n_Tap to adjust._", kb)
 
 

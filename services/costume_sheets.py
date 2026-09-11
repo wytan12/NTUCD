@@ -54,25 +54,28 @@ from services.google_sheets import (get_cached_values, get_gspread_sheet,
 # column; keeping them in enums means the rest of the codebase can never
 # introduce one.
 
-# NOTE: the Overview `Set` column IS matched on — `adjust_stock` finds its row by
-# (Item, Set, Size) and every running-table SUMIFS filters on it — so a set's
-# spelling must agree between the sheet and anything the bot writes. What the bot
-# never does is *invent* a set: the option lists come from the sheet.
-class CostumeSet(str, Enum):
-    """The sets we ship with. NOT a closed category — see `list_costume_sets`.
+# NOTE: the Overview `Colour` column IS matched on — `adjust_stock` finds its row
+# by (Item, Colour, Size) and every running-table SUMIFS filters on it — so a
+# colour's spelling must agree between the sheet and anything the bot writes.
+# What the bot never does is *invent* a colour: option lists come from the sheet.
+class Colour(str, Enum):
+    """Colours we happen to ship with. NOT a closed category — see `list_colours`.
 
-    How many costume sets exist is a purchasing decision, so a set travels
-    through the code as the plain string stored in the sheet and the options
-    come from Main Inventory. These members stay as named constants for the
-    values the code needs to default to; they are deliberately NOT used to
-    validate, or a newly bought set could be stocked but never issued.
+    Which colours exist is a purchasing decision, so a colour travels through
+    the code as the plain string stored in the sheet. These members remain only
+    as named constants for values the code defaults to; they are deliberately
+    NOT used to validate, or a newly bought colour could be stocked and never
+    issued.
     """
     RED = "Red"
     WHITE = "White"
+    BLACK = "Black"
+    YELLOW = "Yellow"
 
     @property
     def dot(self) -> str:
-        return "🔴" if self is CostumeSet.RED else "⚪"
+        return {"Red": "🔴", "White": "⚪", "Black": "⚫", "Yellow": "🟡"}.get(self.value, "▪️")
+
 
 class Size(str, Enum):
     XS = "XS"
@@ -117,7 +120,7 @@ def pant_size_label(size: Size) -> str:
     """
     want = (size.value if isinstance(size, Size) else str(size)).strip().upper()
     try:
-        for item, _st, _color, label, _qty in get_stock_rows():
+        for item, _colour, label, _qty, _pairs in get_stock_rows():
             if (item.strip().lower().startswith(Item.PANTS.value.lower())
                     and label.strip().upper().split("-")[0].strip() == want):
                 return label.strip()
@@ -222,77 +225,96 @@ def _overview_values(force=False):
     return _cvals(COSTUME_OVERVIEW_TAB, force=force)
 
 
-def _metric_column(values) -> int | None:
-    """Column index of the running block's `Metric` header, or None if absent.
+def _running_header(values) -> int | None:
+    """Column index of the running block's `Colour` header, or None if absent.
 
-    Found by content rather than assumed, so the whole block can be moved to a
-    different column (as it was, from Costume Tracking to Costume Overview)
-    without touching this module.
+    `Total` must follow `Colour | Size`, which is what separates this from MAIN
+    INVENTORY's own `Colour | Size | Quantity` header sitting in the same rows.
     """
+    def at(row, i):
+        return (row[i] if i < len(row) else "").strip().lower()
+
     for row in values:
         for idx, cell in enumerate(row):
-            if (cell or "").strip().lower() == "metric":
+            if ((cell or "").strip().lower() == "colour"
+                    and at(row, idx + 1) == "size" and at(row, idx + 2) == "total"):
                 return idx
     return None
 
 
 def get_running_inventory(force=False) -> list[InventorySection]:
-    """Parse the RUNNING INVENTORY block into sections of Total/Out/On-hand rows.
+    """Parse the RUNNING INVENTORY block into one section per ITEM.
 
-    Sections are located by their `Metric` header cell rather than by row number,
-    so adding an item or a whole section in the sheet needs no code change.
+    Grouped by item: a banner naming it, a `Colour | Size | Total | Out |
+    On hand` header, then one row per colour and size — the colour written only
+    on its first row. Located by that header rather than by row number, so a
+    colour, size or item added by `rebuild_running_block` needs no change here.
     """
-    values = _overview_values(force=force)
-    metric_col = _metric_column(values)
-    if metric_col is None or metric_col < 2:
+    values = _cvals(COSTUME_OVERVIEW_TAB, force=force)
+    head = _running_header(values)
+    if head is None:
         return []
-    name_col, color_col = metric_col - 2, metric_col - 1
-    size_cols = [metric_col + 1 + n for n in range(_SIZE_SPAN)]
-    total_col = metric_col + 1 + _SIZE_SPAN
+    c_colour, c_size, c_total, c_out, c_hand = head, head + 1, head + 2, head + 3, head + 4
 
     sections: list[InventorySection] = []
     current: InventorySection | None = None
-    last_title = ""
+    per_colour: dict[str, dict] = {}
+    colour = ""
 
-    for i, row in enumerate(values):
-        metric = _cell(row, metric_col).lower()
-        head = _cell(row, name_col)
-
-        if metric == "metric":
-            current = InventorySection(title=last_title,
-                                       sizes=[_cell(row, c) for c in size_cols])
-            sections.append(current)
-            continue
-
-        if metric == "total" and current is not None and head:
-            out_row = values[i + 1] if i + 1 < len(values) else []
-            hand_row = values[i + 2] if i + 2 < len(values) else []
-            sized = any(_cell(row, c) != "" for c in size_cols)
+    def flush():
+        """Turn the rows collected for one item into its InventoryItem list."""
+        if current is None:
+            return
+        for name, data in per_colour.items():
+            sized = data["sizes"] != [NONE_SIZE]
             current.items.append(InventoryItem(
-                name=head, color=_cell(row, color_col), sized=sized, sizes=current.sizes,
-                total=[_int(row, c) for c in size_cols] if sized else [],
-                out=[_int(out_row, c) for c in size_cols] if sized else [],
-                on_hand=[_int(hand_row, c) for c in size_cols] if sized else [],
-                total_all=_int(row, total_col),
-                out_all=_int(out_row, total_col),
-                on_hand_all=_int(hand_row, total_col),
+                name=current.title.title(), color=name, sized=sized,
+                sizes=data["sizes"] if sized else [],
+                total=data["total"] if sized else [],
+                out=data["out"] if sized else [],
+                on_hand=data["hand"] if sized else [],
+                total_all=sum(data["total"]), out_all=sum(data["out"]),
+                on_hand_all=sum(data["hand"]),
             ))
+        if not current.sizes:
+            current.sizes = next((d["sizes"] for d in per_colour.values()
+                                  if d["sizes"] != [NONE_SIZE]), [])
+
+    for row in values:
+        first = _cell(row, c_colour)
+        size = _cell(row, c_size)
+        if first.lower() == "colour" and size.lower() == "size":
+            continue                              # the table header itself
+        if first and not size and not _cell(row, c_total):
+            if first.lower().startswith("running"):
+                continue                          # the block's own title row
+            flush()                               # a banner starts a new item
+            per_colour = {}
+            current = InventorySection(title=first, sizes=[])
+            sections.append(current)
+            colour = ""
             continue
-
-        if head and metric == "" and not head.lower().startswith("running"):
-            last_title = head          # section banner, one row above its header
-
-    return [s for s in sections if s.items]
+        if current is None or not size:
+            continue
+        colour = first or colour                  # blank = same colour as above
+        data = per_colour.setdefault(colour, {"sizes": [], "total": [], "out": [],
+                                              "hand": []})
+        data["sizes"].append(size)
+        data["total"].append(_int(row, c_total))
+        data["out"].append(_int(row, c_out))
+        data["hand"].append(_int(row, c_hand))
+    flush()
+    return [sec for sec in sections if sec.items]
 
 
 # ---------------------------------------------------------------------------
 # Ledger
 # ---------------------------------------------------------------------------
 
-LEDGER_HEADERS = ["Performances", "Name", "Costume Set", "Shirt Size",
-                  "Pant Size", "Waist Wrap", "Wrist Wrap", "Head Band",
-                  "Status", "Issued date", "Returned date", "Transferred date",
-                  "Transferred To", "Remarks", "Accessory Set"]
+LEDGER_HEADERS = ["Performances", "Name", "Shirt Colour", "Shirt Size",
+                  "Pant Colour", "Pant Size", "Waist Wrap", "Wrist Wrap",
+                  "Head Band", "Status", "Issued date", "Returned date",
+                  "Transferred date", "Transferred To", "Remarks"]
 
 
 @dataclass
@@ -301,13 +323,16 @@ class Holding:
     row: int
     name: str
     event: str
-    costume_set: str                 # raw sheet value; may be a set we don't know
-    accessory_set: str               # whose wraps these are (may differ from costume_set)
+    # Every item carries its OWN colour, because a costume is not a bundle: a
+    # red shirt is worn with a yellow waist wrap and a black wrist wrap. Colours
+    # are raw sheet strings — a newly bought colour must not need a code change.
+    shirt_colour: str                # "-" when no shirt went out
+    pant_colour: str
     shirt_size: Size | None
     pant_size: Size | None
-    waist: int
-    wrist: int
-    head: int
+    waist: str                       # colour, or "-"
+    wrist: str
+    head: str
 
 
 def _ledger_layout(values) -> tuple[int, dict[str, int]]:
@@ -326,6 +351,58 @@ def get_ledger(force=False) -> tuple[int, dict[str, int], list[tuple[int, list]]
     rows = [(i + 1, r) for i, r in enumerate(values)
             if i + 1 > header_row and _cell(r, name_col)]
     return header_row, cols, rows
+
+
+@dataclass
+class Outstanding:
+    """One performance's return status."""
+    performance: str
+    people_out: int          # distinct members still holding something
+    rows_out: int            # open ledger rows
+    rows_issued: int         # every row ever written for this performance
+    last_issued: str         # the most recent Issued date seen, for ordering
+
+
+def outstanding_by_performance(force=False) -> list[Outstanding]:
+    """Per performance: how many people have not returned yet.
+
+    Counted from the ledger rather than from PERF TABULATION, because the
+    question is about costumes, not attendance — someone marked for a show who
+    was never issued anything cannot be outstanding, and someone issued for a
+    show they did not end up performing in still has to bring it back.
+
+    A row is open on exactly the same test the running table's `Out` uses: no
+    Returned date and no Transferred date. Ordered by most recently issued, so
+    the show you are running now is at the top.
+    """
+    _hdr, cols, rows = get_ledger(force=force)
+
+    def col(row, key):
+        idx = cols.get(key)
+        return _cell(row, idx) if idx is not None else ""
+
+    seen: dict[str, dict] = {}
+    for _n, row in rows:
+        perf = col(row, "performances") or "(no performance)"
+        name = col(row, "name")
+        if not name:
+            continue
+        data = seen.setdefault(perf, {"people": set(), "out": 0, "total": 0, "last": ""})
+        data["total"] += 1
+        data["last"] = max(data["last"], col(row, "issued date") or "")
+        if not col(row, "returned date") and not col(row, "transferred date"):
+            data["out"] += 1
+            data["people"].add(name.strip().lower())
+
+    out = [Outstanding(performance=perf, people_out=len(d["people"]), rows_out=d["out"],
+                       rows_issued=d["total"], last_issued=d["last"])
+           for perf, d in seen.items()]
+    # Dates are DD/MM/YYYY, so sort on the parts rather than the string.
+    def key(o):
+        bits = o.last_issued.split("/")
+        return tuple(int(b) for b in reversed(bits)) if len(bits) == 3 else (0, 0, 0)
+    out.sort(key=key, reverse=True)
+    return out
 
 
 def get_open_holdings(force=False) -> list[Holding]:
@@ -349,13 +426,13 @@ def get_open_holdings(force=False) -> list[Holding]:
             row=number,
             name=col(row, "name"),
             event=col(row, "performances"),
-            costume_set=col(row, "costume set"),
-            accessory_set=col(row, "accessory set") or col(row, "costume set"),
+            shirt_colour=col(row, "shirt colour") or NONE_SIZE,
+            pant_colour=col(row, "pant colour") or NONE_SIZE,
             shirt_size=parse_size(col(row, "shirt size")),
             pant_size=parse_size(col(row, "pant size")),
-            waist=_int(row, cols.get("waist wrap", -1)) if "waist wrap" in cols else 0,
-            wrist=_int(row, cols.get("wrist wrap", -1)) if "wrist wrap" in cols else 0,
-            head=_int(row, cols.get("head band", -1)) if "head band" in cols else 0,
+            waist=col(row, "waist wrap") or NONE_SIZE,
+            wrist=col(row, "wrist wrap") or NONE_SIZE,
+            head=col(row, "head band") or NONE_SIZE,
         ))
     return holdings
 
@@ -374,19 +451,22 @@ def _col_letter(idx: int) -> str:
 
 @dataclass
 class IssueEntry:
-    """One costume going out. Accessory counts default to a full bundle."""
+    """One costume going out — every item named by its own colour.
+
+    `NONE_SIZE` ("-") in any field means that item was not issued. A pants-only
+    or shirt-only loan is ordinary, and each item's `Out` formula filters on its
+    own column, so a "-" simply stops that item counting.
+    """
     name: str
     event: str
-    costume_set: str
-    shirt_size: Size
-    pant_size: Size
-    waist: int = 1
-    wrist: int = 1
-    head: int = 0
+    shirt_colour: str = NONE_SIZE
+    shirt_size: Size | None = None
+    pant_colour: str = NONE_SIZE
+    pant_size: Size | None = None
+    waist: str = NONE_SIZE
+    wrist: str = NONE_SIZE
+    head: str = NONE_SIZE
     remarks: str = ""
-    # Whose wraps were taken. Blank means "this set's own" — the common case; it
-    # differs only when a set wears another set's accessories.
-    accessory_set: str = ""
 
 
 def append_issues(entries: list[IssueEntry]) -> int:
@@ -402,13 +482,14 @@ def append_issues(entries: list[IssueEntry]) -> int:
     for e in entries:
         row = [""] * width
         for key, val in (("performances", e.event), ("name", e.name),
-                         ("costume set", str(e.costume_set)),
-                         ("accessory set", str(e.accessory_set or e.costume_set)),
+                         ("shirt colour", e.shirt_colour or NONE_SIZE),
                          ("shirt size", e.shirt_size.value if e.shirt_size else NONE_SIZE),
+                         ("pant colour", e.pant_colour or NONE_SIZE),
                          ("pant size",
                           pant_size_label(e.pant_size) if e.pant_size else NONE_SIZE),
-                         ("waist wrap", e.waist),
-                         ("wrist wrap", e.wrist), ("head band", e.head),
+                         ("waist wrap", e.waist or NONE_SIZE),
+                         ("wrist wrap", e.wrist or NONE_SIZE),
+                         ("head band", e.head or NONE_SIZE),
                          ("status", LedgerStatus.ISSUED.value),
                          ("issued date", today), ("remarks", e.remarks)):
             if key in cols:
@@ -561,7 +642,7 @@ def record_sizes_from_issues(entries) -> int:
             continue
         wanted = []
         col = next((c for st, c in shirt_cols.items()
-                    if st.lower() == (e.costume_set or "").strip().lower()), None)
+                    if st.lower() == (e.shirt_colour or "").strip().lower()), None)
         if e.shirt_size and col is not None:
             wanted.append((col, e.shirt_size.value))
         if e.pant_size and pant_col is not None:
@@ -593,15 +674,24 @@ def record_sizes_from_issues(entries) -> int:
     return len(updates) + sum(1 for _ in appended)
 
 
-def shirt_size_for(entry: dict | None, costume_set: str) -> Size | None:
-    """That member's shirt size for one set, falling back to any set they have."""
+def shirt_size_for(entry: dict | None, colour: str, strict: bool = False) -> Size | None:
+    """That member's shirt size for one colour.
+
+    `strict=False` falls back to any colour they have a size for — right when
+    SEEDING a screen the admin then looks at and can correct. `strict=True`
+    refuses to substitute, for callers that write without showing anything:
+    a red M is not evidence of a white M, and once it is in the ledger a
+    borrowed size is indistinguishable from a measured one.
+    """
     if not entry:
         return None
-    per_set = entry.get("shirt") or {}
-    for st, size in per_set.items():
-        if size and st.lower() == str(costume_set).strip().lower():
+    per_colour = entry.get("shirt") or {}
+    for name, size in per_colour.items():
+        if size and name.lower() == str(colour).strip().lower():
             return size
-    return next((s for s in per_set.values() if s), None)
+    if strict:
+        return None
+    return next((s for s in per_colour.values() if s), None)
 
 
 def set_costume_size(nickname: str, garment: str, size: Size) -> bool:
@@ -640,6 +730,57 @@ def set_costume_size(nickname: str, garment: str, size: Size) -> bool:
 # Stock corrections (the one place the bot writes a quantity)
 # ---------------------------------------------------------------------------
 
+def add_stock_row(item: str, colour: str, size: str, quantity: int,
+                  pairs_with: str = "", notes: str = "") -> tuple[bool, str]:
+    """Append one `(Item, Colour, Size)` row to Main Inventory.
+
+    Written into the first blank row INSIDE the formula region, never at the
+    bottom of the sheet: every Total is a SUMIFS bounded at `INV_LAST_ROW`, so a
+    row below that bound is stocked but invisible to every count.
+
+    Refuses a duplicate `(Item, Colour, Size)` — two rows for one thing would
+    make `adjust_stock` edit whichever it found first and the SUMIFS quietly add
+    them together. Returns `(ok, message)`.
+    """
+    item, colour = item.strip(), colour.strip()
+    size = (size or NONE_SIZE).strip() or NONE_SIZE
+    if not item or not colour:
+        return False, "an item and a colour are both needed"
+
+    values = _cvals(COSTUME_OVERVIEW_TAB, force=True)
+    header_row, cols = _stock_layout(values)
+    for existing in get_stock_rows(force=False):
+        if (existing[0].strip().lower(), existing[1].strip().lower(),
+                existing[2].strip().lower()) == (item.lower(), colour.lower(),
+                                                 size.lower()):
+            return False, f"{item} {colour} {size} is already in Main Inventory"
+
+    target = None
+    for n in range(header_row + 1, INV_LAST_ROW + 1):
+        row = values[n - 1] if n - 1 < len(values) else []
+        if not _cell(row, cols["item"]):
+            target = n
+            break
+    if target is None:
+        return False, (f"no blank row left between {header_row + 1} and "
+                       f"{INV_LAST_ROW} — the formula region is full")
+
+    width = max(cols.values()) + 1
+    line = [""] * width
+    for key, value in (("item", item), ("colour", colour), ("size", size),
+                       ("quantity", quantity), ("pairs with", pairs_with),
+                       ("notes", notes)):
+        if key in cols:
+            line[cols[key]] = value
+
+    ws = get_gspread_sheet(LOGISTICS_SHEET, COSTUME_OVERVIEW_TAB)
+    ws.update(values=[line],
+              range_name=f"A{target}:{_col_letter(width - 1)}{target}",
+              value_input_option="USER_ENTERED")
+    _invalidate_costume()
+    return True, f"row {target}"
+
+
 def adjust_stock(item, set_or_type: str, size_label: str, delta: int) -> int | None:
     """Add `delta` to one Costume Overview `(Item, Set, Size)` row's Quantity.
 
@@ -661,27 +802,43 @@ def adjust_stock(item, set_or_type: str, size_label: str, delta: int) -> int | N
     return None
 
 
-def get_stock_rows(force=False) -> list[tuple[str, str, str, str, int]]:
-    """`[(item, set, color, size, quantity), ...]` from Main Inventory.
+def get_stock_rows(force=False) -> list[tuple[str, str, str, int, str]]:
+    """`[(item, colour, size, quantity, pairs_with), ...]` from Main Inventory.
 
-    Stops at the first blank Item cell once the table has started. Column A
-    continues below the table with free-text bookkeeping ("Last Updated",
-    "Signed Off", the update note); without this bound those lines are served
-    as inventory rows and show up in both the Main Inventory table and the
-    Update Stock picker.
+    `(item, colour, size)` is the identity of a thing the club owns — a Red
+    shirt in M, a Yellow waist wrap. `pairs_with` names the shirt colour an
+    accessory belongs with; it drives one UI hint and gates nothing.
+
+    Columns are matched by header, and the table stops at the first blank Item:
+    column A continues below with free-text bookkeeping ("Last Updated",
+    "Signed Off"), which would otherwise be served as inventory.
     """
     values = _cvals(COSTUME_OVERVIEW_TAB, force=force)
+    header_row, cols = _stock_layout(values)
     rows = []
-    started = False
-    for row in values[2:]:
-        item = _cell(row, 0)
-        if not item or item.lower() == "item":
-            if started:
-                break
-            continue
-        started = True
-        rows.append((item, _cell(row, 1), _cell(row, 2), _cell(row, 3), _int(row, 4)))
+    for row in values[header_row:]:
+        item = _cell(row, cols["item"])
+        if not item:
+            break
+        rows.append((item, _cell(row, cols["colour"]), _cell(row, cols["size"]),
+                     _int(row, cols["quantity"]),
+                     _cell(row, cols["pairs with"]) if "pairs with" in cols else ""))
     return rows
+
+
+def _stock_layout(values) -> tuple[int, dict[str, int]]:
+    """`(header_row_number, {header_lower: col_index})` for Main Inventory.
+
+    Located by the row whose first cell is `Item`, so the block can move and
+    columns can be reordered without touching the code.
+    """
+    for i, row in enumerate(values):
+        if _cell(row, 0).strip().lower() == "item":
+            cols = {(c or "").strip().lower(): n for n, c in enumerate(row[:8]) if (c or "").strip()}
+            if "colour" not in cols and "color" in cols:
+                cols["colour"] = cols["color"]
+            return i + 1, cols
+    raise LookupError("Main Inventory header row ('Item') not found in Costume Overview")
 
 
 # ---------------------------------------------------------------------------
@@ -690,254 +847,269 @@ def get_stock_rows(force=False) -> list[tuple[str, str, str, str, int]]:
 # Main Inventory is the register of what the club owns, so it — not an enum —
 # decides which sets and pant types the UI may offer.
 
-def list_costume_sets(force=False) -> list[str]:
-    """Costume sets present in Main Inventory, in sheet order (pants excluded)."""
+def list_items(force=False) -> list[str]:
+    """Item names present in Main Inventory, in sheet order."""
     seen = []
-    for item, st, _c, _z, _q in get_stock_rows(force=force):
-        if item.strip().lower() != Item.PANTS.value.lower() and st and st not in seen:
-            seen.append(st)
+    for item, _c, _s, _q, _p in get_stock_rows(force=force):
+        if item not in seen:
+            seen.append(item)
     return seen
 
 
-ACCESSORY_ITEMS = (Item.WAIST_WRAP.value, Item.WRIST_WRAP.value, Item.HEAD_BAND.value)
+def list_colours(item: str, force=False) -> list[str]:
+    """Colours Main Inventory stocks for one item, in sheet order.
 
-
-def set_accessories(set_name: str, force=False) -> list[str]:
-    """Accessory item names this set owns stock of, as spelled in the sheet.
-
-    Matched by prefix, not equality: Main Inventory qualifies some names
-    ("Wrist Wrap (pairs)"), and the running table's SUMIFS already use the same
-    `"Wrist Wrap*"` wildcard, so this keeps the two consistent.
+    This is the option list every colour picker is built from, which is what
+    lets a newly bought colour appear in the bot the moment it is stocked —
+    no enum, no deploy.
     """
-    found = []
-    for item, st, _c, _z, _q in get_stock_rows(force=force):
-        if st.lower() != str(set_name).lower() or item in found:
+    want = str(item).strip().lower()
+    seen = []
+    for it, colour, _s, _q, _p in get_stock_rows(force=force):
+        if it.strip().lower() == want and colour and colour not in seen:
+            seen.append(colour)
+    return seen
+
+
+def sizes_for(item: str, force=False) -> list[str]:
+    """Size labels stocked for one item, in sheet order. Empty for unsized items."""
+    want = str(item).strip().lower()
+    seen = []
+    for it, _c, size, _q, _p in get_stock_rows(force=force):
+        if it.strip().lower() == want and size and size != NONE_SIZE and size not in seen:
+            seen.append(size)
+    return seen
+
+
+def pairs_with(item: str, colour: str, force=False) -> str:
+    """The shirt colour this item+colour belongs with, or "" for "anything".
+
+    Read from Main Inventory's `Pairs with` column. It exists to grey out the
+    wraps that do not go with the shirt just chosen — a guard rail on the issue
+    screen, never a rule: it gates no write, so a blank or a typo costs a hint
+    and nothing more.
+    """
+    want_i, want_c = str(item).strip().lower(), str(colour).strip().lower()
+    for it, col, _s, _q, pair in get_stock_rows(force=force):
+        if it.strip().lower() == want_i and col.strip().lower() == want_c:
+            return pair
+    return ""
+
+
+
+# ---------------------------------------------------------------------------
+# Rebuilding the running block
+# ---------------------------------------------------------------------------
+# The running block is generated, not hand-written. Adding a colour, a size or a
+# whole item to Main Inventory and pressing rebuild is all it takes — the shape,
+# the formulas and the colour coding are all derived from what the sheet says
+# it owns. Hand-editing 40 SUMIFS is how a column ends up pointing at the wrong
+# range and silently reading zero.
+#
+# This is the ONE place the bot writes into the running block, and it writes
+# FORMULAS, never numbers: the sheet still computes every figure. Values stay
+# read-only for the same reason as ATTENDANCE's Tabulation column.
+
+RUNNING_FIRST_COL = 7        # H — the block starts here, beside Main Inventory
+INV_LAST_ROW = 60            # Main Inventory rows every Total SUMIFS spans. Bounded
+                             # ABOVE the free-text bookkeeping, and deliberately
+                             # past today's last row so new stock can be appended
+                             # without falling outside the formulas.
+LEDGER_LAST_ROW = 994        # bound every Out COUNTIFS spans
+_SIZE_SLOTS = 5              # size columns per section; the widest item wins
+
+
+def _ledger_columns_for(item: str, cols: dict) -> tuple[str | None, str | None]:
+    """`(colour_column, size_column)` in the ledger for one item, by header.
+
+    Matched by name so a newly stocked item needs no code: a `Sash` item finds
+    `Sash Colour`/`Sash Size`, or a plain `Sash` column when it has no sizes.
+    Plural is tried both ways, since the sheet says `Pants` but `Pant Size`.
+    """
+    base = item.strip().lower()
+    names = [base] + ([base[:-1]] if base.endswith("s") else [base + "s"])
+    for name in names:
+        if f"{name} colour" in cols and f"{name} size" in cols:
+            return _col_letter(cols[f"{name} colour"]), _col_letter(cols[f"{name} size"])
+    for name in names:
+        if name in cols:
+            return _col_letter(cols[name]), None
+    return None, None
+
+
+def rebuild_running_block(force=True) -> tuple[bool, str]:
+    """Regenerate the RUNNING INVENTORY block from Main Inventory and the ledger.
+
+    One group per item: a banner naming it, then `Colour | Size | Total | Out |
+    On hand` with one row per colour and size. Metrics are COLUMNS rather than
+    three stacked rows, so an item with no sizes is one line instead of three
+    rows trailing five empty size columns.
+
+    The colour is written only on its first row, the way you would write it by
+    hand. Returns `(ok, message)`.
+    """
+    values = _cvals(COSTUME_OVERVIEW_TAB, force=force)
+    try:
+        inv_header, inv_cols = _stock_layout(values)
+    except LookupError as e:
+        return False, str(e)
+    _lh, ledger_cols = _ledger_layout(_tracking_values(force=force))
+
+    stock = get_stock_rows(force=force)
+    if not stock:
+        return False, "Main Inventory is empty — nothing to build from."
+
+    rng = lambda letter: f"${letter}${inv_header}:${letter}${INV_LAST_ROW}"   # noqa: E731
+    qty = rng(_col_letter(inv_cols["quantity"]))
+    i_col = rng(_col_letter(inv_cols["item"]))
+    c_col = rng(_col_letter(inv_cols["colour"]))
+    z_col = rng(_col_letter(inv_cols["size"]))
+
+    tab = COSTUME_TRACKING_TAB
+    lcol = lambda header: _col_letter(ledger_cols[header])                    # noqa: E731
+    open_row = (f"'{tab}'!${lcol('returned date')}$2:${lcol('returned date')}${LEDGER_LAST_ROW},\"\","
+                f"'{tab}'!${lcol('transferred date')}$2:${lcol('transferred date')}${LEDGER_LAST_ROW},\"\","
+                f"'{tab}'!${lcol('name')}$2:${lcol('name')}${LEDGER_LAST_ROW},\"<>\"")
+
+    grouped: dict[str, list[tuple[str, str]]] = {}
+    for item, colour, size, _q, _p in stock:
+        grouped.setdefault(item, []).append((colour, size or NONE_SIZE))
+
+    grid = [["RUNNING INVENTORY", "",
+             f"auto-calculated from Main Inventory + {tab} — do not type here",
+             "", ""], ["", "", "", "", ""]]
+    banners, row_no, skipped = [], 2, []
+
+    for item, pairs in grouped.items():
+        col_colour, col_size = _ledger_columns_for(item, ledger_cols)
+        if col_colour is None:
+            skipped.append(item)          # nothing in the ledger records it
             continue
-        if any(item.lower().startswith(a.lower()) for a in ACCESSORY_ITEMS):
-            found.append(item)
-    return found
+        grid.append([item.upper(), "", "", "", ""])
+        banners.append(row_no + 1)
+        grid.append(["Colour", "Size", "Total", "Out", "On hand"])
+        row_no += 2
 
-
-def list_accessory_owners(force=False) -> list[str]:
-    """Sets that own accessory stock, i.e. the sets another set can borrow from.
-
-    A set created with shirts only (new colourway, existing wraps) owns none, so
-    at issue time the admin picks whose accessories are being taken and that goes
-    in the ledger's `Accessory Set` column.
-    """
-    return [s for s in list_costume_sets(force=force) if set_accessories(s)]
-
-
-# ---------------------------------------------------------------------------
-# Adding a whole new costume set
-# ---------------------------------------------------------------------------
-
-INV_FIRST_ROW = 3            # Main Inventory data starts here
-INV_LAST_ROW = 60            # upper bound baked into the running table's SUMIFS
-_LEDGER_FIRST, _LEDGER_LAST = 2, 1001
-
-# Which ledger column counts as "out" for each item. Shirt consumes the row's
-# Quantity; the accessories have their own count columns.
-_OUT_COLUMN_FOR = {Item.SHIRT.value: "quantity", Item.WAIST_WRAP.value: "waist wrap",
-                   Item.WRIST_WRAP.value: "wrist wrap", Item.HEAD_BAND.value: "head band"}
-
-# (item, colour, sized) — what a costume set normally contains.
-DEFAULT_SET_ITEMS = [(Item.SHIRT.value, "", True), (Item.WAIST_WRAP.value, "", False),
-                     (Item.WRIST_WRAP.value, "", False), (Item.HEAD_BAND.value, "", False)]
-
-
-def _first_blank_inventory_row(values) -> int:
-    """Row number just past the last Main Inventory row."""
-    row = INV_FIRST_ROW
-    while row - 1 < len(values) and _cell(values[row - 1], 0):
-        row += 1
-    return row
-
-
-def _running_block_end(values, name_col: int) -> int:
-    """Last used row of the running block, so a new section appends below it."""
-    last = 0
-    for i, row in enumerate(values, start=1):
-        if _cell(row, name_col) or _cell(row, name_col + 2):
-            last = i
-    return last
-
-
-def add_costume_set(set_name: str, items=None, sizes=None) -> tuple[bool, str]:
-    """Register a brand-new costume set: stock rows + its running-table section.
-
-    Two writes are needed because the sheet holds two different things. Main
-    Inventory gets a zero-quantity row per (item, size) so the admin can count
-    the new stock in; the running table gets a section of SUMIFS so the set
-    reports Total / Out / On hand like every other. Without the second half the
-    set would be stockable but invisible on the Costume Overview screen.
-
-    Everything else adapts on its own — the set pickers and the running-table
-    parser both read the sheet — so this is the only step a new set needs.
-
-    Returns `(ok, message)`.
-    """
-    name = str(set_name).strip()
-    if not name:
-        return False, "Set name is required."
-    items = items or DEFAULT_SET_ITEMS
-    sizes = sizes or [s.value for s in Size]
-
-    if name.lower() in {s.lower() for s in list_costume_sets(force=True)}:
-        return False, f"A set called '{name}' already exists in Main Inventory."
-
-    values = _overview_values(force=True)
-    metric_col = _metric_column(values)
-    if metric_col is None or metric_col < 2:
-        return False, "Couldn't find the running table's 'Metric' header."
-    name_col = metric_col - 2
-
-    # --- 1. Main Inventory rows (quantity 0; the admin counts stock in) ------
-    start = _first_blank_inventory_row(values)
-    new_rows = []
-    for item, color, sized in items:
-        for size in (sizes if sized else ["-"]):
-            new_rows.append([item, name, color, size, 0])
-    end = start + len(new_rows) - 1
-    if end > INV_LAST_ROW:
-        return False, (f"Main Inventory would overflow row {INV_LAST_ROW} "
-                       f"(needs {end}). Widen the running table's SUMIFS first.")
+        last_colour = None
+        for colour, size in pairs:
+            row_no += 1
+            esc, z_esc = colour.replace('"', '""'), str(size).replace('"', '""')
+            total = (f'=SUMIFS({qty},{i_col},"{item}",{c_col},"{esc}",'
+                     f'{z_col},"{z_esc}")')
+            if col_size and size != NONE_SIZE:
+                out = (f"=COUNTIFS('{tab}'!${col_colour}$2:${col_colour}${LEDGER_LAST_ROW},"
+                       f"\"{esc}\",'{tab}'!${col_size}$2:${col_size}${LEDGER_LAST_ROW},"
+                       f"\"{z_esc}\",{open_row})")
+            else:
+                out = (f"=COUNTIFS('{tab}'!${col_colour}$2:${col_colour}${LEDGER_LAST_ROW},"
+                       f"\"{esc}\",{open_row})")
+            grid.append([colour if colour != last_colour else "", size, total, out,
+                         f"=J{row_no}-K{row_no}"])
+            last_colour = colour
+        grid.append(["", "", "", "", ""])
+        row_no += 1
 
     ws = get_gspread_sheet(LOGISTICS_SHEET, COSTUME_OVERVIEW_TAB)
-    ws.update(values=new_rows, range_name=f"A{start}:E{end}",
-              value_input_option="USER_ENTERED")
-
-    # --- 2. Running-table section -------------------------------------------
-    _hdr, cols, _rows = get_ledger(force=True)
-    tr = "'" + COSTUME_TRACKING_TAB + "'!"
-
-    def led(key):
-        letter = _col_letter(cols[key])
-        return f"{tr}${letter}${_LEDGER_FIRST}:${letter}${_LEDGER_LAST}"
-
-    open_cond = f'{led("returned date")},"",{led("transferred date")},"",{led("name")},"<>"'
-    inv_item = f"$A${INV_FIRST_ROW}:$A${INV_LAST_ROW}"
-    inv_set = f"$B${INV_FIRST_ROW}:$B${INV_LAST_ROW}"
-    inv_size = f"$D${INV_FIRST_ROW}:$D${INV_LAST_ROW}"
-    inv_qty = f"$E${INV_FIRST_ROW}:$E${INV_LAST_ROW}"
-
-    block_start = _running_block_end(values, name_col) + 2
-    grid = []
-    title = f"{name.upper()} COSTUME SET"
-    grid.append([title] + [""] * (3 + len(sizes)))
-    grid.append(["Item", "Color", "Metric"] + list(sizes) + ["Total"])
-    hdr_row = block_start + 1
-    r = block_start + 2
-    for item, color, sized in items:
-        total_c = [item, color, "Total"]
-        out_c = ["", "", "Out"]
-        hand_c = ["", "", "On hand"]
-        out_key = _OUT_COLUMN_FOR.get(item)
-        if sized:
-            for n in range(len(sizes)):
-                letter = _col_letter(metric_col + 1 + n)
-                total_c.append(f'=SUMIFS({inv_qty},{inv_item},"{item}*",{inv_set},'
-                               f'"{name}",{inv_size},{letter}${hdr_row})')
-                if out_key == "quantity":
-                    out_c.append(f'=SUMIFS({led("quantity")},{led("costume set")},"{name}",'
-                                 f'{led("shirt size")},{letter}${hdr_row},{open_cond})')
-                elif out_key:
-                    out_c.append(f'=SUMIFS({led(out_key)},{led("accessory set")},"{name}",{open_cond})')
-                else:
-                    out_c.append(0)      # no ledger column tracks this item yet
-                hand_c.append(f"={letter}{r}-{letter}{r + 1}")
-            first = _col_letter(metric_col + 1)
-            last = _col_letter(metric_col + len(sizes))
-            total_c.append(f"=SUM({first}{r}:{last}{r})")
-            out_c.append(f"=SUM({first}{r + 1}:{last}{r + 1})")
-        else:
-            total_c += [""] * len(sizes)
-            out_c += [""] * len(sizes)
-            hand_c += [""] * len(sizes)
-            total_c.append(f'=SUMIFS({inv_qty},{inv_item},"{item}*",{inv_set},"{name}")')
-            out_c.append(f'=SUMIFS({led(out_key)},{led("accessory set")},"{name}",{open_cond})'
-                         if out_key else 0)
-        tc = _col_letter(metric_col + 1 + len(sizes))
-        hand_c.append(f"={tc}{r}-{tc}{r + 1}")
-        grid += [total_c, out_c, hand_c]
-        r += 3
-
-    first_col = _col_letter(name_col)
-    last_col = _col_letter(metric_col + 1 + len(sizes))
+    _unmerge_running(ws)
+    first = _col_letter(RUNNING_FIRST_COL)
+    ws.batch_clear([f"{first}1:{_col_letter(RUNNING_FIRST_COL + 8)}"
+                    f"{max(len(grid) + 40, 80)}"])
     ws.update(values=grid,
-              range_name=f"{first_col}{block_start}:{last_col}{block_start + len(grid) - 1}",
+              range_name=f"{first}1:{_col_letter(RUNNING_FIRST_COL + 4)}{len(grid)}",
               value_input_option="USER_ENTERED")
-
+    _style_running(ws, banners, len(grid))
     _invalidate_costume()
-    return True, (f"Added '{name}': {len(new_rows)} inventory rows (quantity 0) and a "
-                  f"running-table section. Count the stock in with Update Stock.")
+
+    note = f"{len(banners)} item(s), {sum(len(v) for v in grouped.values())} row(s)"
+    if skipped:
+        note += f" — skipped {', '.join(skipped)} (no matching ledger column)"
+    return True, note
 
 
-def remove_costume_set(set_name: str) -> tuple[bool, str]:
-    """Undo `add_costume_set` — the safety net for a typo'd name.
+def _unmerge_running(ws) -> None:
+    """Drop every merge inside the block before rewriting it.
 
-    Main Inventory is rewritten WITHOUT the set rather than having its rows
-    deleted: deleting rows inside `A3:A60` would make Google shrink every
-    running-table SUMIFS range with them, so repeated add/remove would quietly
-    eat the headroom the ranges were widened to provide. Rewriting keeps the
-    rows contiguous (which `get_stock_rows` relies on) and the ranges untouched.
-
-    The set's running-table section is cleared in place; the resulting gap is
-    harmless because the block is parsed by its `Metric` headers, not by row.
-
-    Returns `(ok, message)`.
+    A write into a merged range lands ONLY in its top-left cell and the rest is
+    dropped without an error — that silently swallowed two whole Out rows once.
     """
-    name = str(set_name).strip()
-    if not name:
-        return False, "Set name is required."
+    meta = ws.spreadsheet.fetch_sheet_metadata(
+        {"fields": "sheets(properties(title,sheetId),merges)"})
+    sheet = next(s for s in meta["sheets"] if s["properties"]["title"] == ws.title)
+    last_col = RUNNING_FIRST_COL + 9
+    # Any merge that OVERLAPS the block, not just one that starts inside it: a
+    # merge straddling in from the left swallows the write just as completely,
+    # and this failed once already with three legacy 5-column merges sitting on
+    # one row — the sections after it landed sideways instead of below.
+    reqs = [{"unmergeCells": {"range": m}} for m in sheet.get("merges", [])
+            if m.get("startColumnIndex", 0) < last_col
+            and m.get("endColumnIndex", last_col) > RUNNING_FIRST_COL]
+    if reqs:
+        ws.spreadsheet.batch_update({"requests": reqs})
 
-    values = _overview_values(force=True)
-    metric_col = _metric_column(values)
-    if metric_col is None or metric_col < 2:
-        return False, "Couldn't find the running table's 'Metric' header."
-    name_col = metric_col - 2
 
-    keep, dropped = [], 0
-    for row in values[INV_FIRST_ROW - 1:]:
-        item = _cell(row, 0)
-        if not item:
-            break
-        if _cell(row, 1).lower() == name.lower():
-            dropped += 1
+def _style_running(ws, banners, last_row) -> None:
+    """Bold the banners, and colour every On hand cell red / amber / green.
+
+    The thresholds are the ones the bot's stock dot uses (0 -> red, under a
+    third of Total -> amber, else green), so the sheet and the bot never
+    disagree about what "running low" means.
+    """
+    sid = ws.id
+    total_col = _col_letter(RUNNING_FIRST_COL + 2)
+    hand_col = _col_letter(RUNNING_FIRST_COL + 4)
+    cells = {"sheetId": sid, "startRowIndex": 2, "endRowIndex": last_row,
+             "startColumnIndex": RUNNING_FIRST_COL + 4,
+             "endColumnIndex": RUNNING_FIRST_COL + 5}
+
+    meta = ws.spreadsheet.fetch_sheet_metadata(
+        {"fields": "sheets(properties(sheetId),conditionalFormats)"})
+    reqs = []
+    for sheet in meta["sheets"]:
+        if sheet["properties"]["sheetId"] != sid:
             continue
-        keep.append([item, _cell(row, 1), _cell(row, 2), _cell(row, 3), _int(row, 4)])
-    if not dropped:
-        return False, f"No inventory rows found for '{name}'."
+        for i in range(len(sheet.get("conditionalFormats", [])) - 1, -1, -1):
+            reqs.append({"deleteConditionalFormatRule": {"sheetId": sid, "index": i}})
 
-    ws = get_gspread_sheet(LOGISTICS_SHEET, COSTUME_OVERVIEW_TAB)
-    last_written = INV_FIRST_ROW + len(keep) - 1
-    ws.update(values=keep, range_name=f"A{INV_FIRST_ROW}:E{last_written}",
-              value_input_option="USER_ENTERED")
-    ws.batch_clear([f"A{last_written + 1}:E{last_written + dropped}"])
+    def rule(formula, colour):
+        return {"addConditionalFormatRule": {"index": 0, "rule": {
+            "ranges": [cells],
+            "booleanRule": {
+                "condition": {"type": "CUSTOM_FORMULA",
+                              "values": [{"userEnteredValue": formula}]},
+                "format": {"backgroundColor": colour}}}}}
 
-    # Clear the section whose banner names this set.
-    title = f"{name.upper()} COSTUME SET"
-    start = next((i for i, row in enumerate(values, start=1)
-                  if _cell(row, name_col).upper() == title), None)
-    cleared = 0
-    if start:
-        end = start
-        for i in range(start + 1, len(values) + 1):
-            row = values[i - 1] if i - 1 < len(values) else []
-            if _cell(row, name_col).upper().endswith("COSTUME SET") and i != start:
-                break
-            if not any(_cell(row, c) for c in range(name_col, metric_col + 7)):
-                if i > start + 1:
-                    break
-            end = i
-        first_col = _col_letter(name_col)
-        last_col = _col_letter(metric_col + 6)
-        ws.batch_clear([f"{first_col}{start}:{last_col}{end}"])
-        cleared = end - start + 1
-
-    _invalidate_costume()
-    return True, (f"Removed '{name}': {dropped} inventory rows and "
-                  f"{cleared} running-table rows cleared.")
+    # Added at index 0 each time, so the LAST rule added is checked first: green
+    # is the fallback, red wins outright. Row 3 is the first row the range
+    # covers, so these relative references shift correctly down the block.
+    guard = f'ISNUMBER(${hand_col}3),${total_col}3>0'
+    reqs += [
+        rule(f'=AND({guard},${hand_col}3/${total_col}3>=0.34)',
+             {"red": 0.85, "green": 0.94, "blue": 0.83}),
+        rule(f'=AND({guard},${hand_col}3/${total_col}3<0.34)',
+             {"red": 1.0, "green": 0.9, "blue": 0.7}),
+        rule(f'=AND(ISNUMBER(${hand_col}3),${hand_col}3<=0)',
+             {"red": 0.96, "green": 0.8, "blue": 0.8}),
+    ]
+    reqs.append({"repeatCell": {
+        "range": {"sheetId": sid, "startRowIndex": 0, "endRowIndex": last_row,
+                  "startColumnIndex": RUNNING_FIRST_COL,
+                  "endColumnIndex": RUNNING_FIRST_COL + 5},
+        "cell": {"userEnteredFormat": {"textFormat": {"bold": False}}},
+        "fields": "userEnteredFormat.textFormat.bold"}})
+    for n in banners:
+        reqs.append({"repeatCell": {
+            "range": {"sheetId": sid, "startRowIndex": n - 1, "endRowIndex": n + 1,
+                      "startColumnIndex": RUNNING_FIRST_COL,
+                      "endColumnIndex": RUNNING_FIRST_COL + 5},
+            "cell": {"userEnteredFormat": {
+                "textFormat": {"bold": True},
+                "backgroundColor": {"red": 0.93, "green": 0.93, "blue": 0.93}}},
+            "fields": "userEnteredFormat(textFormat.bold,backgroundColor)"}})
+        reqs.append({"mergeCells": {"mergeType": "MERGE_ALL", "range": {
+            "sheetId": sid, "startRowIndex": n - 1, "endRowIndex": n,
+            "startColumnIndex": RUNNING_FIRST_COL,
+            "endColumnIndex": RUNNING_FIRST_COL + 5}}})
+    ws.spreadsheet.batch_update({"requests": reqs})
 
 
 # ---------------------------------------------------------------------------
@@ -950,42 +1122,51 @@ def remove_costume_set(set_name: str) -> tuple[bool, str]:
 # shirt on Shirt Size, pants on Pant Size, each accessory on its count column.
 # So clearing one stops that item counting while the rest keep counting.
 
+# (key, colour column, size column or None, label, Holding colour attr, size attr)
+# Every item now looks the same: a colour column, optionally a size column, and
+# "-" in the colour column meaning "not issued". That uniformity is what lets
+# release / describe / items_out treat all five items with one rule.
 ITEM_FIELDS = (
-    ("shirt", "shirt size", "Shirt"),
-    ("pants", "pant size", "Pants"),
-    ("waist", "waist wrap", "Waist Wrap"),
-    ("wrist", "wrist wrap", "Wrist Wrap"),
-    ("head", "head band", "Head Band"),
+    ("shirt", "shirt colour", "shirt size", "Shirt", "shirt_colour", "shirt_size"),
+    ("pants", "pant colour", "pant size", "Pants", "pant_colour", "pant_size"),
+    ("waist", "waist wrap", None, "Waist Wrap", "waist", None),
+    ("wrist", "wrist wrap", None, "Wrist Wrap", "wrist", None),
+    ("head", "head band", None, "Head Band", "head", None),
 )
 
 
+def item_colour(h, key: str) -> str:
+    """The colour of one item on a holding, or "-" when it is not out."""
+    attr = next((f[4] for f in ITEM_FIELDS if f[0] == key), None)
+    return (getattr(h, attr, "") or NONE_SIZE) if attr else NONE_SIZE
+
+
 def items_out(h) -> list[str]:
-    """Which item keys are still out on this holding."""
-    out = []
-    if h.shirt_size:
-        out.append("shirt")
-    if h.pant_size:
-        out.append("pants")
-    for key, attr in (("waist", "waist"), ("wrist", "wrist"), ("head", "head")):
-        if getattr(h, attr, 0):
-            out.append(key)
-    return out
+    """Which item keys are still out on this holding.
+
+    One rule for all five: an item is out when its colour column holds a real
+    colour rather than "-".
+    """
+    return [key for key, *_rest in ITEM_FIELDS
+            if item_colour(h, key) not in ("", NONE_SIZE)]
 
 
 def describe_items(h, keys) -> str:
-    """`'shirt M, pants M - 170, waist wrap'` for the Remarks note."""
+    """`'red shirt M, black wrist wrap'` — what a Remarks note and the UI say."""
     bits = []
-    for key in keys:
-        if key == "shirt" and h.shirt_size:
-            bits.append(f"shirt {h.shirt_size.value}")
-        elif key == "pants" and h.pant_size:
-            bits.append(f"pants {pant_size_label(h.pant_size)}")
-        elif key == "waist":
-            bits.append("waist wrap")
-        elif key == "wrist":
-            bits.append("wrist wrap")
-        elif key == "head":
-            bits.append("head band")
+    for key, _cc, _sc, label, _ca, size_attr in ITEM_FIELDS:
+        if key not in keys:
+            continue
+        colour = item_colour(h, key)
+        if colour in ("", NONE_SIZE):
+            continue
+        size = getattr(h, size_attr, None) if size_attr else None
+        if key == "pants" and size:
+            bits.append(f"{colour.lower()} {label.lower()} {pant_size_label(size)}")
+        elif size:
+            bits.append(f"{colour.lower()} {label.lower()} {size.value}")
+        else:
+            bits.append(f"{colour.lower()} {label.lower()}")
     return ", ".join(bits)
 
 
@@ -1006,7 +1187,7 @@ def release_items(h, keys, action: str, to: str = "") -> tuple[bool, bool]:
       **Remarks**; the date columns stay empty, because the costume has not
       fully come back.
     """
-    keys = [k for k in keys if k in dict((f[0], f) for f in ITEM_FIELDS)]
+    keys = [k for k in keys if any(f[0] == k for f in ITEM_FIELDS)]
     if not keys:
         return False, False
 
@@ -1031,12 +1212,16 @@ def release_items(h, keys, action: str, to: str = "") -> tuple[bool, bool]:
                 updates.append({'range': f"{_col_letter(cols[header])}{h.row}",
                                 'values': [[value]]})
     else:
-        for key, header, _label in ITEM_FIELDS:
-            if key not in keys or header not in cols:
+        # Clear the item's OWN columns — its colour, and its size when it has
+        # one. Every column blanks to "-" now, so there is no per-item special
+        # case left: the item stops counting, the rest of the row keeps counting.
+        for key, colour_col, size_col, _label, _ca, _sa in ITEM_FIELDS:
+            if key not in keys:
                 continue
-            blank = NONE_SIZE if header.endswith("size") else 0
-            updates.append({'range': f"{_col_letter(cols[header])}{h.row}",
-                            'values': [[blank]]})
+            for header in (colour_col, size_col):
+                if header and header in cols:
+                    updates.append({'range': f"{_col_letter(cols[header])}{h.row}",
+                                    'values': [[NONE_SIZE]]})
         note = f"{action.capitalize()} {describe_items(h, keys)}"
         if to:
             note += f" to {to}"
@@ -1060,12 +1245,13 @@ def issue_items_to(h, keys, to: str) -> int:
     entry = IssueEntry(
         name=to,
         event=h.event,
-        costume_set=h.costume_set or CostumeSet.RED.value,
+        shirt_colour=h.shirt_colour if "shirt" in keys else NONE_SIZE,
+        pant_colour=h.pant_colour if "pants" in keys else NONE_SIZE,
         shirt_size=h.shirt_size if "shirt" in keys else None,
         pant_size=h.pant_size if "pants" in keys else None,
-        waist=1 if "waist" in keys else 0,
-        wrist=1 if "wrist" in keys else 0,
-        head=1 if "head" in keys else 0,
+        waist=h.waist if "waist" in keys else NONE_SIZE,
+        wrist=h.wrist if "wrist" in keys else NONE_SIZE,
+        head=h.head if "head" in keys else NONE_SIZE,
         remarks=f"Transferred from {h.name}",
     )
     return append_issues([entry])

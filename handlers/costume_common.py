@@ -14,10 +14,17 @@ import asyncio
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-from services.costume_sheets import Size, pant_size_label
+from services.costume_sheets import (Size, pant_size_label, item_colour,
+                                     NONE_SIZE)
 
 _PAGE = 16
 _ROSTER_PAGE = 20        # member lists page like Take Attendance does
+_ISSUE_PAGE = 10         # the Issue lists carry a line of text each, so
+                         # they page shorter than a plain button grid
+_DIVIDER_MIN = 10        # below this many people, dividers cost more rows
+                         # than they save: on a six-name list you are
+                         # looking for ONE known name, and three headings
+                         # just push the names further apart
 _SIZE_OPTS = list(Size)          # shared by the size editor and the issue config
 
 
@@ -67,8 +74,10 @@ def _compact_size(label: str) -> str:
     return "-".join(part.strip() for part in label.split("-")) if "-" in label else label
 
 
-_SECTION_EMOJI = (("red", "🔴"), ("white", "⚪"), ("pants", "👖"),
-                  ("old", "👖"), ("new", "✨"))
+# Sections are items now ("SHIRT", "WAIST WRAP"), so the section and item
+# tables became the same lookup.
+_SECTION_EMOJI = (("shirt", "👕"), ("pants", "👖"), ("waist", "🧣"),
+                  ("wrist", "🤲"), ("head", "🎀"))
 
 
 _ITEM_EMOJI = (("shirt", "👕"), ("pants", "👖"), ("waist", "🧣"),
@@ -100,9 +109,59 @@ def _picked(label: str, selected: bool) -> str:
 
 
 def _set_icon(name: str) -> str:
-    """Icon for a costume set. Sets come from the sheet, so an unknown one must
-    still render — never borrow another category's icon."""
-    return {"Red": "🔴", "White": "⚪", "Old": "👖", "New": "✨"}.get(str(name), "📦")
+    """Dot for a colour. Colours come from the sheet, so an unknown one must
+    still render — never borrow another colour's dot."""
+    return {"Red": "🔴", "White": "⚪", "Black": "⚫", "Yellow": "🟡",
+            "Blue": "🔵", "Green": "🟢"}.get(str(name).strip(), "▪️")
+
+
+def _tag_group(tag: str) -> str:
+    """Category of a tag: `SU3` -> `SU`, `JEG` -> `JEG`, `` -> ``.
+
+    The year is kept in the bracket beside a name but dropped from the divider,
+    so Year 3 and Year 4 seniors sit under one heading instead of two.
+    """
+    return (tag or "").rstrip("0123456789")
+
+
+def divider_row(group: str, noop: str) -> list:
+    """The `─── JU ───` separator Take Attendance uses, so the two rosters read
+    the same way. Inert: it is a heading drawn with a button."""
+    from telegram import InlineKeyboardButton
+    return [InlineKeyboardButton(f"─── {group or '—'} ───", callback_data=noop)]
+
+
+def tagged_rows(people, label_for, callback_for, noop: str, per_row: int = 2,
+                total: int | None = None):
+    """Lay out `(name, tag)` pairs the way Take Attendance lays out its roster.
+
+    Two to a row, with a `─── SU ───` divider when the category changes — but
+    only once the list is long enough to be worth signposting (`total`, which
+    defaults to the number of people passed, is the WHOLE list rather than this
+    page, so a long roster keeps its dividers on every page).
+
+    Shared so the Issue roster, the holders list and both recipient pickers
+    cannot drift into three slightly different looks.
+    """
+    from telegram import InlineKeyboardButton
+    show_dividers = (len(people) if total is None else total) >= _DIVIDER_MIN
+    rows, buf, prev = [], [], None
+    for name, tag in people:
+        group = _tag_group(tag)
+        if show_dividers and prev is not None and group != prev:
+            if buf:
+                rows.append(buf)
+                buf = []
+            rows.append(divider_row(group, noop))
+        prev = group
+        buf.append(InlineKeyboardButton(label_for(name, tag),
+                                        callback_data=callback_for(name)))
+        if len(buf) == per_row:
+            rows.append(buf)
+            buf = []
+    if buf:
+        rows.append(buf)
+    return rows
 
 
 def _held_by_name(holdings) -> dict[str, list]:
@@ -119,12 +178,12 @@ def _holding_label(h) -> str:
     For admin lists and buttons, where several holdings appear at once and the
     shorthand is read by people who use this screen daily.
     """
-    bits = [h.costume_set or "?"]
+    bits = []
     if h.shirt_size:
-        bits.append(f"S{h.shirt_size.value}")
+        bits.append(f"{h.shirt_colour} S{h.shirt_size.value}")
     if h.pant_size:
-        bits.append(f"P{pant_size_label(h.pant_size)}")
-    return " · ".join(bits)
+        bits.append(f"{h.pant_colour} P{pant_size_label(h.pant_size)}")
+    return " · ".join(bits) or "accessories only"
 
 
 def _holding_label_full(h) -> str:
@@ -133,9 +192,13 @@ def _holding_label_full(h) -> str:
     For the member-facing screen, where someone sees this once or twice a term
     and `SM`/`PM` reads like nothing at all.
     """
-    bits = [f"{h.costume_set} costume set" if h.costume_set else "Costume set"]
-    bits.append(f"Shirt {h.shirt_size.value}" if h.shirt_size else "no shirt")
-    bits.append(f"Pants {pant_size_label(h.pant_size)}" if h.pant_size else "no pants")
+    bits = [f"{h.shirt_colour} shirt {h.shirt_size.value}" if h.shirt_size else "no shirt",
+            f"{h.pant_colour} pants {pant_size_label(h.pant_size)}"
+            if h.pant_size else "no pants"]
+    for label, colour in (("waist wrap", h.waist), ("wrist wrap", h.wrist),
+                          ("head band", h.head)):
+        if colour and colour != NONE_SIZE:
+            bits.append(f"{colour.lower()} {label}")
     return " · ".join(bits)
 
 
@@ -146,11 +209,13 @@ def _item_button_label(h, key: str, fallback: str) -> str:
     header would repeat sizes for pieces the person is not even choosing, and
     the tap target is where you actually need to know which shirt you mean.
     """
+    colour = item_colour(h, key)
+    tag = "" if colour in ("", NONE_SIZE) else f"{colour} "
     if key == "shirt" and h.shirt_size:
-        return f"Shirt {h.shirt_size.value}"
+        return f"{tag}Shirt {h.shirt_size.value}"
     if key == "pants" and h.pant_size:
-        return f"Pants {pant_size_label(h.pant_size)}"
-    return fallback
+        return f"{tag}Pants {pant_size_label(h.pant_size)}"
+    return f"{tag}{fallback}"
 
 
 def _stage(ud: dict) -> dict:

@@ -30,11 +30,13 @@ from telegram.ext import ContextTypes
 from config import sg_tz
 
 from utils.ui import paginate, pagination_row
-from services.costume_sheets import (get_open_holdings, get_costume_sizes,
+from services.google_sheets import get_member_roster
+from services.costume_sheets import (get_open_holdings,
                                      ITEM_FIELDS, items_out, describe_items,
                                      release_items, issue_items_to)
 from handlers.costume_common import (_read, _edit, _holding_label_full, _picked,
-                                     _item_button_label, _PAGE)
+                                     _holding_label, _item_button_label,
+                                     tagged_rows, _ROSTER_PAGE)
 
 _CELL = "MYCOS|NOP"
 
@@ -76,7 +78,7 @@ def _home_text(nick: str, holdings) -> tuple[str, InlineKeyboardMarkup]:
         lines.append(f"• {_holding_label_full(h)}")
         lines.append(f"  _issued for {h.event}_")
         rows.append([InlineKeyboardButton(
-            f"🔁 Pass on my {h.costume_set or ''} set".replace("  ", " "),
+            f"🔁 Pass on my {_holding_label(h)}",
             callback_data=f"MYCOS|T|{h.row}")])
     lines += ["", "_Passed it to someone else? Record it here so the club knows "
                   "who has it._", "",
@@ -118,12 +120,12 @@ async def _render_items(query, context, row: str, holding) -> None:
     chosen = _picked_items(context.user_data, row, holding)
     available = items_out(holding)
     lines = ["🔁 *Pass on*",
-             f"_{holding.costume_set or 'Costume'} set · issued for {holding.event}_", "",
+             f"_issued for {holding.event}_", "",
              "What are you passing on?"]
     btns = [InlineKeyboardButton(
         _picked(_item_button_label(holding, key, label), key in chosen),
         callback_data=f"MYCOS|I|{row}|{key}")
-        for key, _hdr, label in ITEM_FIELDS if key in available]
+        for key, _cc, _sc, label, _ca, _sa in ITEM_FIELDS if key in available]
     rows = [btns[i:i + 2] for i in range(0, len(btns), 2)]
     if chosen:
         rows.append([InlineKeyboardButton("➡️ Who has it?",
@@ -139,14 +141,21 @@ async def _render_items(query, context, row: str, holding) -> None:
 
 async def _render_recipients(query, row: str, holding, page: int,
                              what: str = "") -> None:
-    ok, sizes = await _read(get_costume_sizes)
-    names = sorted(n for n in (sizes or {}) if n.strip().lower() != holding.name.strip().lower())
-    chunk, page, pages = paginate(names, page, _PAGE)
+    ok, roster = await _read(get_member_roster, True)
+    if not ok:
+        roster = []
+    people = [(n, tag) for n, tag in roster
+              if n.strip().lower() != holding.name.strip().lower()]
+    chunk, page, pages = paginate(people, page, _ROSTER_PAGE)
 
-    lines = ["🔁 *Pass on*", "", f"*{what or _holding_label_full(holding)}*", "",
+    lines = ["\U0001f501 *Pass on*", "", f"*{what or _holding_label_full(holding)}*", "",
              f"_issued for {holding.event}_", "", "Who has it now?"]
-    btns = [InlineKeyboardButton(n, callback_data=f"MYCOS|TO|{row}|{n}") for n in chunk]
-    rows = [btns[i:i + 2] for i in range(0, len(btns), 2)]
+    # Same ordering, tags and dividers the admin screens use, so a member sees
+    # the club list the way the committee does.
+    rows = tagged_rows(chunk,
+                       lambda n, tg: f"({tg}) {n}" if tg else n,
+                       lambda n: f"MYCOS|TO|{row}|{n}",
+                       _CELL)
     nav = pagination_row(page, pages, lambda p: f"MYCOS|TP|{row}|{p}", _CELL)
     if nav:
         rows.append(nav)

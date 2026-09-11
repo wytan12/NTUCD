@@ -167,31 +167,66 @@ the capitalisation in config is load-bearing.** They started life in a separate
 every row/column position is detected, moving them cost only the config keys.
 
 - **`COSTUME OVERVIEW`** — all inventory *state*, two blocks side by side:
-  - `A:F` **Main Inventory** — `Item | Set | Item Color | Size | Quantity | Notes`,
-    one row per `(Item, Set, Size)`, data rows **3–60**. Hand-maintained;
+  - `A:F` **Main Inventory** — `Item | Colour | Size | Quantity | Pairs with | Notes`,
+    one row per `(Item, Colour, Size)` — **a thing is identified by its item and
+    its colour, never by a "set"**. `Pairs with` names the shirt colour an
+    accessory belongs with; it drives the grey-out on the issue screen and gates
+    no write. Data rows **3–60**. Hand-maintained;
     ✏️ Update Stock is the only bot write in this whole spreadsheet. The range is
     bounded at row 60 (not at today's last row) so rows can be appended without
     falling outside every `SUMIFS`. Free-text bookkeeping (`Last Updated`,
     `Signed Off`, the update note) sits at **A62+**, deliberately below that
     bound and below a blank row — `get_stock_rows` stops at the first blank
     `Item`, so anything under it is ignored rather than served as stock.
-  - `H:P` **RUNNING INVENTORY** — matrix of `Item | Color | Metric | 5 sizes | Total`
-    in three sections (Red Set / White Set / Pants — Old and New merged), each
-    item expanded into **Total / Out / On hand**. Every cell is a formula (Total
-    is a `SUMIFS` over Main Inventory; **`Out` is a `COUNTIFS` over the ledger**,
-    because one open row is one costume out) — **read-only for the bot**, same rule as
-    ATTENDANCE col B. Replaced the old hand-rolled `Summary` block.
+  - `H:L` **RUNNING INVENTORY** — **one group per item** (SHIRT / PANTS / WAIST
+    WRAP / WRIST WRAP / HEAD BAND): a banner naming it, then
+    `Colour | Size | Total | Out | On hand` with one row per colour and size,
+    the colour written only on its first row. **Metrics are columns, not three
+    stacked rows** — that way an item with no sizes is one line rather than
+    three rows trailing five empty size columns, which is what the matrix
+    layout was rejected for. Every cell is a formula (Total is a `SUMIFS` over
+    Main Inventory; **`Out` is a `COUNTIFS` over the ledger** on that item's own
+    colour column, plus its size column where it has one — one open row is one
+    thing out, accessories included). `On hand` is conditionally coloured
+    🔴 none / 🟡 under a third / 🟢 fine, the same thresholds as the bot's stock
+    dot, so the sheet and the bot cannot disagree about "running low".
+
+    **The block is generated, not hand-written.** `rebuild_running_block()`
+    regenerates it from Main Inventory and the ledger header:
+    🔄 Rebuild running table on the Costume Overview menu. Add a colour, a size
+    or a whole item to Main Inventory, press it, and the groups, formulas and
+    colour coding follow — verified by adding a Blue shirt run and getting a
+    Blue group plus a Blue option on the issue screen with no code change. A new
+    ITEM also needs a ledger column named after it (`Sash Colour`/`Sash Size`,
+    or a plain `Sash` when it has no sizes); items with no matching column are
+    skipped and named in the result rather than written with a broken formula.
+    This is the one place the bot writes into the block, and it writes
+    **formulas, never numbers** — the sheet still computes every figure.
+
+    ⚠️ **Merges eat writes silently.** Every merge OVERLAPPING the block is
+    cleared before it is rewritten, not just those starting inside it: values
+    written into a merged range land only in its top-left cell and the rest
+    shift past it, with no error. Three legacy 5-column merges on one row once
+    put WRIST WRAP *beside* WAIST WRAP instead of below it, and the bot then
+    read three sections instead of five and took another section's headers for
+    size labels.
 - **`COSTUME TRACKING`** — flat ledger, header row 1, one row per issue:
-  `Performances | Name | Costume Set | Shirt Size | Pant Size | Waist Wrap |
-  Wrist Wrap | Head Band | Status | Issued date | Returned date |
-  Transferred date | Transferred To | Remarks`. A row is **open** (= counted in
+  `Performances | Name | Shirt Colour | Shirt Size | Pant Colour | Pant Size |
+  Waist Wrap | Wrist Wrap | Head Band | Status | Issued date | Returned date |
+  Transferred date | Transferred To | Remarks`. **Every item carries its own
+  colour** — the wraps hold a colour string, never `1`/`0` — because a red shirt
+  is worn with a yellow waist wrap and a black wrist wrap; one "set" column
+  could not name all three. A row is **open** (= counted in
   `Out`) while Returned date and Transferred date are both blank.
   **One row = one costume out**: one shirt size, one pant size. There is no
   quantity column — a second shirt, or a shirt of a different size, is a second
   row. A comma list (`S,XS`, `R,W`) would break every exact-match formula.
-  A size of `-` means *that item was not issued* — a pants-only or shirt-only
-  loan is normal, and each item's `Out` filters on its own column, so `-`
-  simply stops that item counting.
+  **`-` means *that item was not issued*, in every item column** — a pants-only
+  or shirt-only loan is normal, and each item's `Out` filters on its own column,
+  so `-` simply stops that item counting. That uniformity is what lets
+  `items_out` / `describe_items` / `release_items` treat all five items with one
+  rule. A shirt or pants counts as out only with **both** a colour and a size,
+  since its `Out` filters on both columns.
 - **`COSTUME SIZE`** — `Name | Red Shirt Size | White Shirt Size | Pant Size`
   defaults, one row per member. **Issuing writes back into it**
   (`record_sizes_from_issues`): handing someone an M shirt *is* the measurement,
@@ -216,12 +251,12 @@ Notes that bite:
   value come from the White Shirt column. No value on record shows as `-`,
   never as a defaulted `M`.
 - **Two of the four categories are closed.** `Size` and `LedgerStatus` are
-  fixed, so they validate strictly. `CostumeSet` and `Item` are **open** — how
-  many sets exist is a purchasing decision, and a new set may bring a garment
+  fixed, so they validate strictly. `Colour` and `Item` are **open** — which
+  colours exist is a purchasing decision, and a new costume may bring a garment
   nobody coded for. Those two travel as the sheet's own **strings**; the enums
-  remain only as named constants for defaults, and the UI's option list comes
-  from `list_costume_sets()`. Validating against them would let a newly bought
-  set be stocked but never issued.
+  remain only as named constants for defaults, and every option list comes from
+  `list_items()` / `list_colours(item)` / `sizes_for(item)`. Validating against
+  them would let a newly bought colour be stocked but never issued.
 - **The `Item` column is a key, not a label.** `adjust_stock` finds its row by
   `(Item, Set, Size)` and every `SUMIFS` filters on it. Putting display text in
   it breaks lookups — `Wrist Wrap (pairs)` once made wrist-wrap stock
@@ -264,13 +299,14 @@ Notes that bite:
   render — before that, one admin adjusting sizes could exhaust Google's
   60-reads-per-minute quota on its own.
 
-> **Pending redesign — item-first stock.** Recording wants to be item-first
-> (a yellow waist wrap is one thing you own) while issuing wants to stay
-> set-first. Today's `(Item, Set, Size)` rows force both, so two sets sharing one
-> waist wrap can't be expressed without duplicating the row. The agreed direction
-> is `Item | Variant | Size | Qty` stock plus a separate `Set | Item | Variant`
-> recipe block, so two sets point at one stock row. Not started. An
-> `Accessory Set` ledger column was tried as a patch and has been removed.
+> **Item-first stock landed 10 Sep 2026.** Recording is now item-first (a yellow
+> waist wrap is one thing the club owns) while issuing stays per-item on one
+> screen. `Set` conflated a garment's variant with a bundle of garments, which
+> broke as soon as they disagreed — the White costume's wrist wrap is
+> "Red & White mix", the Red one's waist wrap is Yellow, and pants belong to no
+> set at all. Two sets sharing one wrap is now just two `Pairs with` values
+> pointing at one stock row. See
+> `docs/superpowers/specs/2026-09-10-costume-item-colour-identity-design.md`.
 
 ### `OTHERS` tab
 `THREAD ID | EVENT NAME` — one row per OTHERS (bonding/misc) topic.
@@ -867,14 +903,11 @@ Each line = **one date**, comma-separated from its time(s):
   `user_already_in_timeline`, `mark_user_left_in_sheet`, `get_next_monday_8pm`,
   `_date_label_from_display`, `utils.decorators.is_admin`, and
   `handle_modify_date_selection` (a stub that only answers "no longer available").
-- **Unwired Costume Tracker functions**: `add_costume_set`, `remove_costume_set`,
-  `set_accessories`, `list_accessory_owners`, plus the `accessory_set` field on
-  `Holding` / `IssueEntry` in `services/costume_sheets.py` (`close_rows` is still
-  used, by the issue-swap path). The ➕ New Costume Set
-  wizard that drove them was removed pending the item-first redesign, so nothing
-  calls them. Harmless as they stand — `append_issues` skips the `accessory_set`
-  write when the column is absent and `get_open_holdings` falls back to
-  `Costume Set` — but delete or rewire them when that redesign lands.
+- **Costume Tracker set-era functions are gone.** `add_costume_set`,
+  `remove_costume_set`, `set_accessories`, `list_accessory_owners`,
+  `list_costume_sets` and the `accessory_set` field were deleted with the
+  Item + Colour change — they encoded the bundle-shaped model. `close_rows` is
+  still used, by the issue-swap path.
 - **`config.py` is currently a LOCAL DEV copy** — `BOT_TOKEN` and
   `GOOGLE_CREDENTIALS_JSON` are hardcoded instead of read from env vars, and
   `SHEET_NAME` / `CHAT_ID` / `WELCOME_TEA_GROUP_CHAT_ID` point at the **debug**

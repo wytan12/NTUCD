@@ -14,20 +14,24 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from utils.ui import paginate, pagination_row
 from services.google_sheets import get_member_roster
-from services.costume_sheets import (CostumeSet, Size, LedgerStatus,
+from services.costume_sheets import (Size, LedgerStatus, get_stock_rows,
+                                     outstanding_by_performance,
                                      IssueEntry, Closure, get_running_inventory,
                                      get_open_holdings, get_costume_sizes,
                                      append_issues, close_rows,
-                                     pant_size_label, list_costume_sets, NONE_SIZE,
+                                     pant_size_label, NONE_SIZE,
                                      set_row_performance, ITEM_FIELDS, items_out,
                                      record_sizes_from_issues,
                                      describe_items, release_items, issue_items_to,
                                      shirt_size_for)
 from handlers.costume_common import (_read, _edit, _fail, _set_icon, _holding_label,
+                                     _compact_size,
                                      _holding_label_full, _item_button_label,
                                      _picked,
                                      _held_by_name, _stage, _stage_for, _clear_stage,
-                                     _stage_key, _PAGE, _ROSTER_PAGE, _SIZE_OPTS)
+                                     _stage_key, _tag_group, divider_row,
+                                     tagged_rows, _DIVIDER_MIN,
+                                     _PAGE, _ROSTER_PAGE, _ISSUE_PAGE, _SIZE_OPTS)
 
 
 _ACT_LABEL = {"issue": "📤 Issue", "return": "↩️ Return", "transfer": "🔁 Transfer"}
@@ -50,11 +54,9 @@ async def _render_track(query) -> None:
         for item in sec.items:
             if not item.sized:                    # headline items only: shirts + pants
                 continue
-            # Section name qualifies the item ("Red" + "Shirt"), but once Old/New
-            # pants merged the section IS the item — so drop the qualifier rather
-            # than printing "Pants Pants".
-            label = sec.title.replace("COSTUME SET", "").strip().title()
-            name = item.name if label.lower() == item.name.lower() else f"{label} {item.name}"
+            # The COLOUR is what tells two rows of the same item apart now —
+            # without it this printed "Shirt" twice and read like a duplicate.
+            name = f"{item.color} {item.name}".strip()
             out = f"  ·  {item.out_all} out" if item.out_all else ""
             lines.append(f"• {name} — *{item.on_hand_all}* left{out}")
     lines += ["", f"👤 Holding now: *{len(holdings)}*", "", "What are you doing?"]
@@ -63,28 +65,101 @@ async def _render_track(query) -> None:
         [InlineKeyboardButton("📤 Issue", callback_data="LOGI|ACT|issue")],
         [InlineKeyboardButton("↩️ Return", callback_data="LOGI|ACT|return")],
         [InlineKeyboardButton("🔁 Transfer", callback_data="LOGI|ACT|transfer")],
+        [InlineKeyboardButton("📋 Outstanding", callback_data="LOGI|OUT")],
         [InlineKeyboardButton("🔙 Back", callback_data="LOGI|HOME")],
     ])
     await _edit(query, "\n".join(lines), kb)
 
 
-async def _render_pick_perf(query) -> None:
+async def _render_outstanding_list(query) -> None:
+    """Every performance that still has costumes out, worst first."""
+    ok, perfs = await _read(outstanding_by_performance)
+    if not ok:
+        return await _fail(query, "the ledger", perfs, back="LOGI|TRACK")
+    live = [p for p in perfs if p.rows_out]
+
+    lines = ["\U0001f4cb *Outstanding*", ""]
+    if not live:
+        lines.append("\U0001f389 _Nothing is out. Every costume issued has been "
+                     "returned or handed on._")
+    else:
+        total = sum(p.rows_out for p in live)
+        lines.append(f"*{total}* costume(s) still out across "
+                     f"*{len(live)}* performance(s).")
+    rows = [[InlineKeyboardButton(
+        f"{p.performance} \u2014 {p.people_out} still holding",
+        callback_data=f"LOGI|OUTP|{p.performance}|0")] for p in live]
+    done = [p for p in perfs if not p.rows_out]
+    if done:
+        lines += ["", "_All returned: " + ", ".join(p.performance for p in done) + "_"]
+    rows.append([InlineKeyboardButton("\U0001f519 Back", callback_data="LOGI|TRACK")])
+    await _edit(query, "\n".join(lines), InlineKeyboardMarkup(rows))
+
+
+async def _render_outstanding(query, perf: str, page: int) -> None:
+    """Who still has not returned for ONE performance, and what they hold."""
+    ok, holdings = await _read(get_open_holdings)
+    if not ok:
+        return await _fail(query, "the holders list", holdings, back="LOGI|OUT")
+    mine = [h for h in holdings if (h.event or "").strip() == perf.strip()]
+    ok2, perfs = await _read(outstanding_by_performance)
+    stat = next((p for p in (perfs if ok2 else []) if p.performance == perf), None)
+
+    if not mine:
+        return await _edit(query,
+                           f"\U0001f4cb *Outstanding \u2014 {perf}*\n\n"
+                           f"\U0001f389 _Everything issued for this performance is "
+                           f"back._",
+                           InlineKeyboardMarkup([[InlineKeyboardButton(
+                               "\U0001f519 Back", callback_data="LOGI|OUT")]]))
+
+    by_name: dict[str, list] = {}
+    for h in mine:
+        by_name.setdefault(h.name, []).append(h)
+    names = sorted(by_name)
+    chunk, page, pages = paginate(names, page, _PAGE)
+
+    head = f"\U0001f4cb *Outstanding \u2014 {perf}*"
+    if stat:
+        head += (f"\n_{stat.people_out} of "
+                 f"{len({h.name for h in mine}) + (stat.rows_issued - stat.rows_out)} "
+                 f"issued still holding \u00b7 {stat.rows_out} costume(s) out_")
+    lines = [head, ""]
+    for name in chunk:
+        for h in by_name[name]:
+            lines.append(f"\u23f3 {name} \u2014 {_holding_label_full(h)}")
+
+    rows = []
+    nav = pagination_row(page, pages, lambda p: f"LOGI|OUTP|{perf}|{p}", "LOGI|NOP")
+    if nav:
+        rows.append(nav)
+    rows.append([InlineKeyboardButton("\u21a9\ufe0f Return", callback_data="LOGI|ACT|return"),
+                 InlineKeyboardButton("\U0001f501 Transfer",
+                                      callback_data="LOGI|ACT|transfer")])
+    rows.append([InlineKeyboardButton("\U0001f519 Back", callback_data="LOGI|OUT")])
+    await _edit(query, "\n".join(lines), InlineKeyboardMarkup(rows))
+
+
+async def _render_pick_perf(query, page: int = 0) -> None:
     ok, events = await _read(_run_sync_events)
     if not ok:
         return await _fail(query, "the performance list", events, back="LOGI|TRACK")
     ok2, holdings = await _read(get_open_holdings)
     held_names = {h.name for h in holdings} if ok2 else set()
 
-    rows = []
-    for tid, name, performers in events:
-        if not performers:
-            continue
-        held = sum(1 for n in performers if n in held_names)
-        rows.append([InlineKeyboardButton(f"📤 {name}  ·  {held}/{len(performers)} holding",
-                                          callback_data=f"LOGI|EV|{tid}")])
-    rows.append([InlineKeyboardButton("🔙 Back", callback_data="LOGI|TRACK")])
-    text = "📤 *Issue* — pick a performance:"
-    if len(rows) == 1:
+    live = [(tid, name, performers) for tid, name, performers in events if performers]
+    chunk, page, pages = paginate(live, page, _ISSUE_PAGE)
+
+    rows = [[InlineKeyboardButton(
+        f"\U0001f4e4 {name}  \u00b7  {sum(1 for n in performers if n in held_names)}"
+        f"/{len(performers)} holding",
+        callback_data=f"LOGI|EV|{tid}")] for tid, name, performers in chunk]
+    nav = pagination_row(page, pages, lambda p: f"LOGI|EVP|{p}", "LOGI|NOP")
+    if nav:
+        rows.append(nav)
+    rows.append([InlineKeyboardButton("\U0001f519 Back", callback_data="LOGI|TRACK")])
+    text = "\U0001f4e4 *Issue* \u2014 pick a performance:"
+    if not live:
         text += "\n\n_No performance has performers marked in PERF TABULATION yet._"
     await _edit(query, text, InlineKeyboardMarkup(rows))
 
@@ -119,7 +194,16 @@ def _event_by_id(events, eid: str):
     return None, []
 
 
-async def _render_pick_performer(query, context, eid: str, banner: str = "") -> None:
+async def _render_pick_performer(query, context, eid: str, banner: str = "",
+                                 page: int = 0) -> None:
+    """The show's roster, ten a page.
+
+    Each performer takes a line of text as well as a button — what they already
+    hold, or what is staged for them — so this pages shorter than a plain grid
+    of names. Anyone staged is listed above the page, whichever page they are
+    on: that list is what you check before submitting, and it is useless if it
+    is scattered across pages.
+    """
     ok, events = await _read(_run_sync_events)
     if not ok:
         return await _fail(query, "the performance list", events, back="LOGI|TRACK")
@@ -135,36 +219,102 @@ async def _render_pick_performer(query, context, eid: str, banner: str = "") -> 
     for it in staged.values():
         staged_by_nick.setdefault(it["nick"], []).append(it)
 
+    # Ordered and tagged like Take Attendance, so one member list behaves the
+    # same wherever it appears: seniors before juniors, then year category,
+    # then name. Only the performers marked for THIS show, in that order.
+    ok3, roster = await _read(get_member_roster, True)
+    order = {n.strip().lower(): i for i, (n, _tag) in enumerate(roster or [])}
+    tags = {n.strip().lower(): tag for n, tag in (roster or [])}
+    performers = sorted(performers,
+                        key=lambda n: (order.get(n.strip().lower(), 10 ** 6), n.lower()))
+
+    chunk, page, pages = paginate(performers, page, _ISSUE_PAGE)
     lines = ([banner, ""] if banner else []) + [
-        f"📤 *Issue — {name}*",
+        f"\U0001f4e4 *Issue \u2014 {name}*",
         f"_{sum(1 for n in performers if n in held)}/{len(performers)} already holding "
-        f"· {len(staged)} staged_", ""]
-    for nick in performers:
-        mine = staged_by_nick.get(nick, [])
-        if mine:
+        f"\u00b7 {len(staged)} staged_", ""]
+
+    if staged_by_nick:
+        for nick, mine in staged_by_nick.items():
             for it in mine:
-                tag = "swap→" if it.get("swap_row") else "→"
-                lines.append(f"📝 {nick}  {tag} {it['set']} S{it['shirt']}/P{it['pants']}")
-        elif nick in held:
+                tag = "swap\u2192" if it.get("swap_row") else "\u2192"
+                bits = [b for b in (
+                    f"{it['shirt_colour']} shirt {it['shirt']}" if it.get("shirt") else "",
+                    f"{it['pant_colour']} pants "
+                    f"{pant_size_label(Size(it['pants']))}" if it.get("pants") else "",
+                ) if b]
+                lines.append(f"\U0001f4dd {nick}  {tag} " +
+                             (", ".join(bits) or "accessories only"))
+        lines.append("")
+
+    def labelled(nick):
+        tag = tags.get(nick.strip().lower(), "")
+        return f"({tag}) {nick}" if tag else nick
+
+    for nick in chunk:
+        if nick in staged_by_nick:
+            continue                     # already spelled out above
+        if nick in held:
             sets = "; ".join(_holding_label_full(h) for h in held[nick])
             plural = "sets" if len(held[nick]) > 1 else "set"
-            lines.append(f"✅ {nick} — holding {len(held[nick])} {plural}: {sets}")
+            lines.append(f"\u2705 {labelled(nick)} \u2014 holding {len(held[nick])} "
+                         f"{plural}: {sets}")
         else:
-            lines.append(f"⏳ {nick} — not issued")
+            lines.append(f"\u23f3 {labelled(nick)} \u2014 not issued")
 
-    pbtns = [InlineKeyboardButton(
-        ("📝 " if n in staged_by_nick else "🔁 " if n in held else "") + n,
-        callback_data=f"LOGI|PF|{eid}|{n}") for n in performers]
-    rows = [pbtns[i:i + 2] for i in range(0, len(pbtns), 2)]
+    def mark(nick):
+        return ("\U0001f4dd " if nick in staged_by_nick
+                else "\U0001f501 " if nick in held else "")
+
+    rows = tagged_rows(
+        [(n, tags.get(n.strip().lower(), "")) for n in chunk],
+        lambda n, tg: mark(n) + labelled(n),
+        lambda n: f"LOGI|PF|{eid}|{n}",
+        "LOGI|NOP",
+        total=len(performers))
+
+    nav = pagination_row(page, pages, lambda p: f"LOGI|PFP|{eid}|{p}", "LOGI|NOP")
+    if nav:
+        rows.append(nav)
     if staged:
-        rows.append([InlineKeyboardButton(f"📋 Review & Submit ({len(staged)})",
+        rows.append([InlineKeyboardButton(f"\U0001f4cb Review & Submit ({len(staged)})",
                                           callback_data="LOGI|REV")])
-    rows.append([InlineKeyboardButton("🔙 Back", callback_data="LOGI|ACT|issue")])
+    rows.append([InlineKeyboardButton("\U0001f519 Back", callback_data="LOGI|ACT|issue")])
     await _edit(query, "\n".join(lines), InlineKeyboardMarkup(rows))
 
 
+def _stock_options(rows) -> dict:
+    """Everything the config screen needs about stock, from one read.
+
+    Sizes are keyed by `item|colour`, not by item: a colour the club bought in
+    three sizes should not offer the two it never had. Colours, sizes and
+    pairings all come from Main Inventory, so a newly bought colour appears in
+    the pickers with no code change — and re-renders work from this snapshot
+    instead of hitting Google on every tap.
+    """
+    colours, sizes, pairs = {}, {}, {}
+    for item, colour, size, _qty, pair in rows:
+        colours.setdefault(item, [])
+        if colour and colour not in colours[item]:
+            colours[item].append(colour)
+        if size and size != NONE_SIZE:
+            key = f"{item}|{colour}"
+            sizes.setdefault(key, [])
+            if size not in sizes[key]:
+                sizes[key].append(size)
+        if pair:
+            pairs[f"{item}|{colour}"] = pair
+    return {"colours": colours, "sizes": sizes, "pairs": pairs}
+
+
+def _size_value(label: str) -> str:
+    """`'M - 170'` -> `'M'`. The ledger stores the full label for pants; the
+    draft carries the bare size so one set of Size values covers both items."""
+    return label.split("-")[0].strip()
+
+
 async def _draft_for(ud: dict, eid: str, nick: str, event_name: str, held,
-                     swap_row=None) -> dict:
+                     swap_row=None, opts: dict | None = None) -> dict:
     """Working draft for the issue/swap config screen.
 
     Keyed on (event, performer, row being swapped) so switching between "swap
@@ -181,35 +331,44 @@ async def _draft_for(ud: dict, eid: str, nick: str, event_name: str, held,
                      existing.get("swap_row")) == (eid, nick, swap_row):
         return existing
 
+    opts = opts or ud.get("logi_opts") or {"colours": {}, "sizes": {}, "pairs": {}}
+    first = lambda item: (opts["colours"].get(item) or [NONE_SIZE])[0]   # noqa: E731
+
     staged = _stage(ud)["items"].get(_stage_key(nick, swap_row))
     if staged:
         base = dict(staged)
     elif held:
-        base = {"set": held.costume_set or CostumeSet.RED.value,
-                "shirt": (held.shirt_size or Size.M).value,
-                "pants": (held.pant_size or Size.M).value,
+        base = {"shirt_colour": held.shirt_colour,
+                "shirt": held.shirt_size.value if held.shirt_size else "",
+                "pant_colour": held.pant_colour,
+                "pants": held.pant_size.value if held.pant_size else "",
                 "waist": held.waist, "wrist": held.wrist, "head": held.head}
     else:
         ok, sizes = await _read(get_costume_sizes)
         entry = (sizes or {}).get(nick) if ok else None
-        default_set = CostumeSet.RED.value
+        shirt_colour = first("Shirt")
         # No recorded size stays BLANK rather than defaulting to M: a silent M
         # is indistinguishable from a real M once it is in the ledger, and the
         # size drives which column counts as issued.
-        seeded_shirt = shirt_size_for(entry, default_set)
+        seeded_shirt = shirt_size_for(entry, shirt_colour)
         seeded_pants = (entry or {}).get("pants")
-        base = {"set": default_set,
+        # Seed a colour only alongside a size. A sized item needs both to count
+        # as issued, so a lone colour would tick a row that sends out nothing.
+        base = {"shirt_colour": shirt_colour if seeded_shirt else NONE_SIZE,
                 "shirt": seeded_shirt.value if seeded_shirt else "",
+                "pant_colour": first("Pants") if seeded_pants else NONE_SIZE,
                 "pants": seeded_pants.value if seeded_pants else "",
-                "waist": 1, "wrist": 1, "head": 0}
-        # Cache every set's shirt size on the draft, so switching set re-seeds
-        # the size without another sheet read (re-renders are read-free).
-        by_set = {st: sz.value for st, sz in ((entry or {}).get("shirt") or {}).items() if sz}
-        base["shirt_by_set"] = by_set
+                # Accessories start unset. Which wrap goes with which shirt is
+                # exactly the "set" knowledge this model drops, so the bot greys
+                # out what does not pair rather than guessing on your behalf.
+                "waist": NONE_SIZE, "wrist": NONE_SIZE, "head": NONE_SIZE}
+        by_colour = {st: sz.value for st, sz in ((entry or {}).get("shirt") or {}).items() if sz}
+        base["shirt_by_colour"] = by_colour
 
     for key in ("nick", "event", "swap_row", "swap_label", "swap_event"):
         base.pop(key, None)
-    base.setdefault("shirt_by_set", {})
+    base.setdefault("shirt_by_colour", {})
+    base.setdefault("all_colours", False)
     # Snapshot what is being swapped, so re-renders never need the Holding object
     # (and therefore never need another sheet read) to describe it.
     d = {"eid": eid, "nick": nick, "event": event_name, "swap_row": swap_row,
@@ -251,16 +410,23 @@ async def _render_holder_choice(query, eid: str, nick: str, holdings,
 
 
 async def _render_config(query, context, eid: str, nick: str, swap_row=None) -> None:
+    """Pick what goes out, item by item: shirt, pants, then each accessory.
+
+    Every item carries its own colour, so the screen asks for a colour and (for
+    shirts and pants) a size. Accessory colours that belong with a DIFFERENT
+    shirt are shown struck through and inert — the pairing is a guard rail, and
+    "Show all colours" lifts it for a deliberate mix.
+    """
     ud = context.user_data
     swap_row = int(swap_row) if str(swap_row or "").isdigit() else None
     existing = ud.get("logi_draft")
     fresh = not (existing and (existing.get("eid"), existing.get("nick"),
                                existing.get("swap_row")) == (eid, nick, swap_row))
 
-    # Only the FIRST render of a draft needs the sheets. Every size/set/accessory
-    # tap re-renders this screen, and PERF TABULATION is read uncached — fetching
-    # here unconditionally meant one admin adjusting sizes could exhaust Google's
-    # 60-reads-per-minute quota. Everything a re-render needs is already in the draft.
+    # Only the FIRST render of a draft needs the sheets. Every tap re-renders
+    # this screen, and PERF TABULATION is read uncached — fetching here
+    # unconditionally meant one admin adjusting sizes could exhaust Google's
+    # 60-reads-per-minute quota. A re-render works entirely from the draft.
     held = None
     if fresh:
         ok, events = await _read(_run_sync_events)
@@ -271,19 +437,13 @@ async def _render_config(query, context, eid: str, nick: str, swap_row=None) -> 
             ok2, holdings = await _read(get_open_holdings)
             held = next((h for h in (holdings if ok2 else [])
                          if str(h.row) == str(swap_row)), None)
+        _ok_s, rows = await _read(get_stock_rows)
+        ud["logi_opts"] = _stock_options(rows if _ok_s else [])
     else:
         event_name = existing.get("event", "")
+    opts = ud.get("logi_opts") or {"colours": {}, "sizes": {}, "pairs": {}}
 
-    if fresh:
-        _ok_s, sets = await _read(list_costume_sets)
-        sets = sets or [CostumeSet.RED.value, CostumeSet.WHITE.value]
-        ud["logi_opts"] = {"sets": sets}
-    opts = ud.get("logi_opts") or {"sets": [CostumeSet.RED.value, CostumeSet.WHITE.value]}
-
-    d = await _draft_for(ud, eid, nick, event_name or "", held, swap_row)
-    cset = d["set"]
-
-    back = [InlineKeyboardButton("🔙 Back", callback_data=f"LOGI|EV|{eid}")]
+    d = await _draft_for(ud, eid, nick, event_name or "", held, swap_row, opts)
 
     if d["swap_row"]:
         head = (f"🔁 *Swap — {nick}*  ({d['event']})\n\n"
@@ -291,38 +451,102 @@ async def _render_config(query, context, eid: str, nick: str, swap_row=None) -> 
                 f"Confirming closes that row as returned and issues the new one._")
         add_label = "✔️ Add swap to list"
     else:
-        head = f"📤 *Issue — {nick}*  ({d['event']})\n\n_Defaults are their Costume Size._"
+        head = f"📤 *Issue — {nick}*  ({d['event']})"
         add_label = "✔️ Add to list"
 
-    # The accessory counts aren't restated here — the ✅/⬜ toggles below already
-    # show them, and repeating them made the bubble read twice as long.
-    # An unpicked size is written to the ledger as "-" — "no item of this type on
-    # this row" — so a shirt-only or pants-only issue is a normal outcome rather
-    # than an error. One row is one costume out; there is no quantity column.
-    shirt_txt = d["shirt"] or NONE_SIZE
-    pant_txt = pant_size_label(Size(d["pants"])) if d["pants"] else NONE_SIZE
-    text = (f"{head}\n\nSet: *{cset}*\n"
-            f"Shirt: *{shirt_txt}*   Pant: *{pant_txt}*")
-    if not d["shirt"] and not d["pants"]:
-        text += "\n\n⚠️ _Neither a shirt nor pants selected._"
+    def line(icon, label, colour, size=None, needs_size=False):
+        """A sized item counts as issued only with BOTH a colour and a size —
+        its `Out` formula filters on both columns, so a colour alone sends out
+        nothing. Say so plainly rather than showing "Red -"."""
+        if colour in ("", NONE_SIZE) or (needs_size and not size):
+            return f"{icon} {label}: *—*"
+        return f"{icon} {label}: *{colour}{(' ' + size) if size else ''}*"
 
-    add_row = [InlineKeyboardButton(add_label, callback_data="LOGI|ADD")]
-
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton(_picked(f"{_set_icon(o)} {o}", o == cset),
-                              callback_data=f"LOGI|DSET|{o}") for o in opts["sets"]],
-        [InlineKeyboardButton("👕", callback_data="LOGI|NOP")] +
-        [InlineKeyboardButton(_picked(o.value, o.value == d["shirt"]),
-                              callback_data=f"LOGI|DSH|{o.value}") for o in _SIZE_OPTS],
-        [InlineKeyboardButton("👖", callback_data="LOGI|NOP")] +
-        [InlineKeyboardButton(_picked(o.value, o.value == d["pants"]),
-                              callback_data=f"LOGI|DPS|{o.value}") for o in _SIZE_OPTS],
-        [InlineKeyboardButton(("✅ " if d[k] else "⬜ ") + lab,
-                              callback_data=f"LOGI|DACC|{k}") for k, lab in _ACCESSORIES],
-        add_row,
-        back,
+    pant_txt = pant_size_label(Size(d["pants"])) if d["pants"] else ""
+    text = "\n".join([
+        head, "",
+        line("👕", "Shirt", d["shirt_colour"], d["shirt"], needs_size=True),
+        line("👖", "Pants", d["pant_colour"], pant_txt, needs_size=True),
+        line("🧣", "Waist wrap", d["waist"]),
+        line("🤲", "Wrist wrap", d["wrist"]),
+        line("🎀", "Head band", d["head"]),
     ])
-    await _edit(query, text, kb)
+    if d["shirt_colour"] in ("", NONE_SIZE) and d["pant_colour"] in ("", NONE_SIZE):
+        text += f"\n\n⚠️ _Neither a shirt nor pants selected._"
+
+    rows_kb = []
+
+    def size_buttons(item, colour, picked_colour, picked_size, cb):
+        """Sizes for ONE colour, on that colour's own row.
+
+        Tapping a size picks the colour with it — on a row that already says
+        "Red shirt", tapping M can only mean a red M, and making that two taps
+        was the thing that made this screen long.
+        """
+        out = []
+        for label in opts["sizes"].get(f"{item}|{colour}", []):
+            value = _size_value(label)
+            chosen = colour == picked_colour and value == picked_size
+            out.append(InlineKeyboardButton(
+                _picked(_compact_size(label), chosen),
+                callback_data=f"{cb}|{colour}|{value}"))
+        return out
+
+    def item_rows(item, icon, colour_cb, size_cb, picked_colour, picked_size=None,
+                  accessory=False):
+        """A sized item gets one row per colour, its sizes alongside.
+
+        The colour is a LABEL on those rows, not a button: picking a size on the
+        row that says "Red shirt" already says which shirt, so a separate colour
+        tap would only be a way to get the two out of step. An accessory has no
+        sizes, so its colours ARE the choice and share a single row.
+        """
+        hidden, row = 0, []
+        for colour in opts["colours"].get(item, []):
+            pair = opts["pairs"].get(f"{item}|{colour}", "")
+            blocked = (accessory and pair and d["shirt_colour"] not in ("", NONE_SIZE)
+                       and pair.strip().lower() != d["shirt_colour"].strip().lower()
+                       and not d.get("all_colours"))
+            if blocked:
+                hidden += 1
+                row.append(InlineKeyboardButton(f"🚫 {icon} {colour}",
+                                                callback_data="LOGI|NOP"))
+                continue
+            if accessory:
+                row.append(InlineKeyboardButton(
+                    _picked(f"{icon} {colour}", colour == picked_colour),
+                    callback_data=f"{colour_cb}|{colour}"))
+            else:
+                label = InlineKeyboardButton(f"{icon} {colour}",
+                                             callback_data="LOGI|NOP")
+                rows_kb.append([label] + size_buttons(item, colour, picked_colour,
+                                                      picked_size, size_cb))
+        if row:
+            rows_kb.append(row)
+        return hidden
+
+    item_rows("Shirt", "👕", None, "LOGI|DSH",
+              d["shirt_colour"], d["shirt"])
+    item_rows("Pants", "👖", None, "LOGI|DPS",
+              d["pant_colour"], d["pants"])
+    blocked_count = (
+        item_rows("Waist Wrap", "🧣", "LOGI|DACC|waist", None,
+                  d["waist"], accessory=True)
+        + item_rows("Wrist Wrap", "🤲", "LOGI|DACC|wrist", None,
+                    d["wrist"], accessory=True)
+        + item_rows("Head Band", "🎀", "LOGI|DACC|head", None,
+                    d["head"], accessory=True))
+
+    if blocked_count or d.get("all_colours"):
+        rows_kb.append([InlineKeyboardButton(
+            "\U0001f648 Only matching colours" if d.get("all_colours")
+            else f"\U0001f441\ufe0f Show all colours ({blocked_count} hidden)",
+            callback_data="LOGI|DALL")])
+    rows_kb.append([InlineKeyboardButton(add_label, callback_data="LOGI|ADD")])
+    rows_kb.append([InlineKeyboardButton("\U0001f519 Back",
+                                         callback_data=f"LOGI|EV|{eid}")])
+
+    await _edit(query, text, InlineKeyboardMarkup(rows_kb))
 
 
 async def _render_holders(query, context, action: str, page: int = 0,
@@ -349,6 +573,7 @@ async def _render_holders(query, context, action: str, page: int = 0,
                            InlineKeyboardMarkup([[InlineKeyboardButton(
                                "🔙 Back", callback_data="LOGI|TRACK")]]))
 
+    partial = bool(ud.get("logi_partial")) and action == "return"
     verb = "returning" if action == "return" else "transferring"
     lines = ([banner, ""] if banner else []) + [
         f"{_ACT_LABEL[action]} — currently holding (*{len(holdings)}*)"]
@@ -362,31 +587,70 @@ async def _render_holders(query, context, action: str, page: int = 0,
             to = f"  ➜  *{it['to']}*" if action == "transfer" and it.get("to") else ""
             tag = "" if it.get("full", True) else "  _(partial)_"
             lines.append(f"📝 {h.name} — {what}{to}{tag}")
-    lines += ["", "Tap a person:"]
+    if action == "return":
+        lines += ["", ("_Pick-the-pieces mode is ON._" if partial
+                       else "Tap a name to return the whole costume:")]
+    else:
+        lines += ["", "Tap a person:"]
 
-    # Two people can share a first name, and one person can have two open rows,
-    # so a button that is only a name would be ambiguous. Those few get the
-    # costume spelled out and a row to themselves — paired with another button
-    # the label would be clipped mid-word.
+    # Ordered and tagged like Take Attendance. Two people can share a first
+    # name, and one person can have two open rows, so a button that is only a
+    # name would be ambiguous — those few get the costume spelled out and a row
+    # to themselves, since a long label paired with another is clipped.
+    ok3, roster = await _read(get_member_roster, True)
+    order = {n.strip().lower(): i for i, (n, _t) in enumerate(roster or [])}
+    tags = {n.strip().lower(): tg for n, tg in (roster or [])}
+    holdings = sorted(holdings, key=lambda h: (order.get(h.name.strip().lower(), 10 ** 6),
+                                               h.name.lower(), h.row))
     seen = {}
     for h in holdings:
         seen[h.name] = seen.get(h.name, 0) + 1
     chunk, page, pages = paginate(holdings, page, _PAGE)
 
-    rows, pending = [], []
+    # Same rule as everywhere else: signpost a long list, leave a short one
+    # alone. The holders list is short after a small show and long after a big
+    # one, so it needs the test rather than a fixed answer.
+    show_dividers = len(holdings) >= _DIVIDER_MIN
+    rows, buf, prev_group = [], [], None
     for h in chunk:
-        mark = "📝 " if str(h.row) in staged else ""
-        cb = f"LOGI|HSEL|{action}|{h.row}"
+        tag = tags.get(h.name.strip().lower(), "")
+        group = _tag_group(tag)
+        if show_dividers and prev_group is not None and group != prev_group:
+            if buf:
+                rows.append(buf)
+                buf = []
+            rows.append(divider_row(group, "LOGI|NOP"))
+        prev_group = group
+        mark = "\U0001f4dd " if str(h.row) in staged else ""
+        name = f"({tag}) {h.name}" if tag else h.name
+        # A per-person ✂️ button would take half of every row — Telegram splits a
+        # row evenly between its buttons and offers no width control — so the
+        # partial case is a MODE at the top instead. Names then sit two to a row,
+        # which halves the length of the list as well.
+        if action == "return":
+            cb = (f"LOGI|HSEL|return|{h.row}" if partial
+                  else f"LOGI|HALL|{h.row}")
+        else:
+            cb = f"LOGI|HSEL|{action}|{h.row}"
         if seen[h.name] > 1:
+            if buf:
+                rows.append(buf)
+                buf = []
             rows.append([InlineKeyboardButton(
-                f"{mark}{h.name} · {_holding_label_full(h)}", callback_data=cb)])
+                f"{mark}{name} \u00b7 {_holding_label_full(h)}", callback_data=cb)])
             continue
-        pending.append(InlineKeyboardButton(mark + h.name, callback_data=cb))
-        if len(pending) == 2:
-            rows.append(pending)
-            pending = []
-    if pending:
-        rows.append(pending)
+        buf.append(InlineKeyboardButton(mark + name, callback_data=cb))
+        if len(buf) == 2:
+            rows.append(buf)
+            buf = []
+    if buf:
+        rows.append(buf)
+
+    if action == "return":
+        rows.insert(0, [InlineKeyboardButton(
+            "\u2702\ufe0f Returning part of a costume \u2014 tap to switch off" if partial
+            else "\u2702\ufe0f Only part of a costume? Tap here first",
+            callback_data="LOGI|HPART")])
 
     nav = pagination_row(page, pages, lambda p: f"LOGI|HP|{action}|{p}", "LOGI|NOP")
     if nav:
@@ -421,14 +685,14 @@ async def _render_item_pick(query, context, action: str, row: str, holding) -> N
     available = items_out(holding)
 
     lines = [f"{_ACT_LABEL[action]} — *{holding.name}*",
-             f"_{holding.costume_set or 'Costume'} set · for {holding.event}_", "",
+             f"_for {holding.event}_", "",
              f"Which pieces are being {'returned' if action == 'return' else 'passed on'}?"]
     # 2x2 grid: four pieces is a shape you read at a glance, where four stacked
     # full-width buttons is a list you have to scan.
     btns = [InlineKeyboardButton(
         _picked(_item_button_label(holding, key, label), key in chosen),
         callback_data=f"LOGI|RIT|{action}|{row}|{key}")
-        for key, _hdr, label in ITEM_FIELDS if key in available]
+        for key, _cc, _sc, label, _ca, _sa in ITEM_FIELDS if key in available]
     rows = [btns[i:i + 2] for i in range(0, len(btns), 2)]
     if chosen:
         nxt = "✔️ Add to list" if action == "return" else "➡️ Choose who has it"
@@ -458,14 +722,15 @@ async def _render_transfer_to(query, row: str, holder: str, label: str, event: s
     people = [(n, tag) for n, tag in roster if n != holder]
     chunk, page, pages = paginate(people, page, _ROSTER_PAGE)
 
-    lines = [f"🔁 *Transfer — {holder}*", "",
+    lines = [f"\U0001f501 *Transfer \u2014 {holder}*", "",
              f"Held: {label} (from {event})", "", "Hand it to:"]
-    # Same list, order and 20-a-page as Take Attendance: one member list behaves
-    # the same everywhere. The tag is display only — the ledger is written by
-    # nickname, so that is what the callback carries.
-    btns = [InlineKeyboardButton(f"({tag}) {n}" if tag else n,
-                                 callback_data=f"LOGI|TRS|{row}|{n}") for n, tag in chunk]
-    rows = [btns[i:i + 2] for i in range(0, len(btns), 2)]
+    # Same list, order, tags and dividers as Take Attendance: one member list
+    # behaves the same everywhere. The tag is display only — the ledger is
+    # written by nickname, so that is what the callback carries.
+    rows = tagged_rows(chunk,
+                       lambda n, tg: f"({tg}) {n}" if tg else n,
+                       lambda n: f"LOGI|TRS|{row}|{n}",
+                       "LOGI|NOP")
     nav = pagination_row(page, pages, lambda p: f"LOGI|TRT|{row}|{p}", "LOGI|NOP")
     if nav:
         rows.append(nav)
@@ -482,12 +747,16 @@ async def _render_review(query, context) -> None:
     for _key, it in st["items"].items():
         if action == "issue":
             swap = " _(swap — old row closed)_" if it.get("swap_row") else ""
-            acc = "+".join(lab for k, lab in _ACCESSORIES if it[k])
-            shirt = f"Shirt {it['shirt']}" if it['shirt'] else "no shirt"
-            pants = (f"Pants {pant_size_label(Size(it['pants']))}" if it['pants']
-                     else "no pants")
-            lines.append(f"• {it['nick']} — {it['set']} costume set · {shirt} · {pants}"
-                         f"{' · ' + acc if acc else ''}{swap}")
+            bits = []
+            if it.get("shirt"):
+                bits.append(f"{it['shirt_colour'].lower()} shirt {it['shirt']}")
+            if it.get("pants"):
+                bits.append(f"{it['pant_colour'].lower()} pants "
+                            f"{pant_size_label(Size(it['pants']))}")
+            for key, label in _ACCESSORIES:
+                if it.get(key) not in ("", NONE_SIZE, None):
+                    bits.append(f"{it[key].lower()} {label.lower()}")
+            lines.append(f"• {it['nick']} — " + (", ".join(bits) or "nothing picked") + swap)
         elif action == "return":
             lines.append(f"• {it['name']} — returning {it.get('desc') or it['label']}"
                          + ("" if it.get("full", True) else "  _(partial)_"))
@@ -527,8 +796,9 @@ async def _submit(query, context) -> None:
             if swaps:
                 await asyncio.to_thread(close_rows, swaps)
             entries = [IssueEntry(name=it["nick"], event=it["event"],
-                                  costume_set=it["set"],
+                                  shirt_colour=it["shirt_colour"] if it["shirt"] else NONE_SIZE,
                                   shirt_size=Size(it["shirt"]) if it["shirt"] else None,
+                                  pant_colour=it["pant_colour"] if it["pants"] else NONE_SIZE,
                                   pant_size=Size(it["pants"]) if it["pants"] else None,
                                   waist=it["waist"], wrist=it["wrist"], head=it["head"])
                        for it in items.values()]

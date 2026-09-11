@@ -15,9 +15,12 @@ from utils.ui import paginate, pagination_row, grid_row
 import types
 
 from services.costume_sheets import (Item, Size, add_stock_row,
+                                     costume_size_layout, pant_size_label,
                                      get_running_inventory, get_stock_rows,
                                      get_costume_sizes, set_costume_size, adjust_stock)
+from services.google_sheets import get_member_roster
 from handlers.costume_common import (_read, _edit, _fail, _edit_dashboard, _PAGE,
+                                     short_colour,
                                      _picked,
                                      _compact_size, _emoji_for, _set_icon,
                                      _ITEM_EMOJI, _SECTION_EMOJI, _stock_dot,
@@ -311,48 +314,95 @@ async def _render_stock_leaf(query, item: str, colour: str, size: str,
                        f"Quantity in stock: *{qty}*\n\n_Tap to adjust._", kb)
 
 
-async def _render_sizes(query, page: int) -> None:
+async def _render_sizes(query, page: int, banner: str = "") -> None:
+    """The size sheet as a table, one row per member, every cell tappable.
+
+    Columns come from COSTUME SIZE's own headers, so a colour added there shows
+    up as a column with no code change. Tapping a cell edits that one size —
+    the same move as tapping a quantity in Main Inventory, rather than opening a
+    per-member screen to change one letter.
+    """
     ok, sizes = await _read(get_costume_sizes)
     if not ok:
         return await _fail(query, "costume sizes", sizes)
-    nicks = sorted(sizes)
-    chunk, page, pages = paginate(nicks, page, _PAGE)
+    ok2, layout = await _read(costume_size_layout)
+    shirt_cols = (layout[0] if ok2 else {}) or {}
+    colours = list(shirt_cols)
+
+    # Ordered like Take Attendance — seniors, then juniors, then year category,
+    # then whoever performs most. A size sheet is consulted top-down, and the
+    # people on stage most often are the ones looked up most often.
+    ok3, roster = await _read(get_member_roster, True, True)
+    order = {n.strip().lower(): i for i, (n, _t) in enumerate(roster or [])}
+    nicks = sorted(sizes, key=lambda n: (order.get(n.strip().lower(), 10 ** 6),
+                                         n.lower()))
     filled = sum(1 for n in nicks
                  if any((sizes[n]["shirt"] or {}).values()) or sizes[n]["pants"])
-    lines = [f"📏 *Default Costume Sizes*  _({filled}/{len(nicks)} filled)_", ""]
+    chunk, page, pages = paginate(nicks, page, _INV_PAGE)
+
+    # Headings carry the item icon with the colour, so a column says what it is
+    # without spending the width on "White Shirt Size".
+    ok4, stock = await _read(get_stock_rows)
+    pant_colours = list(dict.fromkeys(c for i, c, _z, _q, _p in (stock if ok4 else [])
+                                      if i.strip().lower() == "pants"))
+    pant_head = ("\U0001f456 " + short_colour(pant_colours[0], pant_colours)
+                 if len(pant_colours) == 1 else "\U0001f456 Pants")
+    grid = [_cells("Name",
+                   *(f"\U0001f455 {short_colour(c, colours)}" for c in colours),
+                   pant_head)]
     for nick in chunk:
         sz = sizes[nick]
-        shirts = " · ".join(f"{st} *{v.value}*" for st, v in (sz["shirt"] or {}).items() if v)
-        p = sz["pants"].value if sz["pants"] else "—"
-        lines.append(f"• {nick} — {shirts or 'no shirt size'} · Pants *{p}*")
-    btns = [InlineKeyboardButton(f"✏️ {n}", callback_data=f"LOGI|SZE|{n}") for n in chunk]
-    kb = [btns[i:i + 2] for i in range(0, len(btns), 2)]
+        row = [InlineKeyboardButton(nick, callback_data=_CELL)]
+        for colour in colours:
+            cur = (sz["shirt"] or {}).get(colour)
+            row.append(InlineKeyboardButton(
+                cur.value if cur else "–",
+                callback_data=f"LOGI|SZC|{nick}|shirt:{colour}|{page}"))
+        row.append(InlineKeyboardButton(
+            _compact_size(pant_size_label(sz["pants"])) if sz["pants"] else "–",
+            callback_data=f"LOGI|SZC|{nick}|pants|{page}"))
+        grid.append(row)
+
     nav = pagination_row(page, pages, lambda p: f"LOGI|SIZE|{p}", _CELL)
     if nav:
-        kb.append(nav)
-    kb.append([InlineKeyboardButton("🔙 Back", callback_data="LOGI|HOME")])
-    await _edit(query, "\n".join(lines), InlineKeyboardMarkup(kb))
+        grid.append(nav)
+    grid.append([InlineKeyboardButton("\U0001f519 Back", callback_data="LOGI|HOME")])
+
+    text = ((f"{banner}\n\n" if banner else "")
+            + f"\U0001f4cf *Costume Size*  _({filled}/{len(nicks)} filled)_\n\n"
+            + "_Tap a size to change it \u00b7 \u2013 means nothing on record._")
+    await _edit(query, text, InlineKeyboardMarkup(grid))
 
 
-async def _render_size_edit(query, nick: str) -> None:
+async def _render_size_cell(query, nick: str, garment: str, page: int) -> None:
+    """Pick one size for one member: the cell you tapped, nothing else."""
     ok, sizes = await _read(get_costume_sizes)
     if not ok:
         return await _fail(query, "costume sizes", sizes)
     sz = sizes.get(nick) or {"shirt": {}, "pants": None}
-    per_set, p = sz.get("shirt") or {}, sz.get("pants")
 
-    # One shirt row per costume set — a member's shirt size differs between them.
-    lines = [f"📏 *{nick}*"]
-    rows = []
-    for st, cur in per_set.items():
-        lines.append(f"👕 {st} Shirt: *{cur.value if cur else '—'}*")
-        rows.append([InlineKeyboardButton(_picked(o.value, o is cur),
-                                          callback_data=f"LOGI|SZ|{nick}|shirt:{st}|{o.value}")
-                     for o in _SIZE_OPTS])
-    lines.append(f"👖 Pants: *{p.value if p else '—'}*")
-    rows.append([InlineKeyboardButton(_picked(o.value, o is p),
-                                      callback_data=f"LOGI|SZ|{nick}|pants|{o.value}")
-                 for o in _SIZE_OPTS])
-    rows.append([InlineKeyboardButton("🔙 Back", callback_data="LOGI|SIZE|0")])
-    await _edit(query, "\n".join(lines) + "\n\nTap a size to change it:",
-                InlineKeyboardMarkup(rows))
+    if garment.startswith("shirt:"):
+        colour = garment.split(":", 1)[1]
+        current = (sz["shirt"] or {}).get(colour)
+        title = f"\U0001f455 {colour} shirt"
+        labels = [(o.value, o.value) for o in _SIZE_OPTS]
+    else:
+        colour, current = "", sz["pants"]
+        title = "\U0001f456 Pants"
+        # Pants are chosen by the label the sheet uses — the height is what
+        # people read off the garment — but stored as the bare size.
+        _ok, rows = await _read(get_stock_rows)
+        labels = [(_compact_size(z), z.split("-")[0].strip())
+                  for i, _c, z, _q, _p in (rows if _ok else [])
+                  if i.strip().lower() == "pants" and z not in ("", "-")] or \
+                 [(o.value, o.value) for o in _SIZE_OPTS]
+
+    btns = [InlineKeyboardButton(_picked(label, current and current.value == value),
+                                 callback_data=f"LOGI|SZ|{nick}|{garment}|{value}|{page}")
+            for label, value in labels]
+    rows_kb = [btns[i:i + 3] for i in range(0, len(btns), 3)]
+    rows_kb.append([InlineKeyboardButton("\U0001f519 Back",
+                                         callback_data=f"LOGI|SIZE|{page}")])
+    shown = current.value if current else "\u2013"
+    await _edit(query, f"\U0001f4cf *{nick}*\n{title}: *{shown}*\n\n"
+                       f"Tap a size to set it:", InlineKeyboardMarkup(rows_kb))

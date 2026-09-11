@@ -202,6 +202,25 @@ def _holding_label_full(h) -> str:
     return " · ".join(bits)
 
 
+def short_colour(colour: str, among) -> str:
+    """`Red` -> `R`, `White` -> `W` — the shortest prefix unique to that item.
+
+    A sized item's row is the colour label plus up to five size buttons, and
+    Telegram gives every button the same width, so the label gets a sixth of the
+    row: "White" clips to "W...". Two colours sharing a first letter grow to two
+    characters rather than becoming ambiguous.
+    """
+    colour = (colour or "").strip()
+    if not colour:
+        return ""
+    others = [c.strip() for c in among if c.strip().lower() != colour.lower()]
+    for n in range(1, len(colour) + 1):
+        prefix = colour[:n]
+        if not any(o[:n].lower() == prefix.lower() for o in others):
+            return prefix.upper() if n == 1 else prefix
+    return colour
+
+
 def _item_button_label(h, key: str, fallback: str) -> str:
     """`Shirt M`, `Pants L - 180`, `Waist Wrap` — the piece AND its size.
 

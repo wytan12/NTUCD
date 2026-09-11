@@ -47,7 +47,7 @@ Callback map:
     HOME · LIST · INV|<page> · RUN|<section>
     SKZ|<item>|<colour>|<size>|<page> · SKADJ|…|<delta>|<page> · ADDI · RBLD
     SKADJ|<set>|<item>|<size>|<delta>
-    SIZE|<page> · SZE|<nick> · SZ|<nick>|<garment>|<size>
+    SIZE|<page> · SZC|<nick>|<garment>|<page> · SZ|…|<size>|<page>
     TRACK · ACT|<action> · EV|<eid> · PF|<eid>|<nick>
     PFN|<eid>|<nick> · PFS|<eid>|<nick>|<row>
     DSH/DPS/DACC/DALL · ADD
@@ -68,9 +68,9 @@ from handlers.costume_common import (_read, _edit, _fail, _clear_stage, _held_by
 from handlers.costume_inventory import (
     _render_list, _render_main_inventory, _render_running_table,
     _render_rebuild_confirm, _render_add_item,
-    _render_stock_leaf, _render_sizes, _render_size_edit)
+    _render_stock_leaf, _render_sizes, _render_size_cell)
 from handlers.costume_tracking import (
-    _render_track, _render_pick_perf, _render_pick_performer, _render_holder_choice,
+    _render_home, _render_pick_perf, _render_pick_performer, _render_holder_choice,
     _render_outstanding_list, _render_outstanding,
     _render_config, _render_holders, _render_transfer_to, _render_review, _submit,
     _render_item_pick, _item_keys,
@@ -84,20 +84,7 @@ __all__ = ["render_logistics_home", "logistics_callback"]
 
 
 async def render_logistics_home(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    text = (
-        "👕 *Costume Tracker*\n\n"
-        "• *Costume Overview* — stock on hand, out, and totals\n"
-        "• *Costume Tracking* — issue / return / transfer\n"
-        "• *Costume Size* — default sizes per member\n\n"
-        "_Live from the Logistics sheet._"
-    )
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📦 Costume Overview", callback_data="LOGI|LIST")],
-        [InlineKeyboardButton("📝 Costume Tracking", callback_data="LOGI|TRACK")],
-        [InlineKeyboardButton("📏 Costume Size", callback_data="LOGI|SIZE|0")],
-        [InlineKeyboardButton("🦅 Exit to Cockpit", callback_data="DASH_VIEW|HOME")],
-    ])
-    await _edit(update.callback_query, text, kb)
+    await _render_home(update.callback_query, context)
 
 
 def _drop_unpaired(draft: dict, ud: dict) -> None:
@@ -135,7 +122,7 @@ async def logistics_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if verb == "NOP":
         return
     if verb == "HOME":
-        return await render_logistics_home(update, context)
+        return await _render_home(query, context)
 
     # --- Costume List / stock ---
     if verb == "LIST":
@@ -177,16 +164,19 @@ async def logistics_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     # --- Costume Size ---
     if verb == "SIZE":
         return await _render_sizes(query, int(parts[2]) if len(parts) > 2 else 0)
-    if verb == "SZE":
-        return await _render_size_edit(query, parts[2])
-    if verb == "SZ":
+    if verb == "SZC":                    # SZC|<nick>|<garment>|<page> — one cell
+        return await _render_size_cell(query, parts[2], parts[3], int(parts[4]))
+    if verb == "SZ":                     # SZ|<nick>|<garment>|<size>|<page>
         nick, garment, val = parts[2], parts[3], parts[4]
-        await _read(set_costume_size, nick, garment, Size(val))
-        return await _render_size_edit(query, nick)
+        page = int(parts[5]) if len(parts) > 5 else 0
+        ok, done = await _read(set_costume_size, nick, garment, Size(val))
+        banner = ("\u2705 _Saved._" if ok and done
+                  else "\u26a0\ufe0f _Couldn't write that \u2014 check COSTUME SIZE._")
+        return await _render_sizes(query, page, banner=banner)
 
     # --- Costume Tracking ---
-    if verb == "TRACK":
-        return await _render_track(query)
+    if verb == "TRACK":                  # kept: older message buttons point here
+        return await _render_home(query, context)
     if verb == "EVP":                    # EVP|<page> — performance list paging
         return await _render_pick_perf(query, int(parts[2]))
     if verb == "PFP":                    # PFP|<event>|<page> — roster paging

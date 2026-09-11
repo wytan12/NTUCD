@@ -30,7 +30,7 @@ from handlers.costume_common import (_read, _edit, _fail, _set_icon, _holding_la
                                      _picked,
                                      _held_by_name, _stage, _stage_for, _clear_stage,
                                      _stage_key, _tag_group, divider_row,
-                                     tagged_rows, _DIVIDER_MIN,
+                                     tagged_rows, short_colour, _DIVIDER_MIN,
                                      _PAGE, _ROSTER_PAGE, _ISSUE_PAGE, _SIZE_OPTS)
 
 
@@ -42,31 +42,42 @@ _ACCESSORIES = (("waist", "Waist Wrap"), ("wrist", "Wrist Wrap"), ("head", "Head
 
 
 
-async def _render_track(query) -> None:
+async def _render_home(query, context=None, banner: str = "") -> None:
+    """The Costume Tracker home — the four daily actions, not a menu of menus.
+
+    Issue / Return / Transfer / Outstanding are the work; Overview and Size are
+    occasional reference. Grouping the four behind a "Costume Tracking" screen
+    charged a tap on every entry, so they sit here, and that screen's stock
+    summary came up with them: it is the context you want BEFORE choosing, not
+    after. Both reads behind it are trust-cached, so a warm open costs no API
+    calls at all.
+    """
     ok, sections = await _read(get_running_inventory)
-    if not ok:
-        return await _fail(query, "the inventory", sections)
     ok2, holdings = await _read(get_open_holdings)
     holdings = holdings if ok2 else []
 
-    lines = ["📝 *Costume Tracking*", ""]
-    for sec in sections:
-        for item in sec.items:
-            if not item.sized:                    # headline items only: shirts + pants
-                continue
-            # The COLOUR is what tells two rows of the same item apart now —
-            # without it this printed "Shirt" twice and read like a duplicate.
-            name = f"{item.color} {item.name}".strip()
-            out = f"  ·  {item.out_all} out" if item.out_all else ""
-            lines.append(f"• {name} — *{item.on_hand_all}* left{out}")
-    lines += ["", f"👤 Holding now: *{len(holdings)}*", "", "What are you doing?"]
+    lines = ([banner, ""] if banner else []) + ["\U0001f455 *Costume Tracker*", ""]
+    if ok:
+        for sec in sections:
+            for item in sec.items:
+                if not item.sized:           # headline items only: shirts + pants
+                    continue
+                out = f"  \u00b7  {item.out_all} out" if item.out_all else ""
+                lines.append(f"\u2022 {item.color} {item.name} \u2014 "
+                             f"*{item.on_hand_all}* left{out}")
+        lines += ["", f"\U0001f464 Holding now: *{len(holdings)}*"]
+    else:
+        lines.append("_Couldn't read the running table just now._")
 
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📤 Issue", callback_data="LOGI|ACT|issue")],
-        [InlineKeyboardButton("↩️ Return", callback_data="LOGI|ACT|return")],
-        [InlineKeyboardButton("🔁 Transfer", callback_data="LOGI|ACT|transfer")],
-        [InlineKeyboardButton("📋 Outstanding", callback_data="LOGI|OUT")],
-        [InlineKeyboardButton("🔙 Back", callback_data="LOGI|HOME")],
+        [InlineKeyboardButton("\U0001f4e4 Issue", callback_data="LOGI|ACT|issue"),
+         InlineKeyboardButton("\u21a9\ufe0f Return", callback_data="LOGI|ACT|return")],
+        [InlineKeyboardButton("\U0001f501 Transfer", callback_data="LOGI|ACT|transfer"),
+         InlineKeyboardButton("\U0001f4cb Outstanding", callback_data="LOGI|OUT")],
+        [InlineKeyboardButton("\U0001f4e6 Costume Overview", callback_data="LOGI|LIST"),
+         InlineKeyboardButton("\U0001f4cf Costume Size", callback_data="LOGI|SIZE|0")],
+        [InlineKeyboardButton("\U0001f989 Exit to Cockpit",
+                              callback_data="DASH_VIEW|HOME")],
     ])
     await _edit(query, "\n".join(lines), kb)
 
@@ -92,7 +103,7 @@ async def _render_outstanding_list(query) -> None:
     done = [p for p in perfs if not p.rows_out]
     if done:
         lines += ["", "_All returned: " + ", ".join(p.performance for p in done) + "_"]
-    rows.append([InlineKeyboardButton("\U0001f519 Back", callback_data="LOGI|TRACK")])
+    rows.append([InlineKeyboardButton("\U0001f519 Back", callback_data="LOGI|HOME")])
     await _edit(query, "\n".join(lines), InlineKeyboardMarkup(rows))
 
 
@@ -157,7 +168,7 @@ async def _render_pick_perf(query, page: int = 0) -> None:
     nav = pagination_row(page, pages, lambda p: f"LOGI|EVP|{p}", "LOGI|NOP")
     if nav:
         rows.append(nav)
-    rows.append([InlineKeyboardButton("\U0001f519 Back", callback_data="LOGI|TRACK")])
+    rows.append([InlineKeyboardButton("\U0001f519 Back", callback_data="LOGI|HOME")])
     text = "\U0001f4e4 *Issue* \u2014 pick a performance:"
     if not live:
         text += "\n\n_No performance has performers marked in PERF TABULATION yet._"
@@ -493,7 +504,7 @@ async def _render_config(query, context, eid: str, nick: str, swap_row=None) -> 
         return out
 
     def item_rows(item, icon, colour_cb, size_cb, picked_colour, picked_size=None,
-                  accessory=False):
+                  accessory=False, label=""):
         """A sized item gets one row per colour, its sizes alongside.
 
         The colour is a LABEL on those rows, not a button: picking a size on the
@@ -509,20 +520,30 @@ async def _render_config(query, context, eid: str, nick: str, swap_row=None) -> 
                        and not d.get("all_colours"))
             if blocked:
                 hidden += 1
-                row.append(InlineKeyboardButton(f"🚫 {icon} {colour}",
+                row.append(InlineKeyboardButton(f"🚫 {colour}",
                                                 callback_data="LOGI|NOP"))
                 continue
             if accessory:
+                # The row is labelled at the left like the shirt and pant rows,
+                # so the icon does not repeat on every colour button.
                 row.append(InlineKeyboardButton(
-                    _picked(f"{icon} {colour}", colour == picked_colour),
+                    _picked(colour, colour == picked_colour),
                     callback_data=f"{colour_cb}|{colour}"))
             else:
-                label = InlineKeyboardButton(f"{icon} {colour}",
+                # Abbreviate only when the row is actually tight. Telegram gives
+                # every button in a row the same width, so a shirt's five sizes
+                # leave the label a sixth of the row and "White" clips — but
+                # pants have three sizes and "Black" fits with room to spare.
+                sizes = opts["sizes"].get(f"{item}|{colour}", [])
+                text = (short_colour(colour, opts["colours"].get(item, []))
+                        if len(sizes) >= 4 else colour)
+                label = InlineKeyboardButton(f"{icon} {text}",
                                              callback_data="LOGI|NOP")
                 rows_kb.append([label] + size_buttons(item, colour, picked_colour,
                                                       picked_size, size_cb))
         if row:
-            rows_kb.append(row)
+            rows_kb.append([InlineKeyboardButton(f"{icon} {label}",
+                                                 callback_data="LOGI|NOP")] + row)
         return hidden
 
     item_rows("Shirt", "👕", None, "LOGI|DSH",
@@ -531,11 +552,11 @@ async def _render_config(query, context, eid: str, nick: str, swap_row=None) -> 
               d["pant_colour"], d["pants"])
     blocked_count = (
         item_rows("Waist Wrap", "🧣", "LOGI|DACC|waist", None,
-                  d["waist"], accessory=True)
+                  d["waist"], accessory=True, label="Waist")
         + item_rows("Wrist Wrap", "🤲", "LOGI|DACC|wrist", None,
-                    d["wrist"], accessory=True)
+                    d["wrist"], accessory=True, label="Wrist")
         + item_rows("Head Band", "🎀", "LOGI|DACC|head", None,
-                    d["head"], accessory=True))
+                    d["head"], accessory=True, label="Head"))
 
     if blocked_count or d.get("all_colours"):
         rows_kb.append([InlineKeyboardButton(
@@ -571,7 +592,7 @@ async def _render_holders(query, context, action: str, page: int = 0,
         return await _edit(query, f"{_ACT_LABEL[action]}\n\n📭 Nobody is holding a costume "
                                   f"right now.",
                            InlineKeyboardMarkup([[InlineKeyboardButton(
-                               "🔙 Back", callback_data="LOGI|TRACK")]]))
+                               "🔙 Back", callback_data="LOGI|HOME")]]))
 
     partial = bool(ud.get("logi_partial")) and action == "return"
     verb = "returning" if action == "return" else "transferring"
@@ -658,7 +679,7 @@ async def _render_holders(query, context, action: str, page: int = 0,
     if staged:
         rows.append([InlineKeyboardButton(f"📋 Review & Submit ({len(staged)})",
                                           callback_data="LOGI|REV")])
-    rows.append([InlineKeyboardButton("🔙 Back", callback_data="LOGI|TRACK")])
+    rows.append([InlineKeyboardButton("🔙 Back", callback_data="LOGI|HOME")])
     await _edit(query, "\n".join(lines), InlineKeyboardMarkup(rows))
 
 
@@ -741,7 +762,7 @@ async def _render_transfer_to(query, row: str, holder: str, label: str, event: s
 async def _render_review(query, context) -> None:
     st = _stage(context.user_data)
     if not st["key"] or not st["items"]:
-        return await _render_track(query)
+        return await _render_home(query)
     action, scope = st["key"]
     lines = [f"📋 *Review* — {_ACT_LABEL[action]}", ""]
     for _key, it in st["items"].items():
@@ -781,7 +802,7 @@ async def _submit(query, context) -> None:
     ud = context.user_data
     st = _stage(ud)
     if not st["key"] or not st["items"]:
-        return await _render_track(query)
+        return await _render_home(query)
     action, _scope = st["key"]
     items = st["items"]
     n = len(items)

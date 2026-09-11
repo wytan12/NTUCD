@@ -1578,7 +1578,32 @@ def get_perf_event_column(thread_id, create=False, event_name=""):
     return target
 
 
-def get_member_roster(trust_cache=False):
+def get_perf_totals(trust_cache=False) -> dict:
+    """`{nickname.lower(): performances attended}` from PERF TABULATION col B.
+
+    Col B is the sheet's own `Tabulation` formula — the same number the
+    attendance rosters sort on — so the bot reads it and never writes it.
+    Members absent from the tab count zero rather than going missing.
+    """
+    out = {}
+    try:
+        values = get_cached_values(tab_name=PERF_TAB_NAME, trust_cache=trust_cache)
+        for r in range(PERF_FIRST_MEMBER_ROW, len(values) + 1):
+            row = values[r - 1]
+            name = (row[PERF_NAME_COL - 1] if len(row) >= PERF_NAME_COL else "").strip()
+            if not name or name.lower() == "member":
+                continue
+            raw = (row[PERF_TOTAL_COL - 1] if len(row) >= PERF_TOTAL_COL else "").strip()
+            try:
+                out[name.lower()] = int(raw)
+            except ValueError:
+                out[name.lower()] = 0
+    except Exception as e:                       # noqa: BLE001 — ordering is cosmetic
+        print(f"[WARN] perf totals lookup failed: {e}")
+    return out
+
+
+def get_member_roster(trust_cache=False, frequent_first=False):
     """`[(nickname, tag), ...]` of active members, ordered like the attendance rosters.
 
     Same source and same shape as the Take Attendance list — active MEMBER INFO
@@ -1586,6 +1611,11 @@ def get_member_roster(trust_cache=False):
     (Graduate -> Exchange -> Postgrad -> Undergrad) then name A-Z. It stops there:
     the attendance rosters break ties on Tabulation, which ranks people by how
     often they train and means nothing when you are picking who took a costume.
+
+    `frequent_first=True` adds the attendance rosters' third term: within a
+    category, whoever has performed most comes first. Worth it where the list is
+    a reference table — the people who perform most are the ones whose sizes are
+    consulted most — and not worth it when picking one known name.
 
     Used by the Costume Tracker's recipient picker, so one member list is
     ordered the same way everywhere in the bot.
@@ -1613,7 +1643,11 @@ def get_member_roster(trust_cache=False):
                 continue
         tag, catkey = tags.get(name.lower(), ("", (9, 0)))
         out.append((catkey, name, tag))
-    out.sort(key=lambda x: (x[0], x[1].lower()))
+    if frequent_first:
+        totals = get_perf_totals(trust_cache=trust_cache)
+        out.sort(key=lambda x: (x[0], -totals.get(x[1].lower(), 0), x[1].lower()))
+    else:
+        out.sort(key=lambda x: (x[0], x[1].lower()))
     return [(name, tag) for _k, name, tag in out]
 
 

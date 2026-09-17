@@ -1429,19 +1429,24 @@ def set_attendance(poll_id, user_id, present: bool):
 def get_attendees_for_date(col):
     """Return [(member_row, name, total, marked_bool), ...].
 
-    Sorted Seniors → Juniors → unknown, then by year category (Graduate →
-    Exchange → Postgrad → Undergrad → unknown), then TOTAL desc,
-    then name A-Z. `name` is display-only here (the toggle UI writes by row) and
-    is prefixed `(SU3) ` / `(JEG) ` etc.
+    **Active members only** — a name whose MEMBER INFO `Status` isn't `Active`
+    or `Join` (i.e. `get_active_members()` wouldn't return them) is skipped, even
+    if their row still has marks in the sheet. Sorted Seniors → Juniors →
+    unknown, then by year category (Graduate → Exchange → Postgrad → Undergrad →
+    unknown), then TOTAL desc, then name A-Z. `name` is display-only here (the
+    toggle UI writes by row) and is prefixed `(SU3) ` / `(JEG) ` etc.
     """
     ws = get_attendance_ws()
     values = ws.get_all_values()
     tags = _member_tag_map()
+    active_names = {m[3].strip().lower() for m in get_active_members()}
     attendees = []
     for r in range(ATT_FIRST_MEMBER_ROW, len(values) + 1):
         row = values[r - 1]
         name = (row[ATT_NAME_COL - 1] if len(row) >= ATT_NAME_COL else "").strip()
         if not name or name.lower() == "member":
+            continue
+        if name.lower() not in active_names:
             continue
         total_raw = (row[ATT_TOTAL_COL - 1] if len(row) >= ATT_TOTAL_COL else "").strip()
         try:
@@ -1654,19 +1659,25 @@ def get_member_roster(trust_cache=False, frequent_first=False):
 def get_perf_attendees(col):
     """[(member_row, name, total, marked_bool), ...] for a PERF event column.
 
-    Members are read from col A (the admin pre-fills the roster). Sorted
-    Seniors → Juniors → unknown, then by year category (Graduate → Exchange →
-    Postgrad → Undergrad → unknown), then Tabulation (col B) desc, then name
-    A-Z, like the regular-training view. `name` is display-only (the toggle UI
-    writes by row) and is prefixed `(SU3) ` / `(JEG) ` etc.
+    Members are read from col A (the admin pre-fills the roster). **Active
+    members only** — same `get_active_members()` filter as the regular branch,
+    so a name whose MEMBER INFO `Status` isn't `Active`/`Join` is skipped even
+    if the admin left them in the roster column. Sorted Seniors → Juniors →
+    unknown, then by year category (Graduate → Exchange → Postgrad → Undergrad →
+    unknown), then Tabulation (col B) desc, then name A-Z, like the
+    regular-training view. `name` is display-only (the toggle UI writes by row)
+    and is prefixed `(SU3) ` / `(JEG) ` etc.
     """
     values = get_cached_values(tab_name=PERF_TAB_NAME)
     tags = _member_tag_map()
+    active_names = {m[3].strip().lower() for m in get_active_members()}
     out = []
     for r in range(PERF_FIRST_MEMBER_ROW, len(values) + 1):
         row = values[r - 1]
         name = (row[PERF_NAME_COL - 1] if len(row) >= PERF_NAME_COL else "").strip()
         if not name or name.lower() == "member":
+            continue
+        if name.lower() not in active_names:
             continue
         total_raw = (row[PERF_TOTAL_COL - 1] if len(row) >= PERF_TOTAL_COL else "").strip()
         try:

@@ -334,8 +334,13 @@ async def _render_sizes(query, page: int, banner: str = "") -> None:
     # people on stage most often are the ones looked up most often.
     ok3, roster = await _read(get_member_roster, True, True)
     order = {n.strip().lower(): i for i, (n, _t) in enumerate(roster or [])}
-    nicks = sorted(sizes, key=lambda n: (order.get(n.strip().lower(), 10 ** 6),
-                                         n.lower()))
+    # Active members only — a `Left` member's size stays on record in the sheet
+    # but the table (like every other member list in the bot) only shows who's
+    # still around to issue a costume to. If the roster read itself failed,
+    # show everyone rather than an empty table for an unrelated Sheets error.
+    pool = [n for n in sizes if n.strip().lower() in order] if ok3 else list(sizes)
+    nicks = sorted(pool, key=lambda n: (order.get(n.strip().lower(), 10 ** 6),
+                                        n.lower()))
     filled = sum(1 for n in nicks
                  if any((sizes[n]["shirt"] or {}).values()) or sizes[n]["pants"])
     chunk, page, pages = paginate(nicks, page, _INV_PAGE)

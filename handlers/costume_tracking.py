@@ -237,6 +237,13 @@ async def _render_pick_performer(query, context, eid: str, banner: str = "",
     ok3, roster = await _read(get_member_roster, True)
     order = {n.strip().lower(): i for i, (n, _tag) in enumerate(roster or [])}
     tags = {n.strip().lower(): tag for n, tag in (roster or [])}
+    # Active members only, same as Take Attendance's performance branch — a
+    # `Left` member marked in PERF TABULATION for a past show shouldn't still
+    # come up to be issued a costume for a new one. Skip the filter if the
+    # roster read itself failed, so an unrelated Sheets error doesn't empty
+    # a show's whole performer list.
+    if ok3:
+        performers = [n for n in performers if n.strip().lower() in order]
     performers = sorted(performers,
                         key=lambda n: (order.get(n.strip().lower(), 10 ** 6), n.lower()))
 

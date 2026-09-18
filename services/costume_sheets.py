@@ -1203,8 +1203,17 @@ def release_items(h, keys, action: str, to: str = "") -> tuple[bool, bool]:
     if closed:
         status = (LedgerStatus.RETURNED.value if action == "returned"
                   else LedgerStatus.TRANSFERRED.value)
-        date_col = "returned date" if action == "returned" else "transferred date"
-        cells = {date_col: stamp, "status": status}
+        # `Returned date` means "this person is clear" — the day nothing of this
+        # row was left with them. A transfer that takes the last piece clears
+        # them just as a return does, so it is stamped in both cases; that is
+        # what lets one column answer "when did this person finish?". `Status`
+        # and `Transferred To` are what say WHERE it went: Transferred + a name
+        # means it is with someone else, not back in the store. The counts are
+        # unaffected — the row was already closed by its Transferred date, and
+        # the receiver's own new row is what keeps the costume counted as out.
+        cells = {"returned date": stamp, "status": status}
+        if action != "returned":
+            cells["transferred date"] = stamp
         if to:
             cells["transferred to"] = to
         for header, value in cells.items():

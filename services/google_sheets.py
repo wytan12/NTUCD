@@ -571,6 +571,39 @@ def get_training_date_columns():
     return out
 
 
+def get_unpolled_training_dates(force=False):
+    """Return [(col_index, date_str, date), ...] for training dates that have NO
+    poll yet and are today or later — the candidates for the early-poll button.
+
+    The inverse of `get_training_date_columns`: a date in row 2 with a blank row 1.
+    Unparseable and past dates are left out (a poll for them makes no sense).
+    Sorted soonest first — the button offers the first one.
+
+    Goes through the smart cache, since the REG date list calls it on every
+    render to label the button. Pass ``force=True`` at the write point, where a
+    stale "not polled yet" would mean posting a duplicate poll.
+    """
+    from datetime import datetime
+
+    values = get_cached_values(tab_name=ATTENDANCE_TAB, force=force)
+    row1 = values[ATT_POLL_ROW - 1] if len(values) >= ATT_POLL_ROW else []
+    row2 = values[ATT_DATE_ROW - 1] if len(values) >= ATT_DATE_ROW else []
+    today = datetime.now(sg_tz).date()
+
+    out = []
+    for col in range(ATT_FIRST_DATE_COL, len(row2) + 1):
+        date_val = (row2[col - 1] or "").strip()
+        poll_val = (row1[col - 1] or "").strip() if col - 1 < len(row1) else ""
+        if not date_val or poll_val:
+            continue
+        d = parse_sheet_date(date_val)
+        if d and d >= today:
+            out.append((col, date_val, d))
+
+    out.sort(key=lambda item: item[2])
+    return out
+
+
 def _member_seniority_map():
     """{nickname.lower(): "S" | "J"} from the MEMBER INFO `Seniority` column
     (header-matched, case-insensitive; falls back to column Q). Anything that

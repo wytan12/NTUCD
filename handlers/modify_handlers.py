@@ -17,7 +17,7 @@ FIELD_ALIAS_MAP = {
     "PERF DATE | TIME": "PERF_DATE",
     "LOCATION": "LOCATION",
     "OTHER INFO": "OTHER_INFO",
-    "REMUNATION": "REMUNERATION",
+    "REMUNERATION": "REMUNERATION",
     "STATUS": "STATUS",
 }
 
@@ -93,8 +93,7 @@ async def initiate_modify_via_dm(
     )
 
     # Build the Internal Registry Preview
-    # Try both spellings — GSheet header may say "REMUNERATION" (correct) or "REMUNATION" (legacy typo)
-    remuneration_val = row.get('REMUNATION') or row.get('REMUNERATION') or '—'
+    remuneration_val = row.get('REMUNERATION') or '—'
     internal_preview = (
         f"🔒 *Internal Registry (Will not be posted):*\n"
         f"🏷️ *Event Type:* {row.get('EVENT TYPE', 'EXT')}\n"
@@ -390,7 +389,7 @@ async def get_modify_field_callback(update: Update, context: ContextTypes.DEFAUL
             "Multiple dates: separate into new lines\n\n"
             "👉 Type your new value below (or type `-` to clear it)"
         )
-    elif field == "REMUNATION":
+    elif field == "REMUNERATION":
         prompt_text = f"💰 Enter the *Remuneration* details for *{current_event_name}*:\n\n👉 Type your new value below:"
     else:
         prompt_text = f"✏️ Enter the new *{field}* for *{current_event_name}*:\n\n👉 Type your new value below:"
@@ -475,7 +474,7 @@ async def apply_modify_value(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     if not has_pending:
         banner_msg = f"ℹ️ *No unsaved edits for [{field}]. The preview matches Google Sheets.*"
-    elif field in ["REMUNATION", "STATUS", "EVENT TYPE"]:
+    elif field in ["REMUNERATION", "STATUS", "EVENT TYPE"]:
         banner_msg = f"🟢 *Staged internal field [{field}]. Tap Confirm & Publish to update Google Sheets.*"
     else:
         banner_msg = f"🟢 *Staged [{field}]. Review the preview, then tap Confirm & Publish when ready.*"

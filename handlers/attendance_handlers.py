@@ -23,7 +23,8 @@ from services.google_sheets import (
     get_training_date_columns, get_attendees_for_date, commit_attendance_column,
     parse_sheet_date, replace_training_date_column,
     get_perf_event_list, get_perf_event_column, get_perf_attendees, commit_perf_column,
-    get_training_poll_ref, is_dashboard_admin,
+    get_training_poll_ref, is_dashboard_admin, get_unpolled_training_dates,
+    get_attendance_ws,
 )
 from services.date_parser import parse_date_line
 from services.alerts import who
@@ -98,15 +99,32 @@ def _build_home_keyboard() -> InlineKeyboardMarkup:
     ])
 
 # 2. Date/Event Selection Lists: Remove Exit, keep Back to Category
-def _build_date_list_keyboard(dates) -> InlineKeyboardMarkup:
+def _build_date_list_keyboard(dates, next_unpolled=None) -> InlineKeyboardMarkup:
     keyboard = [
         [InlineKeyboardButton(f"{label} ({present})", callback_data=f"ATTD_DATE|{col}")]
         for col, label, present in dates
     ]
-    keyboard.append([InlineKeyboardButton("✏️ Modify a Date", callback_data="ATTD_MODMENU")])
+    # The two date actions share one row: [📨 Send 29 Sep Poll | ✏️ Modify Date].
+    actions = []
+    early = _early_poll_button(next_unpolled)
+    if early:
+        actions.append(early)
+    if dates:
+        actions.append(InlineKeyboardButton("✏️ Modify Date", callback_data="ATTD_MODMENU"))
+    if actions:
+        keyboard.append(actions)
     # THIS DATA MUST MATCH THE HANDLER ABOVE
     keyboard.append([InlineKeyboardButton("🔙 Back to Category Menu", callback_data="ATTD_HOME")])
     return InlineKeyboardMarkup(keyboard)
+
+
+def _early_poll_button(next_unpolled):
+    """`📨 Send 29 Sep Poll` for the soonest upcoming date with no poll yet, or
+    None when every upcoming date is already polled (the button is hidden)."""
+    if not next_unpolled:
+        return None
+    col, _label, d = next_unpolled
+    return InlineKeyboardButton(f"📨 Send {d.day} {d:%b} Poll", callback_data=f"ATTD_EARLY|{col}")
 
 def _build_perf_event_list_keyboard(events) -> InlineKeyboardMarkup:
     keyboard = [
@@ -207,20 +225,18 @@ async def _show_reg_dates(query, context, force=False, success_banner: str = "")
     context.user_data["attd_mode"] = "REG"
     dates = _load_dates(context, force=force)
     banner = f"{success_banner}\n\n" if success_banner else ""
+    try:
+        unpolled = get_unpolled_training_dates()
+    except Exception as e:
+        print(f"[ATTD][WARN] could not read unpolled dates: {e}")
+        unpolled = []
+    next_unpolled = unpolled[0] if unpolled else None
 
-    if not dates:
-        await _update_attendance_bubble(
-            query,
-            banner + "📅 *No polled training dates yet.*",
-            InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Category", callback_data="ATTD_HOME")]]),
-            context
-        )
-        return
-
+    title = "📋 *Mark Attendance [REG]*\nSelect a training date:" if dates else "📅 *No polled training dates yet.*"
     await _update_attendance_bubble(
         query,
-        banner + "📋 *Mark Attendance [REG]*\nSelect a training date:",
-        _build_date_list_keyboard(dates),
+        banner + title,
+        _build_date_list_keyboard(dates, next_unpolled),
         context
     )
 
@@ -416,6 +432,38 @@ async def attendance_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             "✅ = present | ⬜ = absent",
             reply_markup=_render_attendance_keyboard(context),
             parse_mode="Markdown",
+        )
+        return
+
+    # --- Send a training poll EARLY, ahead of the 09:00 auto-poll window ---
+    # Posting stores poll_id|message_id in row 1, which is exactly what
+    # auto_poll_check checks — so the date then counts as polled and the
+    # scheduled poll never fires for it. One tap posts — no confirm screen; the
+    # outcome shows as a banner on the date list.
+    if data.startswith("ATTD_EARLY|"):
+        from handlers.poll_handlers import post_training_poll
+        _clear(context)
+        _clear_moddate(context)
+        col = int(data.split("|")[1])
+        # Re-check at the write point: the auto-poll (or another admin) may have
+        # posted this date since the button was drawn — never double-post. Live
+        # read (force), not the cache.
+        label = next((l for c, l, _d in get_unpolled_training_dates(force=True) if c == col), None)
+        if not label:
+            await _show_reg_dates(query, context, force=True,
+                                  success_banner="ℹ️ *That date already has a poll — nothing was sent.*")
+            return
+        await query.edit_message_text(f"⏳ Posting the poll for {label}...")
+        try:
+            await post_training_poll(context.bot, get_attendance_ws(), col, label, parse_sheet_date(label))
+        except Exception as e:
+            print(f"[ERROR] attendance: early poll failed - {who(update)}: {e}")
+            await _show_reg_dates(query, context, force=True,
+                                  success_banner=f"❌ *Failed to post the poll:* `{e}`")
+            return
+        await _show_reg_dates(
+            query, context, force=True,
+            success_banner=f"🟢 *Poll for {label} posted to the Voting topic.* The auto-poll will skip this date.",
         )
         return
 

@@ -67,13 +67,13 @@ async def publish_performance_summary(
     if old_msg_id and str(old_msg_id).isdigit():
         try:
             await bot.unpin_chat_message(chat_id=chat_id, message_id=int(old_msg_id))
-        except BadRequest:
-            pass
+        except BadRequest as exc:
+            print(f"[WARNING] Failed to unpin old summary {old_msg_id} in thread {thread_id}: {exc}")
         try:
             await bot.delete_message(chat_id=chat_id, message_id=int(old_msg_id))
             print(f"[INFO] Cleaned up old summary message ID: {old_msg_id} from thread {thread_id}")
-        except BadRequest:
-            pass
+        except BadRequest as exc:
+            print(f"[WARNING] Failed to delete old summary {old_msg_id} in thread {thread_id}: {exc}")
 
     # 3. Post the fresh summary
     template = build_performance_summary(

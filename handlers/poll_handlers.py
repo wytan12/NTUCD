@@ -118,6 +118,43 @@ async def send_interest_poll(bot, chat_id, thread_id, sheet):
         return None
 
 
+async def post_training_poll(bot, ws, col: int, date_str: str, d):
+    """Post the training poll for one date column, store `poll_id|message_id` in
+    row 1, and schedule the 10pm night-before reminder.
+
+    Shared by the daily `auto_poll_check` and the admin's early "Send Poll Now"
+    button. Once row 1 holds the ref, `auto_poll_check` treats the date as
+    already polled and never posts it again — so an early poll replaces the
+    scheduled one rather than duplicating it.
+    """
+    from datetime import timedelta, time as dtime
+    from config import CHAT_ID, ATTENDANCE_TAB, ATT_POLL_ROW
+    from handlers.admin_handlers import send_reminder
+
+    msg = await bot.send_poll(
+        chat_id=CHAT_ID,
+        question=f"🥁 Training on {date_str} — you in? 🔥",
+        options=["✅ Count me in!", "❌ Can't make it"],  # option 0 must stay = "yes"
+        is_anonymous=False,
+        message_thread_id=TOPIC_VOTING_ID,
+    )
+    active_polls[msg.poll.id] = "training"
+    yes_voters.clear()
+    ws.update_cell(ATT_POLL_ROW, col, format_training_poll_ref(msg.poll.id, msg.message_id))
+    invalidate_sheet_cache(tab_name=ATTENDANCE_TAB)
+    print(f"[POLL] Sent poll for {date_str} (col {col}), id {msg.poll.id}")
+
+    now = datetime.now(sg_tz)
+    reminder_dt = sg_tz.localize(datetime.combine(d - timedelta(days=1), dtime(22, 0)))
+    delay = (reminder_dt - now).total_seconds()
+    if delay > 0:
+        threading.Timer(
+            delay,
+            lambda: asyncio.run(send_reminder(bot, CHAT_ID, TOPIC_VOTING_ID))
+        ).start()
+    return msg
+
+
 async def auto_poll_check(context: ContextTypes.DEFAULT_TYPE):
     """Daily job (runs 09:00 SGT). Sends a training poll for any date defined in
     the Attendance sheet that is **4 days away or sooner** (but not in the past)
@@ -129,9 +166,11 @@ async def auto_poll_check(context: ContextTypes.DEFAULT_TYPE):
     from 7 days to 1 day away — is still caught on the next daily run instead of
     being skipped forever. The poll id is written into that date's column (row 1),
     and a reminder is scheduled for 10pm the day before training.
+
+    A date an admin already polled early via "Send Poll Now" has a row-1 ref, so
+    it counts as already polled and is skipped here.
     """
-    from datetime import datetime, timedelta, time as dtime
-    from config import (CHAT_ID, ATTENDANCE_TAB, ATT_FIRST_DATE_COL, ATT_POLL_ROW, ATT_DATE_ROW)
+    from config import ATT_FIRST_DATE_COL, ATT_POLL_ROW, ATT_DATE_ROW
     from services.google_sheets import get_attendance_ws, parse_sheet_date
 
     try:
@@ -161,27 +200,6 @@ async def auto_poll_check(context: ContextTypes.DEFAULT_TYPE):
             continue
 
         try:
-            msg = await context.bot.send_poll(
-                chat_id=CHAT_ID,
-                question=f"🥁 Training on {date_str} — you in? 🔥",
-                options=["✅ Count me in!", "❌ Can't make it"],  # option 0 must stay = "yes"
-                is_anonymous=False,
-                message_thread_id=TOPIC_VOTING_ID,
-            )
-            active_polls[msg.poll.id] = "training"
-            yes_voters.clear()
-            ws.update_cell(ATT_POLL_ROW, col, format_training_poll_ref(msg.poll.id, msg.message_id))
-            invalidate_sheet_cache(tab_name=ATTENDANCE_TAB)
-            print(f"[AUTO-POLL] Sent poll for {date_str} (col {col}), id {msg.poll.id}")
-
-            from handlers.admin_handlers import send_reminder
-            now = datetime.now(sg_tz)
-            reminder_dt = sg_tz.localize(datetime.combine(d - timedelta(days=1), dtime(22, 0)))
-            delay = (reminder_dt - now).total_seconds()
-            if delay > 0:
-                threading.Timer(
-                    delay,
-                    lambda: asyncio.run(send_reminder(context.bot, CHAT_ID, TOPIC_VOTING_ID))
-                ).start()
+            await post_training_poll(context.bot, ws, col, date_str, d)
         except Exception as e:
             print(f"[AUTO-POLL][ERROR] Failed to send poll for {date_str}: {e}")

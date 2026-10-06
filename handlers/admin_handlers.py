@@ -463,10 +463,15 @@ async def execute_manual_remind_dispatch(update: Update, context: ContextTypes.D
 #     context.user_data["master_dash_id"] = update.effective_message.message_id
 #     await initiate_remind_portal_via_dm(update, context)
 
-async def send_reminder(bot, chat_id, thread_id):
-    """Send training reminder"""
+async def send_reminder(bot, chat_id, thread_id, date_label=None):
+    """Send training reminder. `date_label` names the training explicitly — a
+    multi-date poll schedules one reminder per date, so "the right-most polled
+    column" would name the wrong day for all but the last."""
     from utils.helpers import get_next_tuesday
     try:
+        if date_label:
+            await _send_training_reminder(bot, chat_id, thread_id, date_label)
+            return
         from config import ATT_FIRST_DATE_COL, ATT_POLL_ROW, ATT_DATE_ROW
         from services.google_sheets import get_attendance_ws as _get_ws, parse_sheet_date
 
@@ -487,19 +492,23 @@ async def send_reminder(bot, chat_id, thread_id):
             parsed = parse_sheet_date(date_label)
             pretty_date = parsed.strftime("%d %b %Y") if parsed else (date_label or pretty_date)
 
-        await bot.send_message(
-            chat_id=chat_id,
-            message_thread_id=thread_id,
-            text=(
-                f"🥁 *DRUM ROLL, PLEASE…* 🥁\n\n"
-                f"Training is *TOMORROW* — {pretty_date}! 🔥\n"
-                f"💧 Bring water · 💪 bring energy · 🎶 bring the vibes\n\n"
-                f"See you there, drummers! 👋😄"
-            ),
-            parse_mode="Markdown",
-        )
+        await _send_training_reminder(bot, chat_id, thread_id, pretty_date)
     except Exception as e:
         print(f"[ERROR] Failed to send reminder: {e}")
+
+
+async def _send_training_reminder(bot, chat_id, thread_id, pretty_date):
+    await bot.send_message(
+        chat_id=chat_id,
+        message_thread_id=thread_id,
+        text=(
+            f"🥁 *DRUM ROLL, PLEASE…* 🥁\n\n"
+            f"Training is *TOMORROW* — {pretty_date}! 🔥\n"
+            f"💧 Bring water · 💪 bring energy · 🎶 bring the vibes\n\n"
+            f"See you there, drummers! 👋😄"
+        ),
+        parse_mode="Markdown",
+    )
 
 async def handle_remind_escrow_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Processes fast-track status override confirmations directly inside the single-bubble matrix."""

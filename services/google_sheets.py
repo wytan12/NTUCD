@@ -573,11 +573,11 @@ def get_training_date_columns():
 
 def get_unpolled_training_dates(force=False):
     """Return [(col_index, date_str, date), ...] for training dates that have NO
-    poll yet and are today or later — the candidates for the early-poll button.
+    poll yet and are today or later — the dates the early-poll picker offers.
 
     The inverse of `get_training_date_columns`: a date in row 2 with a blank row 1.
     Unparseable and past dates are left out (a poll for them makes no sense).
-    Sorted soonest first — the button offers the first one.
+    Sorted soonest first.
 
     Goes through the smart cache, since the REG date list calls it on every
     render to label the button. Pass ``force=True`` at the write point, where a
@@ -791,9 +791,14 @@ def get_training_attendance_rates():
     return out
 
 
-def format_training_poll_ref(poll_id, message_id=None):
+def format_training_poll_ref(poll_id, message_id=None, option=None):
+    """Row-1 poll ref: `poll_id|message_id`, or `poll_id|message_id|option` for
+    one date of a multi-date poll — `option` is that date's answer index. A ref
+    without an option is a single-date yes/no poll, where option 0 = "yes"."""
     if not poll_id:
         return ""
+    if option is not None:
+        return f"{poll_id}|{message_id or ''}|{option}"
     return f"{poll_id}|{message_id}" if message_id else str(poll_id)
 
 
@@ -801,9 +806,26 @@ def _parse_training_poll_ref(value):
     text = str(value or "").strip()
     if not text:
         return "", None
-    poll_id, _, message_id = text.partition("|")
-    message_id = message_id.strip()
+    poll_id, _, rest = text.partition("|")
+    message_id = rest.partition("|")[0].strip()
     return poll_id.strip(), int(message_id) if message_id.isdigit() else None
+
+
+def _parse_training_poll_option(value):
+    """The answer index that means "present" for this column: the stored
+    option for a multi-date poll, else 0 (the "yes" of a yes/no poll)."""
+    parts = str(value or "").strip().split("|")
+    if len(parts) >= 3 and parts[2].strip().isdigit():
+        return int(parts[2].strip())
+    return 0
+
+
+def count_training_poll_columns(poll_id) -> int:
+    """How many date columns share `poll_id` (more than 1 = a multi-date poll)."""
+    if not poll_id:
+        return 0
+    row1 = get_attendance_ws().row_values(ATT_POLL_ROW)
+    return sum(1 for v in row1 if _parse_training_poll_ref(v)[0] == str(poll_id))
 
 
 def get_training_poll_ref(col):
@@ -1426,37 +1448,50 @@ def _find_member_row(ws, nickname):
     return None
 
 
-def set_attendance(poll_id, user_id, present: bool):
+def set_attendance(poll_id, user_id, selected_options):
     """Mark/clear attendance for a poll voter.
 
-    Maps user_id → nickname (MEMBER INFO tab), finds the date column whose row-1
-    poll id matches, locates (or creates) the member's row, and writes "1"/"".
-    Column B (the count) is left entirely to the sheet's own formula — the bot
-    never writes it. Returns (ok: bool, info: str).
+    Maps user_id → nickname (MEMBER INFO tab), finds EVERY date column whose
+    row-1 poll id matches — one for a yes/no poll, several for a multi-date
+    poll — locates (or creates) the member's row, and writes "1"/"" into each
+    column according to whether that column's option was picked. All cells go
+    up in one batch_update. A retracted vote arrives as an empty selection and
+    clears every column. Column B (the count) is left to the sheet's formula.
+    Returns (ok: bool, info: str).
     """
+    from gspread.utils import rowcol_to_a1
+
     nickname = get_nickname_by_user_id(user_id)
     if not nickname:
         return False, f"user {user_id} not in MEMBER INFO tab"
 
     ws = get_attendance_ws()
     row1 = ws.row_values(ATT_POLL_ROW)
-    col = next((i for i, v in enumerate(row1, start=1)
-                if _parse_training_poll_ref(v)[0] == str(poll_id)), None)
-    if not col:
+    cols = {i: _parse_training_poll_option(v) for i, v in enumerate(row1, start=1)
+            if _parse_training_poll_ref(v)[0] == str(poll_id)}
+    if not cols:
         return False, f"poll id {poll_id} not found in sheet"
+
+    selected = set(selected_options or [])
+    marks = {col: opt in selected for col, opt in cols.items()}
 
     member_row = _find_member_row(ws, nickname)
     if not member_row:
-        if not present:
+        if not any(marks.values()):
             return True, f"{nickname} (no row, nothing to clear)"
         member_row = len(ws.col_values(ATT_NAME_COL)) + 1
         if member_row < ATT_FIRST_MEMBER_ROW:
             member_row = ATT_FIRST_MEMBER_ROW
         ws.update_cell(member_row, ATT_NAME_COL, nickname)
 
-    ws.update_cell(member_row, col, "1" if present else "")
+    ws.batch_update(
+        [{"range": rowcol_to_a1(member_row, col), "values": [["1" if present else ""]]}
+         for col, present in marks.items()],
+        value_input_option="USER_ENTERED",
+    )
     invalidate_sheet_cache(tab_name=ATTENDANCE_TAB)
-    return True, nickname
+    present_cols = sorted(c for c, p in marks.items() if p)
+    return True, f"{nickname} present in cols {present_cols or 'none'}"
 
 
 def get_attendees_for_date(col):

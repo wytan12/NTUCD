@@ -27,16 +27,19 @@ async def handle_poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
         active_polls[poll_id] = "training"
 
     if poll_type == "training":
-        present = 0 in selected_options  # option 0 = "Yes"
+        # set_attendance maps the picked options onto every date column the
+        # poll covers: option 0 = "yes" on a single-date poll, one option per
+        # date on a multi-date poll (the index is stored in each column's ref).
         try:
-            ok, info = set_attendance(poll_id, user.id, present)
+            ok, info = set_attendance(poll_id, user.id, selected_options)
             if ok:
-                print(f"[ATTD] {info}: {'present' if present else 'absent'} (poll {poll_id})")
+                print(f"[ATTD] {info} (poll {poll_id}, options {list(selected_options)})")
             else:
                 print(f"[ATTD][WARN] {info}")
         except Exception as e:
             print(f"[ATTD][ERROR] Failed to record attendance: {e}")
 
+        present = 0 in selected_options
         if present:
             yes_voters.add(user.id)
         else:
@@ -118,40 +121,83 @@ async def send_interest_poll(bot, chat_id, thread_id, sheet):
         return None
 
 
-async def post_training_poll(bot, ws, col: int, date_str: str, d):
-    """Post the training poll for one date column, store `poll_id|message_id` in
-    row 1, and schedule the 10pm night-before reminder.
+# Telegram allows at most 10 poll options; one is the "can't make any" escape.
+MAX_POLL_DATES = 9
+CANT_MAKE_ANY_OPTION = "❌ Can't make any"
 
-    Shared by the daily `auto_poll_check` and the admin's early "Send Poll Now"
-    button. Once row 1 holds the ref, `auto_poll_check` treats the date as
-    already polled and never posts it again — so an early poll replaces the
-    scheduled one rather than duplicating it.
+
+async def post_training_poll(bot, ws, col: int, date_str: str, d):
+    """Single-date wrapper over `post_training_polls` (used by auto_poll_check)."""
+    return await post_training_polls(bot, ws, [(col, date_str, d)])
+
+
+async def post_training_polls(bot, ws, items):
+    """Post ONE training poll covering `items` = [(col, date_str, date), ...],
+    store its ref in row 1 of every covered column, and schedule a 10pm
+    night-before reminder per date.
+
+    - One date → the usual yes/no poll; option 0 must stay "yes".
+    - Several → a multi-answer poll with one option per date (soonest first)
+      plus a trailing "can't make any". Each column's ref carries its option
+      index (`poll_id|message_id|n`), so a vote for 2 Oct and 8 Oct marks "1"
+      in exactly those two columns.
+
+    Once row 1 holds a ref, `auto_poll_check` treats the date as polled and
+    never posts it again — so an early poll replaces the scheduled one.
     """
     from datetime import timedelta, time as dtime
+    from gspread.utils import rowcol_to_a1
     from config import CHAT_ID, ATTENDANCE_TAB, ATT_POLL_ROW
     from handlers.admin_handlers import send_reminder
 
-    msg = await bot.send_poll(
-        chat_id=CHAT_ID,
-        question=f"🥁 Training on {date_str} — you in? 🔥",
-        options=["✅ Count me in!", "❌ Can't make it"],  # option 0 must stay = "yes"
-        is_anonymous=False,
-        message_thread_id=TOPIC_VOTING_ID,
-    )
+    items = sorted(items, key=lambda it: it[2])
+    if not items:
+        raise ValueError("no dates to poll")
+    if len(items) > MAX_POLL_DATES:
+        raise ValueError(f"a poll can cover at most {MAX_POLL_DATES} dates")
+
+    if len(items) == 1:
+        _col, date_str, _d = items[0]
+        msg = await bot.send_poll(
+            chat_id=CHAT_ID,
+            question=f"🥁 Training on {date_str}, you in? 🔥",
+            options=["✅ Let's drum!", "🙅 Not this time"],  # option 0 must stay = "yes"
+            is_anonymous=False,
+            message_thread_id=TOPIC_VOTING_ID,
+        )
+        refs = [(items[0][0], format_training_poll_ref(msg.poll.id, msg.message_id))]
+    else:
+        msg = await bot.send_poll(
+            chat_id=CHAT_ID,
+            question="🥁 Which training dates can we count you in for? Pick all that apply 🔥",
+            options=[f"✅ {d:%a} {d.day} {d:%b}" for _c, _s, d in items] + [CANT_MAKE_ANY_OPTION],
+            allows_multiple_answers=True,
+            is_anonymous=False,
+            message_thread_id=TOPIC_VOTING_ID,
+        )
+        refs = [(col, format_training_poll_ref(msg.poll.id, msg.message_id, option=i))
+                for i, (col, _s, _d) in enumerate(items)]
+
     active_polls[msg.poll.id] = "training"
     yes_voters.clear()
-    ws.update_cell(ATT_POLL_ROW, col, format_training_poll_ref(msg.poll.id, msg.message_id))
+    ws.batch_update(
+        [{"range": rowcol_to_a1(ATT_POLL_ROW, col), "values": [[ref]]} for col, ref in refs],
+        value_input_option="USER_ENTERED",
+    )
     invalidate_sheet_cache(tab_name=ATTENDANCE_TAB)
-    print(f"[POLL] Sent poll for {date_str} (col {col}), id {msg.poll.id}")
+    labels = ", ".join(s for _c, s, _d in items)
+    print(f"[POLL] Sent poll for {labels} (cols {[c for c, _r in refs]}), id {msg.poll.id}")
 
     now = datetime.now(sg_tz)
-    reminder_dt = sg_tz.localize(datetime.combine(d - timedelta(days=1), dtime(22, 0)))
-    delay = (reminder_dt - now).total_seconds()
-    if delay > 0:
-        threading.Timer(
-            delay,
-            lambda: asyncio.run(send_reminder(bot, CHAT_ID, TOPIC_VOTING_ID))
-        ).start()
+    for _col, date_str, d in items:
+        reminder_dt = sg_tz.localize(datetime.combine(d - timedelta(days=1), dtime(22, 0)))
+        delay = (reminder_dt - now).total_seconds()
+        if delay > 0:
+            pretty = d.strftime("%d %b %Y")
+            threading.Timer(
+                delay,
+                lambda pretty=pretty: asyncio.run(send_reminder(bot, CHAT_ID, TOPIC_VOTING_ID, pretty))
+            ).start()
     return msg
 
 

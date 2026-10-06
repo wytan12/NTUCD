@@ -741,8 +741,9 @@ def get_training_attendance_rates():
     member. `seniority` is "S", "J", or None.
 
     `polls` is the number of polled regular-training date columns — columns with
-    BOTH a poll id (row 1) and a date (row 2), i.e. the same set the attendance
-    menus list. It is identical for every member.
+    BOTH a poll id (row 1) and a date (row 2), **excluding Saturdays** — so it
+    matches the col B formula, which counts weekday dates only. It is identical
+    for every member.
 
     `attended` is the member's col B `Tabulation` value (the sheet's own COUNTIF
     of "1"s across the date region); an active member with no row in the
@@ -766,8 +767,12 @@ def get_training_attendance_rates():
     for col in range(ATT_FIRST_DATE_COL, max(len(row1), len(row2)) + 1):
         poll_val = row1[col - 1].strip() if col - 1 < len(row1) else ""
         date_val = row2[col - 1].strip() if col - 1 < len(row2) else ""
-        if poll_val and date_val:
-            polls += 1
+        if not (poll_val and date_val):
+            continue
+        d = parse_sheet_date(date_val)
+        if d and d.weekday() == 5:  # Saturday — not counted as a training
+            continue
+        polls += 1
 
     totals = {}
     for r in range(ATT_FIRST_MEMBER_ROW, len(values) + 1):
